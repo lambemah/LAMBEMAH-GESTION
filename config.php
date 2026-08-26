@@ -1,29 +1,25 @@
 <?php
 
-$mysql_url = getenv('MYSQL_URL');
+$host = getenv('MYSQLHOST');
+$port = getenv('MYSQLPORT');
+$user = getenv('MYSQLUSER');
+$password = getenv('MYSQLPASSWORD');
+$database = getenv('MYSQLDATABASE');
 
-if (!$mysql_url) {
-    die("Erreur : MYSQL_URL n'est pas disponible sur Railway.");
+if (!$host || !$port || !$user || !$database) {
+    die("Erreur : variables MySQL Railway manquantes.");
 }
-
-$url = parse_url($mysql_url);
-
-$host = $url['host'] ?? '';
-$port = isset($url['port']) ? (int)$url['port'] : 3306;
-$user = $url['user'] ?? '';
-$password = $url['pass'] ?? '';
-$database = isset($url['path']) ? ltrim($url['path'], '/') : '';
 
 $conn = new mysqli(
     $host,
     $user,
     $password,
     $database,
-    $port
+    (int)$port
 );
 
 if ($conn->connect_error) {
-    die("Erreur de connexion à MySQL : " . $conn->connect_error);
+    die("Erreur de connexion à la base de données : " . $conn->connect_error);
 }
 
 $conn->set_charset("utf8mb4");
