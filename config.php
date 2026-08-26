@@ -7,7 +7,7 @@ $password = getenv('MYSQLPASSWORD');
 $database = getenv('MYSQLDATABASE');
 
 if (!$host || !$port || !$user || !$database) {
-    die("Erreur : variables MySQL Railway manquantes.");
+    die("Erreur : les variables MySQL Railway sont manquantes.");
 }
 
 $conn = new mysqli(
@@ -19,7 +19,7 @@ $conn = new mysqli(
 );
 
 if ($conn->connect_error) {
-    die("Erreur de connexion à la base de données : " . $conn->connect_error);
+    die("Erreur de connexion MySQL : " . $conn->connect_error);
 }
 
 $conn->set_charset("utf8mb4");
