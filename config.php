@@ -1,19 +1,25 @@
 <?php
 
-// Connexion MySQL Railway
-$host = getenv('MYSQLHOST');
-$user = getenv('MYSQLUSER');
-$password = getenv('MYSQLPASSWORD');
-$database = getenv('MYSQLDATABASE');
-$port = getenv('MYSQLPORT');
+// Connexion MySQL Railway avec MYSQL_URL
+$mysql_url = getenv('MYSQL_URL');
 
-// Vérification des variables
-if (!$host || !$user || !$database || !$port) {
-    die("Erreur : les variables MySQL Railway sont incomplètes.");
+if (!$mysql_url) {
+    die("Erreur : MYSQL_URL n'est pas disponible.");
 }
 
-// Le port doit obligatoirement être un entier pour mysqli
-$port = (int) $port;
+// Analyse de l'URL MySQL
+$url = parse_url($mysql_url);
+
+$host = $url['host'] ?? '';
+$port = $url['port'] ?? 3306;
+$user = $url['user'] ?? '';
+$password = $url['pass'] ?? '';
+$database = isset($url['path']) ? ltrim($url['path'], '/') : '';
+
+// Vérification
+if (!$host || !$user || !$database) {
+    die("Erreur : les informations MySQL sont incomplètes.");
+}
 
 // Connexion
 $conn = new mysqli(
@@ -21,12 +27,12 @@ $conn = new mysqli(
     $user,
     $password,
     $database,
-    $port
+    (int)$port
 );
 
 // Vérification de la connexion
 if ($conn->connect_error) {
-    die("Erreur de connexion à la base de données : " . $conn->connect_error);
+    die("Erreur de connexion MySQL : " . $conn->connect_error);
 }
 
 // Encodage UTF-8
