@@ -10,16 +10,15 @@ if (!isset($_SESSION["id"])) {
 
 $message = "";
 
-if ($_SERVER["REQUEST_METHOD"] === "POST") {
+/* AJOUT DEPENSE */
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_depense"])) {
 
     $libelle = trim($_POST["libelle"] ?? "");
-    $montant = (float)($_POST["montant"] ?? 0);
+    $montant = floatval($_POST["montant"] ?? 0);
     $description = trim($_POST["description"] ?? "");
 
     if ($libelle === "" || $montant <= 0) {
-
-        $message = "Veuillez remplir correctement les champs.";
-
+        $message = "Veuillez remplir correctement les informations.";
     } else {
 
         $stmt = $conn->prepare(
@@ -27,57 +26,43 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
              VALUES (?, ?, ?)"
         );
 
-        if ($stmt) {
+        $stmt->bind_param("sds", $libelle, $montant, $description);
 
-            $stmt->bind_param(
-                "sds",
-                $libelle,
-                $montant,
-                $description
-            );
-
-            if ($stmt->execute()) {
-
-                $stmt->close();
-
-                header("Location: depenses.php?success=1");
-                exit;
-
-            } else {
-
-                $message = "Erreur lors de l'enregistrement.";
-                $stmt->close();
-            }
-
+        if ($stmt->execute()) {
+            $message = "Dépense enregistrée avec succès.";
         } else {
-
-            $message = "Erreur SQL : " . $conn->error;
+            $message = "Erreur lors de l'enregistrement.";
         }
+
+        $stmt->close();
     }
 }
 
-$depenses = $conn->query(
-    "SELECT *
-     FROM depenses
-     ORDER BY date_depense DESC"
+/* SUPPRESSION */
+if (isset($_GET["supprimer"])) {
+
+    $id = intval($_GET["supprimer"]);
+
+    $stmt = $conn->prepare("DELETE FROM depenses WHERE id=?");
+    $stmt->bind_param("i",$id);
+    $stmt->execute();
+    $stmt->close();
+
+    header("Location: depenses.php");
+    exit;
+}
+
+/* TOTAL */
+$result_total = $conn->query(
+    "SELECT COALESCE(SUM(montant),0) AS total FROM depenses"
 );
 
-$total = 0;
-$liste = [];
+$total_depenses = $result_total->fetch_assoc()["total"];
 
-if ($depenses) {
-
-    while ($d = $depenses->fetch_assoc()) {
-
-        $total += (float)$d["montant"];
-
-        $liste[] = $d;
-    }
-}
-
-function gnf($montant) {
-    return number_format((float)$montant, 0, ',', ' ') . " GNF";
-}
+/* LISTE */
+$depenses = $conn->query(
+    "SELECT * FROM depenses ORDER BY date_depense DESC"
+);
 ?>
 
 <!DOCTYPE html>
@@ -86,263 +71,154 @@ function gnf($montant) {
 <head>
 
 <meta charset="UTF-8">
-
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
 <title>Dépenses - LAMBEMAH GESTION</title>
 
 <style>
 
-* {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
+*{box-sizing:border-box}
+
+body{
+margin:0;
+font-family:Arial,sans-serif;
+background:#f4f8fc;
+color:#172033;
 }
 
-body {
-    font-family: Arial, sans-serif;
-    background: #f4faff;
-    color: #263746;
+.header{
+background:linear-gradient(135deg,#071b3a,#0d4f8b);
+color:white;
+padding:22px 18px;
+border-radius:0 0 25px 25px;
 }
 
-.sidebar {
-    position: fixed;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 245px;
-    background: linear-gradient(180deg, #55c7ed, #168dcc);
-    padding: 25px 15px;
-    color: white;
+.header h1{
+margin:0;
+font-size:25px;
 }
 
-.brand {
-    padding: 5px 12px 28px;
+.header p{
+margin:7px 0 0;
+opacity:.85;
 }
 
-.brand-icon {
-    font-size: 30px;
+.container{
+max-width:1100px;
+margin:auto;
+padding:20px;
 }
 
-.brand h2 {
-    font-size: 21px;
-    margin-top: 5px;
+.card{
+background:white;
+border-radius:18px;
+padding:20px;
+margin-bottom:20px;
+box-shadow:0 8px 25px rgba(0,0,0,.06);
 }
 
-.brand span {
-    font-size: 11px;
-    opacity: .85;
+.total{
+background:linear-gradient(135deg,#dc3545,#8b1020);
+color:white;
+padding:22px;
+border-radius:18px;
+margin-bottom:20px;
 }
 
-.nav {
-    list-style: none;
+.total strong{
+display:block;
+font-size:30px;
+margin-top:8px;
 }
 
-.nav li {
-    margin: 5px 0;
+input,textarea{
+width:100%;
+padding:13px;
+border:1px solid #dce4ed;
+border-radius:10px;
+margin-top:7px;
+margin-bottom:15px;
+font-size:15px;
 }
 
-.nav a {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 13px 14px;
-    color: white;
-    text-decoration: none;
-    border-radius: 12px;
-    font-size: 14px;
+textarea{
+min-height:80px;
 }
 
-.nav a:hover,
-.nav a.active {
-    background: rgba(255,255,255,.22);
+button{
+width:100%;
+border:0;
+padding:14px;
+border-radius:10px;
+background:#0d6efd;
+color:white;
+font-weight:bold;
 }
 
-.sidebar-bottom {
-    position: absolute;
-    bottom: 20px;
-    left: 15px;
-    right: 15px;
+.message{
+padding:13px;
+background:#e8f5e9;
+color:#176b2c;
+border-radius:10px;
+margin-bottom:15px;
 }
 
-.logout {
-    display: block;
-    color: white;
-    text-decoration: none;
-    padding: 13px;
-    border-radius: 12px;
-    background: rgba(255,255,255,.12);
+table{
+width:100%;
+border-collapse:collapse;
 }
 
-.main {
-    margin-left: 245px;
-    padding: 30px;
+th,td{
+padding:13px 8px;
+border-bottom:1px solid #edf1f5;
+text-align:left;
 }
 
-.header {
-    margin-bottom: 25px;
+th{
+color:#0b4b80;
 }
 
-.header h1 {
-    font-size: 28px;
+.amount{
+color:#d62828;
+font-weight:bold;
 }
 
-.header p {
-    margin-top: 7px;
-    color: #81919a;
+.delete{
+color:#d62828;
+text-decoration:none;
+font-weight:bold;
 }
 
-.grid {
-    display: grid;
-    grid-template-columns: 350px 1fr;
-    gap: 20px;
+.back{
+display:inline-block;
+margin-bottom:15px;
+color:#0d6efd;
+text-decoration:none;
+font-weight:bold;
 }
 
-.card {
-    background: white;
-    border-radius: 18px;
-    padding: 23px;
-    box-shadow: 0 5px 20px #dfeef4;
+@media(max-width:650px){
+
+.container{
+padding:12px;
 }
 
-.card h2 {
-    font-size: 18px;
-    margin-bottom: 20px;
+.card{
+padding:15px;
 }
 
-.total {
-    background: #eaf8ff;
-    border-radius: 14px;
-    padding: 18px;
-    margin-bottom: 20px;
+table{
+font-size:13px;
 }
 
-.total small {
-    color: #81919a;
+th:nth-child(3),
+td:nth-child(3){
+display:none;
 }
 
-.total strong {
-    display: block;
-    margin-top: 7px;
-    font-size: 24px;
-    color: #168dcc;
+.total strong{
+font-size:25px;
 }
-
-.group {
-    margin-bottom: 15px;
-}
-
-.group label {
-    display: block;
-    font-size: 12px;
-    font-weight: bold;
-    margin-bottom: 7px;
-}
-
-.group input {
-    width: 100%;
-    padding: 12px;
-    border: 1px solid #dce8ed;
-    border-radius: 10px;
-    font-size: 14px;
-}
-
-button {
-    width: 100%;
-    padding: 13px;
-    border: none;
-    border-radius: 10px;
-    background: #168dcc;
-    color: white;
-    font-weight: bold;
-    cursor: pointer;
-}
-
-button:hover {
-    background: #0d78ad;
-}
-
-.message {
-    background: #fff0f0;
-    color: #c62828;
-    padding: 12px;
-    border-radius: 10px;
-    margin-bottom: 15px;
-}
-
-.success {
-    background: #eafaf1;
-    color: #16834d;
-    padding: 12px;
-    border-radius: 10px;
-    margin-bottom: 15px;
-}
-
-.table-container {
-    overflow-x: auto;
-}
-
-table {
-    width: 100%;
-    border-collapse: collapse;
-    min-width: 600px;
-}
-
-th,
-td {
-    padding: 13px;
-    text-align: left;
-    border-bottom: 1px solid #edf3f6;
-    font-size: 13px;
-}
-
-th {
-    color: #89969d;
-    font-size: 11px;
-}
-
-.amount {
-    color: #d77b19;
-    font-weight: bold;
-}
-
-@media(max-width: 850px) {
-
-    .grid {
-        grid-template-columns: 1fr;
-    }
-
-}
-
-@media(max-width: 700px) {
-
-    .sidebar {
-        position: relative;
-        width: 100%;
-        padding: 15px;
-    }
-
-    .nav {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-    }
-
-    .nav a {
-        flex-direction: column;
-        justify-content: center;
-        font-size: 10px;
-        gap: 5px;
-    }
-
-    .sidebar-bottom {
-        position: static;
-        margin-top: 10px;
-    }
-
-    .main {
-        margin-left: 0;
-        padding: 18px;
-    }
 
 }
 
@@ -352,59 +228,32 @@ th {
 
 <body>
 
-<aside class="sidebar">
-
-<div class="brand">
-
-<div class="brand-icon">💼</div>
-
-<h2>LAMBEMAH</h2>
-
-<span>GESTION • PRESTATION</span>
-
-</div>
-
-<ul class="nav">
-
-<li><a href="index.php">🏠 Accueil</a></li>
-<li><a href="produits.php">📦 Produits</a></li>
-<li><a href="ventes.php">💰 Ventes</a></li>
-<li><a href="prestations.php">🖨️ Prestations</a></li>
-<li><a href="depenses.php" class="active">💸 Dépenses</a></li>
-<li><a href="statistiques.php">📊 Statistiques</a></li>
-<li><a href="utilisateurs.php">👥 Utilisateurs</a></li>
-
-</ul>
-
-<div class="sidebar-bottom">
-
-<a class="logout" href="index.php?logout=1">
-🚪 Déconnexion
-</a>
-
-</div>
-
-</aside>
-
-<main class="main">
-
 <div class="header">
 
-<h1>Dépenses 💸</h1>
-
-<p>
-Suivez les dépenses de votre activité.
-</p>
+<h1>💸 Dépenses</h1>
+<p>LAMBEMAH GESTION</p>
 
 </div>
 
-<div class="grid">
+<div class="container">
+
+<a class="back" href="index.php">← Retour à l'accueil</a>
+
+<div class="total">
+
+<small>Total des dépenses</small>
+
+<strong>
+<?= number_format($total_depenses,0,","," ") ?> FG
+</strong>
+
+</div>
 
 <div class="card">
 
 <h2>➕ Nouvelle dépense</h2>
 
-<?php if ($message): ?>
+<?php if($message): ?>
 
 <div class="message">
 <?= htmlspecialchars($message) ?>
@@ -412,57 +261,31 @@ Suivez les dépenses de votre activité.
 
 <?php endif; ?>
 
-<?php if (isset($_GET["success"])): ?>
-
-<div class="success">
-✅ Dépense enregistrée avec succès.
-</div>
-
-<?php endif; ?>
-
 <form method="POST">
-
-<div class="group">
 
 <label>Libellé</label>
 
-<input
-type="text"
+<input type="text"
 name="libelle"
-placeholder="Ex : Achat de T-shirts"
-required
->
+placeholder="Ex : Achat DTF A4"
+required>
 
-</div>
+<label>Montant (FG)</label>
 
-<div class="group">
-
-<label>Montant (GNF)</label>
-
-<input
-type="number"
+<input type="number"
 name="montant"
+placeholder="Ex : 5000"
 min="1"
-placeholder="Ex : 150000"
-required
->
-
-</div>
-
-<div class="group">
+required>
 
 <label>Description</label>
 
-<input
-type="text"
+<textarea
 name="description"
-placeholder="Ex : Achat fournisseur"
->
+placeholder="Détails de la dépense..."></textarea>
 
-</div>
-
-<button type="submit">
-💸 Enregistrer la dépense
+<button name="ajouter_depense">
+Enregistrer la dépense
 </button>
 
 </form>
@@ -471,38 +294,23 @@ placeholder="Ex : Achat fournisseur"
 
 <div class="card">
 
-<div class="total">
+<h2>📋 Historique</h2>
 
-<small>Total des dépenses</small>
-
-<strong>
-<?= gnf($total) ?>
-</strong>
-
-</div>
-
-<h2>📋 Historique des dépenses</h2>
-
-<div class="table-container">
+<div style="overflow-x:auto">
 
 <table>
 
-<thead>
-
 <tr>
-<th>LIBELLÉ</th>
-<th>MONTANT</th>
-<th>DESCRIPTION</th>
-<th>DATE</th>
+
+<th>Libellé</th>
+<th>Montant</th>
+<th>Description</th>
+<th>Date</th>
+<th></th>
+
 </tr>
 
-</thead>
-
-<tbody>
-
-<?php if (count($liste) > 0): ?>
-
-<?php foreach ($liste as $d): ?>
+<?php while($d=$depenses->fetch_assoc()): ?>
 
 <tr>
 
@@ -511,32 +319,30 @@ placeholder="Ex : Achat fournisseur"
 </td>
 
 <td class="amount">
-<?= gnf($d["montant"]) ?>
+<?= number_format($d["montant"],0,","," ") ?> FG
 </td>
 
 <td>
-<?= htmlspecialchars($d["description"] ?: "—") ?>
+<?= htmlspecialchars($d["description"]) ?>
 </td>
 
 <td>
-<?= date("d/m/Y H:i", strtotime($d["date_depense"])) ?>
+<?= date("d/m/Y H:i",strtotime($d["date_depense"])) ?>
+</td>
+
+<td>
+
+<a class="delete"
+href="?supprimer=<?= $d["id"] ?>"
+onclick="return confirm('Supprimer cette dépense ?')">
+✕
+</a>
+
 </td>
 
 </tr>
 
-<?php endforeach; ?>
-
-<?php else: ?>
-
-<tr>
-<td colspan="4">
-Aucune dépense enregistrée.
-</td>
-</tr>
-
-<?php endif; ?>
-
-</tbody>
+<?php endwhile; ?>
 
 </table>
 
@@ -546,8 +352,7 @@ Aucune dépense enregistrée.
 
 </div>
 
-</main>
-
 </body>
+
 </html>
 ```
