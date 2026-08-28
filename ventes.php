@@ -1,4 +1,3 @@
-```php
 <?php
 session_start();
 require_once "config.php";
@@ -16,6 +15,11 @@ $type = "";
 
 /* =========================================================
    AJOUT D'UNE VENTE
+   - vérifie le produit
+   - vérifie le stock
+   - enregistre la vente
+   - diminue le stock
+   - ajoute automatiquement la vente aux recettes
 ========================================================= */
 
 if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_vente"])) {
@@ -42,9 +46,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_vente"])) {
 
     } else {
 
-        /* Récupération du produit et du stock actuel */
+        /* Récupération du produit */
         $stmt = $conn->prepare(
-            "SELECT id, nom, stock
+            "SELECT id, nom, prix_vente, stock
              FROM produits
              WHERE id = ?
              LIMIT 1"
@@ -78,20 +82,28 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_vente"])) {
 
             /*
              * Transaction :
-             * 1. Enregistrer la vente
-             * 2. Diminuer le stock
+             * 1. vente
+             * 2. diminution stock
+             * 3. recette
              */
 
             $conn->begin_transaction();
 
             try {
 
-                /* Enregistrement de la vente */
+                /* -----------------------------------------
+                   1. ENREGISTRER LA VENTE
+                ----------------------------------------- */
+
                 $stmt = $conn->prepare(
                     "INSERT INTO ventes
                     (produit_id, quantite, prix_unitaire, montant, description)
                     VALUES (?, ?, ?, ?, ?)"
                 );
+
+                if (!$stmt) {
+                    throw new Exception("Erreur préparation vente.");
+                }
 
                 $stmt->bind_param(
                     "iidds",
@@ -108,13 +120,21 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_vente"])) {
 
                 $stmt->close();
 
-                /* Diminution du stock */
+
+                /* -----------------------------------------
+                   2. DIMINUER LE STOCK
+                ----------------------------------------- */
+
                 $stmt = $conn->prepare(
                     "UPDATE produits
                      SET stock = stock - ?
                      WHERE id = ?
                      AND stock >= ?"
                 );
+
+                if (!$stmt) {
+                    throw new Exception("Erreur préparation stock.");
+                }
 
                 $stmt->bind_param(
                     "iii",
@@ -129,14 +149,61 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_vente"])) {
 
                 $stmt->close();
 
+
+                /* -----------------------------------------
+                   3. AJOUTER AUTOMATIQUEMENT LA RECETTE
+                ----------------------------------------- */
+
+                $libelle_recette =
+                    "Vente - " . $produit["nom"];
+
+                $description_recette =
+                    "Vente de "
+                    . $quantite
+                    . " unité(s) de "
+                    . $produit["nom"]
+                    . "."
+                    . ($description !== ""
+                        ? " Note : " . $description
+                        : "");
+
+                $stmt = $conn->prepare(
+                    "INSERT INTO recettes
+                    (libelle, montant, description)
+                    VALUES (?, ?, ?)"
+                );
+
+                if (!$stmt) {
+                    throw new Exception("Erreur préparation recette.");
+                }
+
+                $stmt->bind_param(
+                    "sds",
+                    $libelle_recette,
+                    $montant,
+                    $description_recette
+                );
+
+                if (!$stmt->execute()) {
+                    throw new Exception("Impossible d'enregistrer la recette.");
+                }
+
+                $stmt->close();
+
+
+                /* -----------------------------------------
+                   VALIDATION
+                ----------------------------------------- */
+
                 $conn->commit();
 
                 $message =
-                    "Vente enregistrée avec succès : "
-                    . htmlspecialchars($produit["nom"])
+                    "✅ Vente enregistrée : "
+                    . $produit["nom"]
                     . " × "
                     . $quantite
-                    . ".";
+                    . " — "
+                    . argent($montant);
 
                 $type = "success";
 
@@ -145,7 +212,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_vente"])) {
                 $conn->rollback();
 
                 $message =
-                    "La vente n'a pas pu être enregistrée.";
+                    "❌ La vente n'a pas pu être enregistrée.";
 
                 $type = "error";
             }
@@ -155,7 +222,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_vente"])) {
 
 
 /* =========================================================
-   STATISTIQUES
+   STATISTIQUES DES VENTES
 ========================================================= */
 
 $total_ventes = 0;
@@ -195,7 +262,7 @@ $produits = $conn->query(
 
 
 /* =========================================================
-   HISTORIQUE DES VENTES
+   HISTORIQUE
 ========================================================= */
 
 $ventes = $conn->query(
@@ -217,7 +284,7 @@ $ventes = $conn->query(
 
 
 /* =========================================================
-   FORMATAGE ARGENT
+   FORMAT ARGENT
 ========================================================= */
 
 function argent($montant)
@@ -233,6 +300,7 @@ function argent($montant)
 ?>
 
 <!DOCTYPE html>
+
 <html lang="fr">
 
 <head>
@@ -240,8 +308,9 @@ function argent($montant)
 <meta charset="UTF-8">
 
 <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
+name="viewport"
+content="width=device-width, initial-scale=1.0"
+
 >
 
 <title>Ventes - LAMBEMAH GESTION</title>
@@ -290,7 +359,6 @@ body {
     display: flex;
     align-items: center;
     gap: 11px;
-
     padding: 5px 10px 25px;
 }
 
@@ -406,7 +474,7 @@ body {
 
 
 /* =========================================================
-   CONTENU
+   MAIN
 ========================================================= */
 
 .main {
@@ -429,7 +497,6 @@ body {
 .header p {
     color: #8998a5;
     font-size: 12px;
-
     margin-top: 5px;
 }
 
@@ -451,13 +518,12 @@ body {
         );
 
     color: white;
-
     font-weight: bold;
 }
 
 
 /* =========================================================
-   CARTES STATISTIQUES
+   STATISTIQUES
 ========================================================= */
 
 .cards {
@@ -498,7 +564,7 @@ body {
 
 
 /* =========================================================
-   CONTENU PRINCIPAL
+   CONTENU
 ========================================================= */
 
 .content {
@@ -524,7 +590,6 @@ body {
 
 .card h2 {
     font-size: 17px;
-
     margin-bottom: 6px;
 }
 
@@ -894,490 +959,463 @@ textarea {
 
 <body>
 
-
-<!-- =========================================================
-     MENU
-========================================================= -->
-
 <aside class="sidebar">
 
-    <div class="brand">
+```
+<div class="brand">
 
-        <div class="brand-icon">
-            💼
-        </div>
+    <div class="brand-icon">
+        💼
+    </div>
 
-        <div>
+    <div>
 
-            <h2>LAMBEMAH</h2>
+        <h2>LAMBEMAH</h2>
 
-            <span>
-                GESTION • PRESTATION
-            </span>
-
-        </div>
+        <span>
+            GESTION • PRESTATION
+        </span>
 
     </div>
 
-
-    <ul class="nav">
-
-        <li>
-            <a href="index.php">
-                🏠 <span>Accueil</span>
-            </a>
-        </li>
-
-        <li>
-            <a href="produits.php">
-                📦 <span>Produits</span>
-            </a>
-        </li>
-
-        <li>
-            <a href="ventes.php" class="active">
-                💰 <span>Ventes</span>
-            </a>
-        </li>
-
-        <li>
-            <a href="prestations.php">
-                🖨️ <span>Prestations</span>
-            </a>
-        </li>
-
-        <li>
-            <a href="recettes.php">
-                💵 <span>Recettes</span>
-            </a>
-        </li>
-
-        <li>
-            <a href="depenses.php">
-                💸 <span>Dépenses</span>
-            </a>
-        </li>
-
-        <li>
-            <a href="statistiques.php">
-                📊 <span>Statistiques</span>
-            </a>
-        </li>
-
-        <?php if ($role === "admin"): ?>
-
-        <li>
-            <a href="utilisateurs.php">
-                👥 <span>Équipe</span>
-            </a>
-        </li>
-
-        <?php endif; ?>
-
-    </ul>
+</div>
 
 
-    <div class="sidebar-bottom">
+<ul class="nav">
 
-        <div class="profile">
-
-            <strong>
-                <?= htmlspecialchars($nom) ?>
-            </strong>
-
-            <span>
-                <?= htmlspecialchars($role) ?>
-            </span>
-
-        </div>
-
-
-        <a
-            class="logout"
-            href="index.php?logout=1"
-        >
-            🚪 Déconnexion
+    <li>
+        <a href="index.php">
+            🏠 <span>Accueil</span>
         </a>
+    </li>
 
-    </div>
+    <li>
+        <a href="produits.php">
+            📦 <span>Produits</span>
+        </a>
+    </li>
 
-</aside>
+    <li>
+        <a href="ventes.php" class="active">
+            💰 <span>Ventes</span>
+        </a>
+    </li>
 
+    <li>
+        <a href="prestations.php">
+            🖨️ <span>Prestations</span>
+        </a>
+    </li>
 
-<!-- =========================================================
-     CONTENU
-========================================================= -->
+    <li>
+        <a href="recettes.php">
+            💵 <span>Recettes</span>
+        </a>
+    </li>
 
-<main class="main">
+    <li>
+        <a href="depenses.php">
+            💸 <span>Dépenses</span>
+        </a>
+    </li>
 
+    <li>
+        <a href="statistiques.php">
+            📊 <span>Statistiques</span>
+        </a>
+    </li>
 
-    <div class="header">
+    <?php if ($role === "admin"): ?>
 
-        <div>
-
-            <h1>
-                💰 Ventes
-            </h1>
-
-            <p>
-                Enregistre tes ventes et suis ton chiffre d'affaires.
-            </p>
-
-        </div>
-
-
-        <div class="avatar">
-
-            <?= strtoupper(
-                substr($nom, 0, 1)
-            ) ?>
-
-        </div>
-
-    </div>
-
-
-    <?php if ($message !== ""): ?>
-
-        <div class="message <?= htmlspecialchars($type) ?>">
-
-            <?= $message ?>
-
-        </div>
+    <li>
+        <a href="utilisateurs.php">
+            👥 <span>Équipe</span>
+        </a>
+    </li>
 
     <?php endif; ?>
 
-
-    <!-- =====================================================
-         STATISTIQUES
-    ====================================================== -->
-
-    <div class="cards">
-
-        <div class="stat">
-
-            <small>
-                TOTAL DES VENTES
-            </small>
-
-            <h2>
-                <?= argent($total_ventes) ?>
-            </h2>
-
-        </div>
+</ul>
 
 
-        <div class="stat">
+<div class="sidebar-bottom">
 
-            <small>
-                NOMBRE DE VENTES
-            </small>
+    <div class="profile">
 
-            <h2>
-                <?= $nombre_ventes ?>
-            </h2>
+        <strong>
+            <?= htmlspecialchars($nom) ?>
+        </strong>
 
-        </div>
+        <span>
+            <?= htmlspecialchars($role) ?>
+        </span>
 
     </div>
 
 
-    <div class="content">
+    <a
+        class="logout"
+        href="index.php?logout=1"
+    >
+        🚪 Déconnexion
+    </a>
+
+</div>
+```
+
+</aside>
+
+<main class="main">
+
+```
+<div class="header">
+
+    <div>
+
+        <h1>
+            💰 Ventes
+        </h1>
+
+        <p>
+            Enregistre tes ventes et suis ton chiffre d'affaires.
+        </p>
+
+    </div>
+
+    <div class="avatar">
+
+        <?= strtoupper(
+            substr($nom, 0, 1)
+        ) ?>
+
+    </div>
+
+</div>
 
 
-        <!-- =================================================
-             NOUVELLE VENTE
-        ================================================== -->
+<?php if ($message !== ""): ?>
 
-        <div class="card">
+    <div class="message <?= htmlspecialchars($type) ?>">
 
-            <h2>
-                ➕ Nouvelle vente
-            </h2>
+        <?= htmlspecialchars($message) ?>
 
-            <p>
-                Choisis un produit disponible dans ton stock.
-            </p>
+    </div>
+
+<?php endif; ?>
 
 
-            <form method="POST">
+<div class="cards">
 
-                <input
-                    type="hidden"
-                    name="ajouter_vente"
-                    value="1"
+    <div class="stat">
+
+        <small>
+            TOTAL DES VENTES
+        </small>
+
+        <h2>
+            <?= argent($total_ventes) ?>
+        </h2>
+
+    </div>
+
+
+    <div class="stat">
+
+        <small>
+            NOMBRE DE VENTES
+        </small>
+
+        <h2>
+            <?= $nombre_ventes ?>
+        </h2>
+
+    </div>
+
+</div>
+
+
+<div class="content">
+
+
+    <div class="card">
+
+        <h2>
+            ➕ Nouvelle vente
+        </h2>
+
+        <p>
+            Choisis un produit disponible dans ton stock.
+        </p>
+
+
+        <form method="POST">
+
+            <input
+                type="hidden"
+                name="ajouter_vente"
+                value="1"
+            >
+
+
+            <div class="group">
+
+                <label>
+                    PRODUIT
+                </label>
+
+                <select
+                    name="produit_id"
+                    id="produit_id"
+                    required
+                    onchange="produitSelectionne()"
                 >
 
-
-                <div class="group">
-
-                    <label>
-                        PRODUIT
-                    </label>
-
-                    <select
-                        name="produit_id"
-                        id="produit_id"
-                        required
-                        onchange="produitSelectionne()"
-                    >
-
-                        <option value="">
-                            -- Sélectionner un produit --
-                        </option>
+                    <option value="">
+                        -- Sélectionner un produit --
+                    </option>
 
 
-                        <?php if ($produits && $produits->num_rows > 0): ?>
+                    <?php if ($produits && $produits->num_rows > 0): ?>
 
-                            <?php while ($p = $produits->fetch_assoc()): ?>
+                        <?php while ($p = $produits->fetch_assoc()): ?>
 
-                                <option
-                                    value="<?= (int)$p["id"] ?>"
-                                    data-prix="<?= htmlspecialchars($p["prix_vente"]) ?>"
-                                    data-stock="<?= (int)$p["stock"] ?>"
-                                >
+                            <option
+                                value="<?= (int)$p["id"] ?>"
+                                data-prix="<?= htmlspecialchars($p["prix_vente"]) ?>"
+                                data-stock="<?= (int)$p["stock"] ?>"
+                            >
 
-                                    <?= htmlspecialchars($p["nom"]) ?>
+                                <?= htmlspecialchars($p["nom"]) ?>
 
-                                    <?php if (!empty($p["categorie"])): ?>
-                                        — <?= htmlspecialchars($p["categorie"]) ?>
-                                    <?php endif; ?>
+                                <?php if (!empty($p["categorie"])): ?>
 
-                                    — Stock :
-                                    <?= (int)$p["stock"] ?>
+                                    — <?= htmlspecialchars($p["categorie"]) ?>
 
-                                </option>
+                                <?php endif; ?>
 
-                            <?php endwhile; ?>
+                                — Stock :
+                                <?= (int)$p["stock"] ?>
 
-                        <?php else: ?>
-
-                            <option value="" disabled>
-                                Aucun produit disponible
                             </option>
 
-                        <?php endif; ?>
+                        <?php endwhile; ?>
 
-                    </select>
+                    <?php else: ?>
 
+                        <option value="" disabled>
+                            Aucun produit disponible
+                        </option>
 
-                    <div
-                        class="product-info"
-                        id="productInfo"
-                    ></div>
+                    <?php endif; ?>
 
-                </div>
-
-
-                <div class="group">
-
-                    <label>
-                        QUANTITÉ
-                    </label>
-
-                    <input
-                        type="number"
-                        name="quantite"
-                        id="quantite"
-                        value="1"
-                        min="1"
-                        required
-                        oninput="calculer()"
-                    >
-
-                </div>
+                </select>
 
 
-                <div class="group">
+                <div
+                    class="product-info"
+                    id="productInfo"
+                ></div>
 
-                    <label>
-                        PRIX UNITAIRE
-                    </label>
-
-                    <input
-                        type="number"
-                        name="prix_unitaire"
-                        id="prix_unitaire"
-                        min="1"
-                        step="500"
-                        required
-                        oninput="calculer()"
-                    >
-
-                </div>
+            </div>
 
 
-                <div class="group">
+            <div class="group">
 
-                    <label>
-                        MONTANT TOTAL
-                    </label>
+                <label>
+                    QUANTITÉ
+                </label>
 
-                    <div
-                        class="montant"
-                        id="montant"
-                    >
-                        0 FG
-                    </div>
-
-                </div>
-
-
-                <div class="group">
-
-                    <label>
-                        DESCRIPTION
-                    </label>
-
-                    <textarea
-                        name="description"
-                        placeholder="Ex : T-shirts vendus au client..."
-                    ></textarea>
-
-                </div>
-
-
-                <button
-                    type="submit"
-                    class="btn-primary"
+                <input
+                    type="number"
+                    name="quantite"
+                    id="quantite"
+                    value="1"
+                    min="1"
+                    required
+                    oninput="calculer()"
                 >
-                    💾 Enregistrer la vente
-                </button>
 
-            </form>
-
-        </div>
+            </div>
 
 
-        <!-- =================================================
-             HISTORIQUE
-        ================================================== -->
+            <div class="group">
 
-        <div class="card">
+                <label>
+                    PRIX UNITAIRE
+                </label>
 
-            <h2>
-                📋 Historique des ventes
-            </h2>
+                <input
+                    type="number"
+                    name="prix_unitaire"
+                    id="prix_unitaire"
+                    min="1"
+                    step="500"
+                    required
+                    oninput="calculer()"
+                >
 
-            <p>
-                Les 50 dernières ventes enregistrées.
-            </p>
-
-
-            <?php if ($ventes && $ventes->num_rows > 0): ?>
-
-
-                <?php while ($v = $ventes->fetch_assoc()): ?>
-
-                    <div class="sale">
+            </div>
 
 
-                        <div class="sale-top">
+            <div class="group">
 
-                            <div class="sale-product">
+                <label>
+                    MONTANT TOTAL
+                </label>
 
-                                👕
-                                <?= htmlspecialchars(
-                                    $v["produit_nom"]
-                                    ?? "Produit supprimé"
-                                ) ?>
+                <div
+                    class="montant"
+                    id="montant"
+                >
+                    0 FG
+                </div>
 
-                            </div>
-
-
-                            <div class="sale-amount">
-
-                                <?= argent(
-                                    $v["montant"]
-                                ) ?>
-
-                            </div>
-
-                        </div>
+            </div>
 
 
-                        <div class="sale-info">
+            <div class="group">
 
-                            <span class="badge">
+                <label>
+                    DESCRIPTION
+                </label>
 
-                                Quantité :
-                                <?= (int)$v["quantite"] ?>
+                <textarea
+                    name="description"
+                    placeholder="Ex : T-shirts vendus au client..."
+                ></textarea>
 
-                            </span>
-
-
-                            <span class="badge">
-
-                                Prix unitaire :
-                                <?= argent(
-                                    $v["prix_unitaire"]
-                                ) ?>
-
-                            </span>
-
-                        </div>
+            </div>
 
 
-                        <?php if (!empty($v["description"])): ?>
+            <button
+                type="submit"
+                class="btn-primary"
+            >
+                💾 Enregistrer la vente
+            </button>
 
-                            <div class="sale-description">
+        </form>
 
-                                <?= htmlspecialchars(
-                                    $v["description"]
-                                ) ?>
-
-                            </div>
-
-                        <?php endif; ?>
+    </div>
 
 
-                        <div class="sale-date">
+    <div class="card">
 
-                            📅
+        <h2>
+            📋 Historique des ventes
+        </h2>
+
+        <p>
+            Les 50 dernières ventes enregistrées.
+        </p>
+
+
+        <?php if ($ventes && $ventes->num_rows > 0): ?>
+
+            <?php while ($v = $ventes->fetch_assoc()): ?>
+
+                <div class="sale">
+
+                    <div class="sale-top">
+
+                        <div class="sale-product">
+
+                            👕
                             <?= htmlspecialchars(
-                                $v["date_vente"]
+                                $v["produit_nom"]
+                                ?? "Produit supprimé"
+                            ) ?>
+
+                        </div>
+
+                        <div class="sale-amount">
+
+                            <?= argent(
+                                $v["montant"]
                             ) ?>
 
                         </div>
 
                     </div>
 
-                <?php endwhile; ?>
+
+                    <div class="sale-info">
+
+                        <span class="badge">
+
+                            Quantité :
+                            <?= (int)$v["quantite"] ?>
+
+                        </span>
 
 
-            <?php else: ?>
+                        <span class="badge">
 
-                <div
-                    style="
-                    text-align:center;
-                    padding:35px 10px;
-                    color:#8998a5;
-                    font-size:12px;
-                    "
-                >
+                            Prix unitaire :
+                            <?= argent(
+                                $v["prix_unitaire"]
+                            ) ?>
 
-                    🛒
+                        </span>
 
-                    <br><br>
+                    </div>
 
-                    Aucune vente enregistrée pour le moment.
+
+                    <?php if (!empty($v["description"])): ?>
+
+                        <div class="sale-description">
+
+                            <?= htmlspecialchars(
+                                $v["description"]
+                            ) ?>
+
+                        </div>
+
+                    <?php endif; ?>
+
+
+                    <div class="sale-date">
+
+                        📅
+                        <?= htmlspecialchars(
+                            $v["date_vente"]
+                        ) ?>
+
+                    </div>
 
                 </div>
 
-            <?php endif; ?>
+            <?php endwhile; ?>
 
-        </div>
+        <?php else: ?>
+
+            <div
+                style="
+                text-align:center;
+                padding:35px 10px;
+                color:#8998a5;
+                font-size:12px;
+                "
+            >
+
+                🛒
+
+                <br><br>
+
+                Aucune vente enregistrée pour le moment.
+
+            </div>
+
+        <?php endif; ?>
 
     </div>
 
+</div>
+```
+
 </main>
 
-
 <script>
-
-/* =========================================================
-   SÉLECTION PRODUIT
-========================================================= */
 
 function produitSelectionne() {
 
@@ -1401,7 +1439,8 @@ function produitSelectionne() {
 
     if (prix) {
 
-        prixInput.value = parseFloat(prix);
+        prixInput.value =
+            parseFloat(prix);
 
         info.style.display = "block";
 
@@ -1423,10 +1462,6 @@ function produitSelectionne() {
     }
 }
 
-
-/* =========================================================
-   CALCUL DU MONTANT
-========================================================= */
 
 function calculer() {
 
@@ -1452,4 +1487,3 @@ function calculer() {
 
 </body>
 </html>
-```
