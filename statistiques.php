@@ -8,324 +8,192 @@ if (!isset($_SESSION["id"])) {
     exit;
 }
 
-function somme($conn, $table, $colonne) {
+/* RECETTES */
+$r = $conn->query(
+    "SELECT COALESCE(SUM(montant),0) AS total FROM recettes"
+);
+$total_recettes = $r->fetch_assoc()["total"];
 
-    $sql = "SELECT COALESCE(SUM($colonne), 0) AS total FROM $table";
+/* DEPENSES */
+$d = $conn->query(
+    "SELECT COALESCE(SUM(montant),0) AS total FROM depenses"
+);
+$total_depenses = $d->fetch_assoc()["total"];
 
-    $result = $conn->query($sql);
-
-    if ($result) {
-        $row = $result->fetch_assoc();
-        return (float)$row["total"];
-    }
-
-    return 0;
-}
-
-function compter($conn, $table) {
-
-    $result = $conn->query(
-        "SELECT COUNT(*) AS total FROM $table"
-    );
-
-    if ($result) {
-        $row = $result->fetch_assoc();
-        return (int)$row["total"];
-    }
-
-    return 0;
-}
-
-/*
-|--------------------------------------------------------------------------
-| CALCULS
-|--------------------------------------------------------------------------
-*/
-
-$totalVentes = somme($conn, "ventes", "montant");
-
-$totalRecettes = somme($conn, "recettes", "montant");
-
-$totalDepenses = somme($conn, "depenses", "montant");
-
-$totalProduits = compter($conn, "produits");
-
-$totalVentesNombre = compter($conn, "ventes");
-
-$totalPrestations = $conn->query(
-    "SELECT COUNT(*) AS total
-     FROM recettes
-     WHERE libelle LIKE 'Prestation DTF%'"
+/* VENTES */
+$v = $conn->query(
+    "SELECT 
+        COUNT(*) AS nombre,
+        COALESCE(SUM(total),0) AS total
+     FROM ventes"
 );
 
-$nombrePrestations = 0;
+$ventes_data = $v->fetch_assoc();
 
-if ($totalPrestations) {
-    $nombrePrestations =
-        (int)$totalPrestations->fetch_assoc()["total"];
-}
+$nombre_ventes = $ventes_data["nombre"];
+$total_ventes = $ventes_data["total"];
 
-$resultStock = $conn->query(
-    "SELECT COALESCE(SUM(stock),0) AS total
+/* PRODUITS */
+$p = $conn->query(
+    "SELECT 
+        COUNT(*) AS nombre,
+        COALESCE(SUM(stock),0) AS stock
      FROM produits"
 );
 
-$stockTotal = 0;
+$produits_data = $p->fetch_assoc();
 
-if ($resultStock) {
-    $stockTotal =
-        (int)$resultStock->fetch_assoc()["total"];
-}
+$nombre_produits = $produits_data["nombre"];
+$stock_total = $produits_data["stock"];
 
-$totalActivite = $totalVentes + $totalRecettes;
-
-$solde = $totalActivite - $totalDepenses;
-
-function gnf($montant) {
-    return number_format((float)$montant, 0, ',', ' ') . " GNF";
-}
-
+/* BENEFICE */
+$benefice = ($total_recettes + $total_ventes) - $total_depenses;
 ?>
 
 <!DOCTYPE html>
-
 <html lang="fr">
 
 <head>
 
 <meta charset="UTF-8">
-
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
 <title>Statistiques - LAMBEMAH GESTION</title>
 
 <style>
 
-* {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
+*{
+box-sizing:border-box;
 }
 
-body {
-    font-family: Arial, sans-serif;
-    background: #f4faff;
-    color: #263746;
+body{
+margin:0;
+font-family:Arial,sans-serif;
+background:#f3f7fb;
+color:#172033;
 }
 
-.sidebar {
-    position: fixed;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 245px;
-    background: linear-gradient(180deg, #55c7ed, #168dcc);
-    padding: 25px 15px;
-    color: white;
+.header{
+background:linear-gradient(135deg,#061a38,#0c5795);
+color:white;
+padding:25px 20px;
+border-radius:0 0 28px 28px;
 }
 
-.brand {
-    padding: 5px 12px 28px;
+.header h1{
+margin:0;
+font-size:26px;
 }
 
-.brand-icon {
-    font-size: 30px;
+.header p{
+margin:7px 0 0;
+opacity:.85;
 }
 
-.brand h2 {
-    font-size: 21px;
-    margin-top: 5px;
+.container{
+max-width:1100px;
+margin:auto;
+padding:20px;
 }
 
-.brand span {
-    font-size: 11px;
-    opacity: .85;
+.back{
+display:inline-block;
+margin-bottom:18px;
+color:#0d6efd;
+font-weight:bold;
+text-decoration:none;
 }
 
-.nav {
-    list-style: none;
+.grid{
+display:grid;
+grid-template-columns:repeat(2,1fr);
+gap:15px;
 }
 
-.nav li {
-    margin: 5px 0;
+.stat{
+background:white;
+padding:20px;
+border-radius:18px;
+box-shadow:0 8px 25px rgba(0,0,0,.06);
 }
 
-.nav a {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 13px 14px;
-    color: white;
-    text-decoration: none;
-    border-radius: 12px;
-    font-size: 14px;
+.icon{
+font-size:30px;
 }
 
-.nav a:hover,
-.nav a.active {
-    background: rgba(255,255,255,.22);
+.stat h3{
+margin:12px 0 5px;
+font-size:15px;
+color:#687386;
 }
 
-.sidebar-bottom {
-    position: absolute;
-    bottom: 20px;
-    left: 15px;
-    right: 15px;
+.stat strong{
+font-size:25px;
+color:#092f58;
 }
 
-.logout {
-    display: block;
-    color: white;
-    text-decoration: none;
-    padding: 13px;
-    border-radius: 12px;
-    background: rgba(255,255,255,.12);
+.big{
+margin-top:20px;
+background:linear-gradient(135deg,#071b3a,#0d6efd);
+color:white;
+padding:25px;
+border-radius:20px;
+box-shadow:0 10px 30px rgba(0,0,0,.1);
 }
 
-.main {
-    margin-left: 245px;
-    padding: 30px;
+.big h2{
+margin-top:0;
 }
 
-.header {
-    margin-bottom: 25px;
+.big strong{
+font-size:35px;
 }
 
-.header h1 {
-    font-size: 28px;
+.section{
+background:white;
+margin-top:20px;
+padding:20px;
+border-radius:18px;
+box-shadow:0 8px 25px rgba(0,0,0,.06);
 }
 
-.header p {
-    margin-top: 7px;
-    color: #81919a;
+.section h2{
+margin-top:0;
 }
 
-.cards {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 18px;
+.info{
+padding:15px;
+background:#f2f7fc;
+border-radius:12px;
+margin-top:10px;
 }
 
-.card {
-    background: white;
-    border-radius: 18px;
-    padding: 22px;
-    box-shadow: 0 5px 20px #dfeef4;
+@media(max-width:650px){
+
+.container{
+padding:12px;
 }
 
-.card-icon {
-    font-size: 27px;
-    margin-bottom: 15px;
+.grid{
+grid-template-columns:1fr 1fr;
+gap:10px;
 }
 
-.card-label {
-    color: #89969d;
-    font-size: 12px;
-    font-weight: bold;
+.stat{
+padding:15px;
 }
 
-.card-value {
-    color: #168dcc;
-    font-size: 23px;
-    font-weight: bold;
-    margin-top: 9px;
+.stat strong{
+font-size:20px;
 }
 
-.solde {
-    background: linear-gradient(135deg, #168dcc, #55c7ed);
-    color: white;
+.big{
+padding:20px;
 }
 
-.solde .card-label,
-.solde .card-value {
-    color: white;
+.big strong{
+font-size:28px;
 }
-
-.section {
-    margin-top: 22px;
-}
-
-.section h2 {
-    font-size: 18px;
-    margin-bottom: 17px;
-}
-
-.stats-list {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 15px;
-}
-
-.stat-line {
-    background: white;
-    border-radius: 14px;
-    padding: 17px 20px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    box-shadow: 0 4px 15px #e2eff4;
-}
-
-.stat-line span {
-    color: #71828c;
-    font-size: 13px;
-}
-
-.stat-line strong {
-    color: #263746;
-}
-
-.info {
-    background: #eaf8ff;
-    border-radius: 14px;
-    padding: 18px;
-    margin-top: 20px;
-    line-height: 1.6;
-    font-size: 13px;
-}
-
-@media(max-width:1050px) {
-
-    .cards {
-        grid-template-columns: repeat(2, 1fr);
-    }
-
-}
-
-@media(max-width:700px) {
-
-    .sidebar {
-        position: relative;
-        width: 100%;
-        padding: 15px;
-    }
-
-    .nav {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-    }
-
-    .nav a {
-        flex-direction: column;
-        justify-content: center;
-        font-size: 10px;
-        gap: 5px;
-    }
-
-    .sidebar-bottom {
-        position: static;
-        margin-top: 10px;
-    }
-
-    .main {
-        margin-left: 0;
-        padding: 18px;
-    }
-
-    .cards,
-    .stats-list {
-        grid-template-columns: 1fr;
-    }
 
 }
 
@@ -335,249 +203,147 @@ body {
 
 <body>
 
-<aside class="sidebar">
-
-<div class="brand">
-
-<div class="brand-icon">💼</div>
-
-<h2>LAMBEMAH</h2>
-
-<span>GESTION • PRESTATION</span>
-
-</div>
-
-<ul class="nav">
-
-<li>
-<a href="index.php">
-🏠 Accueil
-</a>
-</li>
-
-<li>
-<a href="produits.php">
-📦 Produits
-</a>
-</li>
-
-<li>
-<a href="ventes.php">
-💰 Ventes
-</a>
-</li>
-
-<li>
-<a href="prestations.php">
-🖨️ Prestations
-</a>
-</li>
-
-<li>
-<a href="depenses.php">
-💸 Dépenses
-</a>
-</li>
-
-<li>
-<a href="statistiques.php" class="active">
-📊 Statistiques
-</a>
-</li>
-
-<li>
-<a href="utilisateurs.php">
-👥 Utilisateurs
-</a>
-</li>
-
-</ul>
-
-<div class="sidebar-bottom">
-
-<a class="logout" href="index.php?logout=1">
-🚪 Déconnexion
-</a>
-
-</div>
-
-</aside>
-
-<main class="main">
-
 <div class="header">
 
-<h1>Tableau de bord 📊</h1>
+<h1>📊 Statistiques</h1>
 
 <p>
-Voici la situation actuelle de LAMBEMAH GESTION.
+Vue générale de LAMBEMAH GESTION
 </p>
 
 </div>
 
+<div class="container">
 
-<div class="cards">
+<a class="back" href="index.php">
+← Retour à l'accueil
+</a>
 
+<div class="grid">
 
-<div class="card">
+<div class="stat">
 
-<div class="card-icon">
-💰
-</div>
+<div class="icon">💵</div>
 
-<div class="card-label">
-VENTES
-</div>
+<h3>Recettes</h3>
 
-<div class="card-value">
-<?= gnf($totalVentes) ?>
-</div>
-
-</div>
-
-
-<div class="card">
-
-<div class="card-icon">
-🖨️
-</div>
-
-<div class="card-label">
-PRESTATIONS / RECETTES
-</div>
-
-<div class="card-value">
-<?= gnf($totalRecettes) ?>
-</div>
+<strong>
+<?= number_format($total_recettes,0,","," ") ?> FG
+</strong>
 
 </div>
 
+<div class="stat">
 
-<div class="card">
+<div class="icon">💸</div>
 
-<div class="card-icon">
-💸
-</div>
+<h3>Dépenses</h3>
 
-<div class="card-label">
-DÉPENSES
-</div>
-
-<div class="card-value">
-<?= gnf($totalDepenses) ?>
-</div>
+<strong>
+<?= number_format($total_depenses,0,","," ") ?> FG
+</strong>
 
 </div>
 
+<div class="stat">
 
-<div class="card solde">
+<div class="icon">💰</div>
 
-<div class="card-icon">
-📈
-</div>
+<h3>Ventes</h3>
 
-<div class="card-label">
-SOLDE
-</div>
-
-<div class="card-value">
-<?= gnf($solde) ?>
-</div>
+<strong>
+<?= number_format($total_ventes,0,","," ") ?> FG
+</strong>
 
 </div>
 
+<div class="stat">
+
+<div class="icon">📦</div>
+
+<h3>Produits</h3>
+
+<strong>
+<?= $nombre_produits ?>
+</strong>
+
 </div>
 
+<div class="stat">
+
+<div class="icon">🛒</div>
+
+<h3>Nombre de ventes</h3>
+
+<strong>
+<?= $nombre_ventes ?>
+</strong>
+
+</div>
+
+<div class="stat">
+
+<div class="icon">📦</div>
+
+<h3>Stock total</h3>
+
+<strong>
+<?= $stock_total ?>
+</strong>
+
+</div>
+
+</div>
+
+<div class="big">
+
+<h2>📈 Résultat actuel</h2>
+
+<p>
+Recettes + ventes − dépenses
+</p>
+
+<strong>
+<?= number_format($benefice,0,","," ") ?> FG
+</strong>
+
+</div>
 
 <div class="section">
 
-<h2>📌 Résumé de l'activité</h2>
-
-<div class="stats-list">
-
-
-<div class="stat-line">
-
-<span>📦 Nombre de produits</span>
-
-<strong>
-<?= $totalProduits ?>
-</strong>
-
-</div>
-
-
-<div class="stat-line">
-
-<span>📦 Stock total</span>
-
-<strong>
-<?= $stockTotal ?>
-</strong>
-
-</div>
-
-
-<div class="stat-line">
-
-<span>💰 Nombre de ventes</span>
-
-<strong>
-<?= $totalVentesNombre ?>
-</strong>
-
-</div>
-
-
-<div class="stat-line">
-
-<span>🖨️ Nombre de prestations</span>
-
-<strong>
-<?= $nombrePrestations ?>
-</strong>
-
-</div>
-
-
-<div class="stat-line">
-
-<span>💵 Activité totale</span>
-
-<strong>
-<?= gnf($totalActivite) ?>
-</strong>
-
-</div>
-
-
-<div class="stat-line">
-
-<span>📉 Résultat</span>
-
-<strong>
-<?= gnf($solde) ?>
-</strong>
-
-</div>
-
-
-</div>
-
-</div>
-
+<h2>💡 Suivi de l'activité</h2>
 
 <div class="info">
 
-<strong>💡 LAMBEMAH GESTION</strong><br>
+<strong>DTF :</strong>
 
-Cette page rassemble automatiquement les ventes,
-les prestations DTF, les recettes et les dépenses
-enregistrées dans ton application.
+Ton coût fournisseur actuel pour un DTF A4 est de
+<strong>5 000 FG</strong>.
 
 </div>
 
-</main>
+<div class="info">
+
+<strong>Prestations :</strong>
+
+Les clients peuvent apporter leur propre T-shirt.
+Tu peux enregistrer uniquement la prestation d'impression
+et le montant facturé.
+
+</div>
+
+<div class="info">
+
+<strong>Conseil de gestion :</strong>
+
+Enregistre chaque entrée d'argent dans
+<strong>Recettes</strong> et chaque sortie dans
+<strong>Dépenses</strong>.
+</div>
+
+</div>
+
+</div>
 
 </body>
 
