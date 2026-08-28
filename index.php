@@ -2,14 +2,13 @@
 session_start();
 require_once "config.php";
 
-$message = "";
-
 /* =========================
    DÉCONNEXION
 ========================= */
 if (isset($_GET["logout"])) {
     session_unset();
     session_destroy();
+
     header("Location: index.php");
     exit;
 }
@@ -17,7 +16,9 @@ if (isset($_GET["logout"])) {
 /* =========================
    CONNEXION
 ========================= */
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["connexion"])) {
+$message = "";
+
+if (!isset($_SESSION["id"]) && $_SERVER["REQUEST_METHOD"] === "POST") {
 
     $username = trim($_POST["username"] ?? "");
     $password = trim($_POST["password"] ?? "");
@@ -26,14 +27,15 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["connexion"])) {
         $message = "Veuillez remplir tous les champs.";
     } else {
 
-        $stmt = $conn->prepare(
-            "SELECT id, nom, username, mot_de_passe, role
-             FROM utilisateurs
-             WHERE username = ?
-             LIMIT 1"
-        );
+        $stmt = $conn->prepare("
+            SELECT id, nom, username, mot_de_passe, role
+            FROM utilisateurs
+            WHERE username = ?
+            LIMIT 1
+        ");
 
         if ($stmt) {
+
             $stmt->bind_param("s", $username);
             $stmt->execute();
 
@@ -70,150 +72,331 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["connexion"])) {
 }
 
 /* =========================
-   VALEURS PAR DÉFAUT
+   PAGE DE CONNEXION
 ========================= */
+
+if (!isset($_SESSION["id"])) {
+?>
+
+<!DOCTYPE html>
+
+<html lang="fr">
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>LAMBEMAH GESTION</title>
+
+<style>
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: Arial, Helvetica, sans-serif;
+    min-height: 100vh;
+    background: linear-gradient(145deg, #061a35, #0b5ed7);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 20px;
+}
+
+.login-container {
+    width: 100%;
+    max-width: 430px;
+}
+
+.logo {
+    text-align: center;
+    color: white;
+    margin-bottom: 25px;
+}
+
+.logo .logo-icon {
+    width: 75px;
+    height: 75px;
+    margin: auto;
+    border-radius: 22px;
+    background: rgba(255,255,255,.15);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 38px;
+    margin-bottom: 15px;
+}
+
+.logo h1 {
+    font-size: 28px;
+    margin-bottom: 7px;
+}
+
+.logo p {
+    opacity: .85;
+    font-size: 14px;
+}
+
+.login-card {
+    background: white;
+    border-radius: 25px;
+    padding: 28px 22px;
+    box-shadow: 0 20px 50px rgba(0,0,0,.22);
+}
+
+.login-card h2 {
+    color: #061a35;
+    text-align: center;
+    margin-bottom: 23px;
+}
+
+.form-group {
+    margin-bottom: 17px;
+}
+
+label {
+    display: block;
+    color: #334155;
+    font-size: 14px;
+    font-weight: bold;
+    margin-bottom: 7px;
+}
+
+input {
+    width: 100%;
+    padding: 15px;
+    border: 1px solid #dbe4ee;
+    border-radius: 13px;
+    outline: none;
+    font-size: 16px;
+}
+
+input:focus {
+    border-color: #0b7cff;
+    box-shadow: 0 0 0 3px rgba(11,124,255,.10);
+}
+
+.login-button {
+    width: 100%;
+    border: none;
+    padding: 15px;
+    border-radius: 13px;
+    background: linear-gradient(135deg, #0b7cff, #0755c9);
+    color: white;
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+.message {
+    background: #fff0f0;
+    color: #c62828;
+    padding: 12px;
+    border-radius: 11px;
+    margin-bottom: 17px;
+    text-align: center;
+    font-size: 14px;
+}
+
+.footer-login {
+    text-align: center;
+    margin-top: 18px;
+    color: #64748b;
+    font-size: 12px;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="login-container">
+
+```
+<div class="logo">
+
+    <div class="logo-icon">
+        💼
+    </div>
+
+    <h1>LAMBEMAH GESTION</h1>
+
+    <p>
+        Gestion simple et intelligente de votre activité
+    </p>
+
+</div>
+
+<div class="login-card">
+
+    <h2>Bienvenue 👋</h2>
+
+    <?php if ($message !== ""): ?>
+
+        <div class="message">
+            <?= htmlspecialchars($message) ?>
+        </div>
+
+    <?php endif; ?>
+
+    <form method="POST">
+
+        <div class="form-group">
+
+            <label>Nom d'utilisateur</label>
+
+            <input
+                type="text"
+                name="username"
+                placeholder="Votre nom d'utilisateur"
+                autocomplete="username"
+                required
+            >
+
+        </div>
+
+        <div class="form-group">
+
+            <label>Mot de passe</label>
+
+            <input
+                type="password"
+                name="password"
+                placeholder="Votre mot de passe"
+                autocomplete="current-password"
+                required
+            >
+
+        </div>
+
+        <button class="login-button" type="submit">
+            Se connecter
+        </button>
+
+    </form>
+
+    <div class="footer-login">
+        LAMBEMAH GESTION • Votre activité, mieux organisée
+    </div>
+
+</div>
+```
+
+</div>
+
+</body>
+</html>
+
+<?php
+exit;
+}
+
+
+/* =========================
+   TABLEAU DE BORD
+========================= */
+
+$nom = $_SESSION["nom"] ?? "Utilisateur";
+$role = $_SESSION["role"] ?? "utilisateur";
+
+
+/* PRODUITS */
 
 $total_produits = 0;
-$total_stock = 0;
-$total_ventes = 0;
-$total_recettes = 0;
-$total_depenses = 0;
+$stock_total = 0;
 
-$ventes_jour = 0;
-$recettes_jour = 0;
-$depenses_jour = 0;
-
-
-/* =========================
-   PRODUITS
-========================= */
-
-$result = $conn->query(
-    "SELECT COUNT(*) AS nombre,
-            COALESCE(SUM(stock),0) AS stock
-     FROM produits"
-);
+$result = $conn->query("
+    SELECT
+        COUNT(*) AS total_produits,
+        COALESCE(SUM(stock),0) AS stock_total
+    FROM produits
+");
 
 if ($result) {
+
     $data = $result->fetch_assoc();
 
-    $total_produits = (int)$data["nombre"];
-    $total_stock = (int)$data["stock"];
+    $total_produits = (int)$data["total_produits"];
+    $stock_total = (int)$data["stock_total"];
 }
 
 
-/* =========================
-   VENTES
-   IMPORTANT : ta colonne est
-   'montant' et non 'total'
-========================= */
+/* VENTES */
 
-$result = $conn->query(
-    "SELECT COALESCE(SUM(montant),0) AS total
-     FROM ventes"
-);
+$montant_ventes = 0;
+$total_ventes = 0;
+
+$result = $conn->query("
+    SELECT
+        COUNT(*) AS total_ventes,
+        COALESCE(SUM(montant),0) AS montant_ventes
+    FROM ventes
+");
 
 if ($result) {
-    $total_ventes = (float)$result->fetch_assoc()["total"];
+
+    $data = $result->fetch_assoc();
+
+    $total_ventes = (int)$data["total_ventes"];
+    $montant_ventes = (float)$data["montant_ventes"];
 }
 
 
-/* =========================
-   RECETTES
-========================= */
+/* RECETTES */
 
-$result = $conn->query(
-    "SELECT COALESCE(SUM(montant),0) AS total
-     FROM recettes"
-);
+$montant_recettes = 0;
+
+$result = $conn->query("
+    SELECT COALESCE(SUM(montant),0) AS montant_recettes
+    FROM recettes
+");
 
 if ($result) {
-    $total_recettes = (float)$result->fetch_assoc()["total"];
+
+    $data = $result->fetch_assoc();
+
+    $montant_recettes = (float)$data["montant_recettes"];
 }
 
 
-/* =========================
-   DEPENSES
-========================= */
+/* DEPENSES */
 
-$result = $conn->query(
-    "SELECT COALESCE(SUM(montant),0) AS total
-     FROM depenses"
-);
+$montant_depenses = 0;
+
+$result = $conn->query("
+    SELECT COALESCE(SUM(montant),0) AS montant_depenses
+    FROM depenses
+");
 
 if ($result) {
-    $total_depenses = (float)$result->fetch_assoc()["total"];
+
+    $data = $result->fetch_assoc();
+
+    $montant_depenses = (float)$data["montant_depenses"];
 }
 
 
-/* =========================
-   TOTALS
-========================= */
+/* RESULTAT */
 
-$total_entrees = $total_ventes + $total_recettes;
-
-$benefice = $total_entrees - $total_depenses;
+$total_entrees = $montant_ventes + $montant_recettes;
+$resultat = $total_entrees - $montant_depenses;
 
 
-/* =========================
-   ACTIVITÉ DU JOUR
-========================= */
+/* FORMATAGE */
 
-$result = $conn->query(
-    "SELECT COALESCE(SUM(montant),0) AS total
-     FROM ventes
-     WHERE DATE(date_vente) = CURDATE()"
-);
-
-if ($result) {
-    $ventes_jour = (float)$result->fetch_assoc()["total"];
-}
-
-
-$result = $conn->query(
-    "SELECT COALESCE(SUM(montant),0) AS total
-     FROM recettes
-     WHERE DATE(date_recette) = CURDATE()"
-);
-
-if ($result) {
-    $recettes_jour = (float)$result->fetch_assoc()["total"];
-}
-
-
-$result = $conn->query(
-    "SELECT COALESCE(SUM(montant),0) AS total
-     FROM depenses
-     WHERE DATE(date_depense) = CURDATE()"
-);
-
-if ($result) {
-    $depenses_jour = (float)$result->fetch_assoc()["total"];
-}
-
-
-$entrees_jour = $ventes_jour + $recettes_jour;
-
-$resultat_jour = $entrees_jour - $depenses_jour;
-
-
-/* =========================
-   FORMAT MONNAIE
-========================= */
-
-function formatFG($montant)
+function afficherMontant($montant)
 {
-    return number_format(
-        (float)$montant,
-        0,
-        ",",
-        " "
-    ) . " FG";
+    return number_format((float)$montant, 0, ',', ' ') . " FG";
 }
 
 ?>
 
 <!DOCTYPE html>
+
 <html lang="fr">
 
 <head>
@@ -221,760 +404,93 @@ function formatFG($montant)
 <meta charset="UTF-8">
 
 <meta name="viewport"
-      content="width=device-width, initial-scale=1.0">
+content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 
 <title>LAMBEMAH GESTION</title>
 
 <style>
 
 /* =========================
-   BASE
+   GLOBAL
 ========================= */
 
 * {
+    box-sizing: border-box;
     margin: 0;
     padding: 0;
-    box-sizing: border-box;
-}
-
-:root {
-
-    --bleu-nuit: #071a35;
-
-    --bleu: #168cff;
-
-    --bleu-clair: #eaf6ff;
-
-    --bleu-tres-clair: #f5faff;
-
-    --blanc: #ffffff;
-
-    --texte: #172033;
-
-    --gris: #738096;
-
-    --bordure: #e3edf6;
-
-    --vert: #0a9f63;
-
-    --rouge: #e04d5b;
-
-    --orange: #e99722;
 }
 
 body {
-
-    font-family:
-        Arial,
-        Helvetica,
-        sans-serif;
-
-    background: #f3f7fb;
-
-    color: var(--texte);
-
+    font-family: Arial, Helvetica, sans-serif;
+    background: #f3f7fc;
+    color: #12233f;
     min-height: 100vh;
+}
+
+a {
+    text-decoration: none;
 }
 
 
 /* =========================
-   LOGIN
+   HEADER
 ========================= */
 
-.login-page {
-
-    min-height: 100vh;
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: center;
-
-    padding: 20px;
-
-    background:
-        radial-gradient(
-            circle at 15% 10%,
-            #7bd1ff 0,
-            transparent 28%
-        ),
-        linear-gradient(
-            135deg,
-            #06162f,
-            #0b5998
-        );
+.header {
+    background: linear-gradient(135deg, #061a35, #075dcc);
+    color: white;
+    padding: 22px 18px 28px;
+    border-radius: 0 0 28px 28px;
+    box-shadow: 0 8px 25px rgba(6,26,53,.18);
 }
 
-.login-box {
+.header-content {
+    max-width: 1150px;
+    margin: auto;
+}
 
-    width: 100%;
-
-    max-width: 430px;
-
-    padding: 34px 28px;
-
-    background: rgba(255,255,255,.98);
-
-    border-radius: 28px;
-
-    box-shadow:
-        0 25px 70px rgba(0,0,0,.25);
+.top-line {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 15px;
 }
 
 .brand {
-
-    text-align: center;
-
-    margin-bottom: 30px;
-}
-
-.brand-logo {
-
-    width: 76px;
-
-    height: 76px;
-
-    margin: 0 auto 15px;
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: center;
-
-    border-radius: 24px;
-
-    background:
-        linear-gradient(
-            135deg,
-            #168cff,
-            #071a35
-        );
-
-    color: white;
-
-    font-size: 32px;
-
-    box-shadow:
-        0 12px 30px rgba(22,140,255,.3);
-}
-
-.brand h1 {
-
-    font-size: 27px;
-
-    color: var(--bleu-nuit);
-
-    margin-bottom: 7px;
-}
-
-.brand p {
-
-    color: var(--gris);
-
-    font-size: 14px;
-}
-
-.login-box h2 {
-
     font-size: 21px;
-
-    margin-bottom: 20px;
-
-    color: var(--bleu-nuit);
-}
-
-.form-group {
-
-    margin-bottom: 17px;
-}
-
-.form-group label {
-
-    display: block;
-
-    margin-bottom: 7px;
-
-    font-size: 14px;
-
     font-weight: bold;
 }
 
-.form-group input {
-
-    width: 100%;
-
-    padding: 15px;
-
-    border: 1px solid #d9e5ef;
-
-    border-radius: 13px;
-
-    outline: none;
-
-    font-size: 15px;
-
-    transition: .2s;
-}
-
-.form-group input:focus {
-
-    border-color: var(--bleu);
-
-    box-shadow:
-        0 0 0 4px rgba(22,140,255,.1);
-}
-
-.login-button {
-
-    width: 100%;
-
-    border: none;
-
-    padding: 15px;
-
-    border-radius: 13px;
-
-    background:
-        linear-gradient(
-            135deg,
-            #168cff,
-            #07569c
-        );
-
-    color: white;
-
-    font-size: 16px;
-
-    font-weight: bold;
-
-    cursor: pointer;
-
-    box-shadow:
-        0 10px 25px rgba(22,140,255,.25);
-}
-
-.error {
-
-    background: #fff0f1;
-
-    color: #c52e3a;
-
-    padding: 13px;
-
-    border-radius: 12px;
-
-    margin-bottom: 18px;
-
-    text-align: center;
-
-    font-size: 14px;
-}
-
-
-/* =========================
-   APPLICATION
-========================= */
-
-.app {
-
-    min-height: 100vh;
-
-    display: flex;
-}
-
-
-/* =========================
-   SIDEBAR
-========================= */
-
-.sidebar {
-
-    position: fixed;
-
-    left: 0;
-
-    top: 0;
-
-    bottom: 0;
-
-    width: 260px;
-
-    padding: 22px 15px;
-
-    background:
-        linear-gradient(
-            180deg,
-            #06172f,
-            #092f58 55%,
-            #0a609f
-        );
-
-    color: white;
-
-    overflow-y: auto;
-
-    z-index: 100;
-}
-
-.sidebar-brand {
-
-    padding: 8px 12px 23px;
-
-    margin-bottom: 18px;
-
-    border-bottom:
-        1px solid rgba(255,255,255,.1);
-}
-
-.sidebar-brand h1 {
-
-    font-size: 21px;
-
-    margin-bottom: 5px;
-}
-
-.sidebar-brand p {
-
+.role {
+    background: rgba(255,255,255,.14);
+    padding: 7px 10px;
+    border-radius: 20px;
     font-size: 11px;
-
-    opacity: .65;
 }
 
-.user-card {
-
-    display: flex;
-
-    align-items: center;
-
-    gap: 11px;
-
-    padding: 12px;
-
-    margin-bottom: 20px;
-
-    border-radius: 15px;
-
-    background:
-        rgba(255,255,255,.08);
+.welcome {
+    margin-top: 23px;
 }
 
-.avatar {
-
-    width: 42px;
-
-    height: 42px;
-
-    flex-shrink: 0;
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: center;
-
-    border-radius: 13px;
-
-    background: #168cff;
-
-    font-weight: bold;
-}
-
-.user-info strong {
-
-    display: block;
-
-    font-size: 13px;
-}
-
-.user-info span {
-
-    display: block;
-
-    margin-top: 3px;
-
-    font-size: 11px;
-
-    opacity: .65;
-}
-
-.menu-title {
-
-    padding: 0 12px 8px;
-
-    color: rgba(255,255,255,.45);
-
-    font-size: 10px;
-
-    font-weight: bold;
-
-    letter-spacing: 1px;
-
-    text-transform: uppercase;
-}
-
-.menu a {
-
-    display: flex;
-
-    align-items: center;
-
-    gap: 12px;
-
-    padding: 12px 13px;
-
-    margin-bottom: 4px;
-
-    border-radius: 12px;
-
-    color: rgba(255,255,255,.82);
-
-    text-decoration: none;
-
-    font-size: 14px;
-
-    font-weight: 600;
-
-    transition: .2s;
-}
-
-.menu a:hover,
-.menu a.active {
-
-    color: white;
-
-    background:
-        rgba(255,255,255,.14);
-}
-
-.menu-icon {
-
-    width: 29px;
-
-    height: 29px;
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: center;
-
-    border-radius: 8px;
-
-    background:
-        rgba(255,255,255,.08);
-}
-
-.logout-link {
-
-    margin-top: 20px !important;
-
-    color: #ffb8bf !important;
-}
-
-
-/* =========================
-   CONTENU
-========================= */
-
-.main {
-
-    width: calc(100% - 260px);
-
-    min-height: 100vh;
-
-    margin-left: 260px;
-
-    padding: 25px;
-}
-
-.topbar {
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: space-between;
-
-    margin-bottom: 24px;
-}
-
-.topbar h2 {
-
-    font-size: 25px;
-
-    color: var(--bleu-nuit);
-}
-
-.topbar p {
-
-    margin-top: 4px;
-
-    color: var(--gris);
-
-    font-size: 13px;
-}
-
-.mobile-menu {
-
-    display: none;
-}
-
-
-/* =========================
-   HERO
-========================= */
-
-.hero {
-
-    position: relative;
-
-    overflow: hidden;
-
-    padding: 28px;
-
-    margin-bottom: 20px;
-
-    border-radius: 23px;
-
-    color: white;
-
-    background:
-        linear-gradient(
-            120deg,
-            #06172f,
-            #0b5998
-        );
-
-    box-shadow:
-        0 15px 35px rgba(7,26,53,.16);
-}
-
-.hero h1 {
-
-    position: relative;
-
-    z-index: 2;
-
-    font-size: 24px;
-
-    margin-bottom: 7px;
-}
-
-.hero p {
-
-    position: relative;
-
-    z-index: 2;
-
-    font-size: 14px;
-
+.welcome small {
     opacity: .8;
+    font-size: 13px;
 }
 
-.hero-date {
-
-    display: inline-block;
-
-    margin-top: 18px;
-
-    padding: 8px 12px;
-
-    border-radius: 10px;
-
-    background:
-        rgba(255,255,255,.1);
-
-    font-size: 12px;
+.welcome h1 {
+    margin-top: 5px;
+    font-size: 25px;
 }
 
 
 /* =========================
-   CARTES
+   CONTAINER
 ========================= */
 
-.cards {
-
-    display: grid;
-
-    grid-template-columns:
-        repeat(4,1fr);
-
-    gap: 15px;
-
-    margin-bottom: 20px;
-}
-
-.card {
-
-    padding: 18px;
-
-    border-radius: 18px;
-
-    background: white;
-
-    border: 1px solid var(--bordure);
-
-    box-shadow:
-        0 7px 25px rgba(0,0,0,.04);
-}
-
-.card-top {
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: space-between;
-
-    margin-bottom: 15px;
-}
-
-.card small {
-
-    color: var(--gris);
-
-    font-weight: 600;
-}
-
-.card h3 {
-
-    color: var(--bleu-nuit);
-
-    font-size: 20px;
-}
-
-.card-icon {
-
-    width: 43px;
-
-    height: 43px;
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: center;
-
-    border-radius: 13px;
-
-    background: var(--bleu-clair);
-
-    font-size: 20px;
-}
-
-.card.green .card-icon {
-
-    background: #e8f9f1;
-}
-
-.card.red .card-icon {
-
-    background: #fff0f1;
-}
-
-.card.orange .card-icon {
-
-    background: #fff7e7;
-}
-
-
-/* =========================
-   PANELS
-========================= */
-
-.dashboard-grid {
-
-    display: grid;
-
-    grid-template-columns:
-        1.4fr .8fr;
-
-    gap: 18px;
-}
-
-.panel {
-
-    padding: 20px;
-
-    border-radius: 19px;
-
-    background: white;
-
-    border: 1px solid var(--bordure);
-
-    box-shadow:
-        0 7px 25px rgba(0,0,0,.04);
-}
-
-.panel-header {
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: space-between;
-
-    margin-bottom: 18px;
-}
-
-.panel-header h3 {
-
-    color: var(--bleu-nuit);
-
-    font-size: 17px;
-}
-
-.panel-header a {
-
-    color: var(--bleu);
-
-    text-decoration: none;
-
-    font-size: 12px;
-
-    font-weight: bold;
-}
-
-
-/* =========================
-   ACTIVITÉ
-========================= */
-
-.today {
-
-    display: grid;
-
-    grid-template-columns:
-        repeat(3,1fr);
-
-    gap: 10px;
-}
-
-.today-item {
-
-    padding: 15px;
-
-    border-radius: 14px;
-
-    background: var(--bleu-tres-clair);
-}
-
-.today-item small {
-
-    display: block;
-
-    color: var(--gris);
-
-    margin-bottom: 7px;
-}
-
-.today-item strong {
-
-    color: var(--bleu-nuit);
-
-    font-size: 17px;
+.container {
+    max-width: 1150px;
+    margin: auto;
+    padding: 20px 15px 100px;
 }
 
 
@@ -982,1091 +498,550 @@ body {
    RESULTAT
 ========================= */
 
-.result-box {
-
-    padding: 20px;
-
-    border-radius: 17px;
-
-    color: white;
-
-    background:
-        linear-gradient(
-            135deg,
-            #168cff,
-            #06172f
-        );
+.main-result {
+    background: white;
+    border-radius: 22px;
+    padding: 22px;
+    margin-top: -5px;
+    box-shadow: 0 8px 25px rgba(15,40,75,.08);
+    border: 1px solid #e8eef6;
 }
 
-.result-box small {
-
-    opacity: .75;
+.result-title {
+    color: #718096;
+    font-size: 13px;
+    margin-bottom: 7px;
 }
 
-.result-box strong {
+.result-value {
+    font-size: 30px;
+    font-weight: bold;
+    color: #061a35;
+}
 
-    display: block;
-
-    margin-top: 7px;
-
-    font-size: 27px;
+.result-description {
+    margin-top: 8px;
+    color: #64748b;
+    font-size: 12px;
 }
 
 
 /* =========================
-   RACCOURCIS
+   STATISTIQUES RAPIDES
 ========================= */
 
-.shortcuts {
-
+.cards {
     display: grid;
-
-    grid-template-columns:
-        repeat(2,1fr);
-
-    gap: 10px;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin-top: 17px;
 }
 
-.shortcut {
+.card {
+    background: white;
+    border-radius: 18px;
+    padding: 18px;
+    border: 1px solid #e7edf5;
+    box-shadow: 0 5px 18px rgba(15,40,75,.06);
+}
 
-    padding: 15px;
+.card-icon {
+    font-size: 25px;
+    margin-bottom: 10px;
+}
 
-    border-radius: 14px;
+.card-label {
+    color: #718096;
+    font-size: 12px;
+}
 
-    color: var(--texte);
+.card-value {
+    color: #061a35;
+    font-size: 20px;
+    font-weight: bold;
+    margin-top: 5px;
+}
 
-    text-decoration: none;
 
-    background: #f5f9fd;
+/* =========================
+   ACTIONS
+========================= */
 
-    border: 1px solid #e7eff7;
+.section-title {
+    margin: 25px 0 13px;
+    font-size: 18px;
+    color: #061a35;
+}
 
+.actions {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 13px;
+}
+
+.action {
+    background: white;
+    border: 1px solid #e7edf5;
+    border-radius: 18px;
+    padding: 18px;
+    color: #12233f;
+    box-shadow: 0 5px 18px rgba(15,40,75,.05);
     transition: .2s;
 }
 
-.shortcut:hover {
-
-    background: var(--bleu-clair);
-
-    border-color: #cce6ff;
+.action:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 9px 25px rgba(15,40,75,.10);
 }
 
-.shortcut-icon {
-
-    margin-bottom: 8px;
-
-    font-size: 22px;
+.action-icon {
+    font-size: 28px;
+    margin-bottom: 10px;
 }
 
-.shortcut strong {
-
-    display: block;
-
-    font-size: 13px;
+.action-name {
+    font-weight: bold;
+    font-size: 14px;
 }
 
-.shortcut span {
-
-    display: block;
-
-    margin-top: 3px;
-
-    color: var(--gris);
-
+.action-description {
+    margin-top: 5px;
     font-size: 11px;
+    color: #718096;
 }
 
 
 /* =========================
-   RESPONSIVE
+   MENU COMPLEMENTAIRE
 ========================= */
 
-@media(max-width:950px) {
+.menu-list {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+}
 
-    .sidebar {
+.menu-item {
+    background: #eaf4ff;
+    color: #075dcc;
+    padding: 15px;
+    border-radius: 15px;
+    font-weight: bold;
+    font-size: 13px;
+}
 
-        width: 225px;
-    }
-
-    .main {
-
-        width: calc(100% - 225px);
-
-        margin-left: 225px;
-    }
-
-    .cards {
-
-        grid-template-columns:
-            repeat(2,1fr);
-    }
-
-    .dashboard-grid {
-
-        grid-template-columns: 1fr;
-    }
+.menu-item:hover {
+    background: #dceeff;
 }
 
 
-@media(max-width:700px) {
+/* =========================
+   DECONNEXION
+========================= */
 
-    .sidebar {
+.logout {
+    display: block;
+    text-align: center;
+    margin-top: 25px;
+    padding: 14px;
+    border-radius: 14px;
+    background: #fff0f0;
+    color: #c62828;
+    font-weight: bold;
+    font-size: 14px;
+}
 
-        display: none;
+
+/* =========================
+   MOBILE
+========================= */
+
+@media (max-width: 800px) {
+
+    .cards {
+        grid-template-columns: repeat(2, 1fr);
     }
 
-    .main {
-
-        width: 100%;
-
-        margin-left: 0;
-
-        padding: 13px;
-
-        padding-bottom: 90px;
+    .actions {
+        grid-template-columns: repeat(2, 1fr);
     }
 
-    .topbar {
-
-        margin-bottom: 15px;
+    .menu-list {
+        grid-template-columns: 1fr 1fr;
     }
 
-    .topbar h2 {
+}
 
-        font-size: 20px;
+@media (max-width: 480px) {
+
+    .header {
+        padding: 19px 15px 24px;
+        border-radius: 0 0 23px 23px;
     }
 
-    .mobile-menu {
-
-        display: flex;
-
-        width: 42px;
-
-        height: 42px;
-
-        align-items: center;
-
-        justify-content: center;
-
-        border: 1px solid var(--bordure);
-
-        border-radius: 12px;
-
-        background: white;
-
-        color: var(--bleu-nuit);
-
-        font-size: 20px;
+    .brand {
+        font-size: 18px;
     }
 
-    .hero {
-
-        padding: 22px;
-
-        border-radius: 20px;
+    .welcome h1 {
+        font-size: 21px;
     }
 
-    .hero h1 {
+    .container {
+        padding: 16px 12px 90px;
+    }
 
-        font-size: 20px;
+    .main-result {
+        padding: 19px;
+        border-radius: 19px;
+    }
+
+    .result-value {
+        font-size: 26px;
     }
 
     .cards {
-
-        grid-template-columns:
-            repeat(2,1fr);
-
         gap: 10px;
     }
 
     .card {
-
-        padding: 14px;
-
+        padding: 15px 13px;
         border-radius: 16px;
     }
 
-    .card h3 {
-
-        font-size: 16px;
+    .card-icon {
+        font-size: 22px;
     }
 
-    .card-icon {
-
-        width: 38px;
-
-        height: 38px;
-
+    .card-value {
         font-size: 17px;
     }
 
-    .today {
-
-        grid-template-columns: 1fr;
+    .actions {
+        gap: 10px;
     }
 
-    .shortcuts {
-
-        grid-template-columns:
-            repeat(2,1fr);
-    }
-}
-
-
-/* =========================
-   NAVIGATION MOBILE
-========================= */
-
-.bottom-nav {
-
-    display: none;
-}
-
-@media(max-width:700px) {
-
-    .bottom-nav {
-
-        position: fixed;
-
-        left: 10px;
-
-        right: 10px;
-
-        bottom: 10px;
-
-        z-index: 999;
-
-        height: 65px;
-
-        display: flex;
-
-        align-items: center;
-
-        justify-content: space-around;
-
-        border-radius: 19px;
-
-        background:
-            rgba(6,23,47,.97);
-
-        box-shadow:
-            0 10px 35px rgba(0,0,0,.2);
+    .action {
+        padding: 16px 13px;
+        border-radius: 16px;
     }
 
-    .bottom-nav a {
-
-        display: flex;
-
-        flex-direction: column;
-
-        align-items: center;
-
-        gap: 4px;
-
-        color: rgba(255,255,255,.65);
-
-        text-decoration: none;
-
-        font-size: 10px;
+    .action-icon {
+        font-size: 25px;
     }
 
-    .bottom-nav a.active {
-
-        color: white;
+    .action-name {
+        font-size: 13px;
     }
 
-    .bottom-nav span {
-
-        font-size: 19px;
+    .menu-list {
+        gap: 9px;
     }
+
+    .menu-item {
+        padding: 13px 11px;
+        font-size: 12px;
+    }
+
 }
 
 </style>
 
 </head>
 
-
 <body>
 
+<header class="header">
 
-<?php if (!isset($_SESSION["id"])): ?>
+```
+<div class="header-content">
 
-
-<!-- =========================
-     CONNEXION
-========================= -->
-
-<div class="login-page">
-
-    <div class="login-box">
+    <div class="top-line">
 
         <div class="brand">
-
-            <div class="brand-logo">
-                💼
-            </div>
-
-            <h1>
-                LAMBEMAH GESTION
-            </h1>
-
-            <p>
-                Votre activité, simplement maîtrisée.
-            </p>
-
+            💼 LAMBEMAH GESTION
         </div>
 
+        <div class="role">
+            <?= htmlspecialchars($role) ?>
+        </div>
 
-        <h2>
-            Bienvenue 👋
-        </h2>
+    </div>
 
+    <div class="welcome">
 
-        <?php if ($message !== ""): ?>
+        <small>Bonjour 👋</small>
 
-            <div class="error">
+        <h1>
+            <?= htmlspecialchars($nom) ?>
+        </h1>
 
-                <?= htmlspecialchars($message) ?>
+    </div>
 
-            </div>
+</div>
+```
 
-        <?php endif; ?>
+</header>
 
+<main class="container">
 
-        <form method="POST">
+```
+<!-- RESULTAT -->
 
-            <div class="form-group">
+<div class="main-result">
 
-                <label>
-                    Nom d'utilisateur
-                </label>
+    <div class="result-title">
+        💎 Résultat actuel
+    </div>
 
-                <input
-                    type="text"
-                    name="username"
-                    placeholder="Votre nom d'utilisateur"
-                    autocomplete="username"
-                    required
-                >
+    <div class="result-value">
+        <?= afficherMontant($resultat) ?>
+    </div>
 
-            </div>
+    <div class="result-description">
+        Entrées : <?= afficherMontant($total_entrees) ?>
+        · Dépenses : <?= afficherMontant($montant_depenses) ?>
+    </div>
 
-
-            <div class="form-group">
-
-                <label>
-                    Mot de passe
-                </label>
-
-                <input
-                    type="password"
-                    name="password"
-                    placeholder="Votre mot de passe"
-                    autocomplete="current-password"
-                    required
-                >
-
-            </div>
+</div>
 
 
-            <button
-                type="submit"
-                name="connexion"
-                class="login-button"
-            >
+<!-- CARTES -->
 
-                Se connecter →
+<div class="cards">
 
-            </button>
+    <div class="card">
 
-        </form>
+        <div class="card-icon">
+            🛍️
+        </div>
+
+        <div class="card-label">
+            Ventes
+        </div>
+
+        <div class="card-value">
+            <?= afficherMontant($montant_ventes) ?>
+        </div>
+
+    </div>
+
+
+    <div class="card">
+
+        <div class="card-icon">
+            💰
+        </div>
+
+        <div class="card-label">
+            Recettes
+        </div>
+
+        <div class="card-value">
+            <?= afficherMontant($montant_recettes) ?>
+        </div>
+
+    </div>
+
+
+    <div class="card">
+
+        <div class="card-icon">
+            💸
+        </div>
+
+        <div class="card-label">
+            Dépenses
+        </div>
+
+        <div class="card-value">
+            <?= afficherMontant($montant_depenses) ?>
+        </div>
+
+    </div>
+
+
+    <div class="card">
+
+        <div class="card-icon">
+            📦
+        </div>
+
+        <div class="card-label">
+            Stock
+        </div>
+
+        <div class="card-value">
+            <?= $stock_total ?>
+        </div>
 
     </div>
 
 </div>
 
 
-<?php else: ?>
+<!-- ACTIONS -->
+
+<h2 class="section-title">
+    ⚡ Actions rapides
+</h2>
 
 
-<!-- =========================
-     APPLICATION
-========================= -->
-
-<div class="app">
+<div class="actions">
 
 
-<!-- =========================
-     SIDEBAR
-========================= -->
+    <a href="produits.php" class="action">
 
-<aside class="sidebar">
-
-
-    <div class="sidebar-brand">
-
-        <h1>
-            💼 LAMBEMAH
-        </h1>
-
-        <p>
-            GESTION • PRESTATION • COMMERCE
-        </p>
-
-    </div>
-
-
-    <div class="user-card">
-
-        <div class="avatar">
-
-            <?= strtoupper(
-                substr(
-                    $_SESSION["nom"],
-                    0,
-                    1
-                )
-            ) ?>
-
+        <div class="action-icon">
+            👕
         </div>
 
-
-        <div class="user-info">
-
-            <strong>
-
-                <?= htmlspecialchars(
-                    $_SESSION["nom"]
-                ) ?>
-
-            </strong>
-
-            <span>
-
-                <?= htmlspecialchars(
-                    $_SESSION["role"]
-                ) ?>
-
-            </span>
-
-        </div>
-
-    </div>
-
-
-    <div class="menu-title">
-        Menu principal
-    </div>
-
-
-    <nav class="menu">
-
-
-        <a
-            href="index.php"
-            class="active"
-        >
-
-            <span class="menu-icon">
-                ⌂
-            </span>
-
-            Tableau de bord
-
-        </a>
-
-
-        <a href="produits.php">
-
-            <span class="menu-icon">
-                📦
-            </span>
-
+        <div class="action-name">
             Produits
+        </div>
 
-        </a>
+        <div class="action-description">
+            Gérer les T-shirts et articles
+        </div>
+
+    </a>
 
 
-        <a href="ventes.php">
+    <a href="ventes.php" class="action">
 
-            <span class="menu-icon">
-                🛒
-            </span>
+        <div class="action-icon">
+            🛒
+        </div>
 
+        <div class="action-name">
             Ventes
+        </div>
 
-        </a>
+        <div class="action-description">
+            Enregistrer une vente
+        </div>
 
-
-        <a href="prestations.php">
-
-            <span class="menu-icon">
-                👕
-            </span>
-
-            Prestations DTF
-
-        </a>
+    </a>
 
 
-        <a href="recettes.php">
+    <a href="prestations.php" class="action">
 
-            <span class="menu-icon">
-                💵
-            </span>
+        <div class="action-icon">
+            🖨️
+        </div>
 
+        <div class="action-name">
+            Prestations
+        </div>
+
+        <div class="action-description">
+            DTF, impression et presse
+        </div>
+
+    </a>
+
+
+    <a href="recettes.php" class="action">
+
+        <div class="action-icon">
+            💰
+        </div>
+
+        <div class="action-name">
             Recettes
+        </div>
 
-        </a>
+        <div class="action-description">
+            Enregistrer une entrée
+        </div>
+
+    </a>
 
 
-        <a href="depenses.php">
+    <a href="depenses.php" class="action">
 
-            <span class="menu-icon">
-                💸
-            </span>
+        <div class="action-icon">
+            💸
+        </div>
 
+        <div class="action-name">
             Dépenses
+        </div>
 
-        </a>
+        <div class="action-description">
+            Suivre les sorties
+        </div>
+
+    </a>
 
 
-        <a href="statistiques.php">
+    <a href="statistiques.php" class="action">
 
-            <span class="menu-icon">
-                📊
-            </span>
+        <div class="action-icon">
+            📊
+        </div>
 
+        <div class="action-name">
             Statistiques
+        </div>
 
-        </a>
+        <div class="action-description">
+            Voir les performances
+        </div>
+
+    </a>
 
 
-        <a href="utilisateurs.php">
+    <a href="utilisateurs.php" class="action">
 
-            <span class="menu-icon">
-                👥
-            </span>
+        <div class="action-icon">
+            👥
+        </div>
 
+        <div class="action-name">
             Utilisateurs
-
-        </a>
-
-
-        <a
-            href="?logout=1"
-            class="logout-link"
-        >
-
-            <span class="menu-icon">
-                ↪
-            </span>
-
-            Déconnexion
-
-        </a>
-
-
-    </nav>
-
-</aside>
-
-
-<!-- =========================
-     CONTENU
-========================= -->
-
-<main class="main">
-
-
-    <div class="topbar">
-
-        <div>
-
-            <h2>
-                Tableau de bord
-            </h2>
-
-            <p>
-                Vue générale de votre activité
-            </p>
-
         </div>
 
-
-        <button
-            class="mobile-menu"
-            onclick="alert('La navigation se trouve en bas de l’écran.')"
-        >
-
-            ☰
-
-        </button>
-
-    </div>
-
-
-    <!-- HERO -->
-
-    <section class="hero">
-
-        <h1>
-
-            Bonjour
-            <?= htmlspecialchars(
-                $_SESSION["nom"]
-            ) ?>
-            👋
-
-        </h1>
-
-
-        <p>
-            Voici l'état actuel de votre entreprise.
-        </p>
-
-
-        <div class="hero-date">
-
-            📅 <?= date("d/m/Y") ?>
-
+        <div class="action-description">
+            Gérer les accès
         </div>
 
-    </section>
+    </a>
 
+</div>
 
-    <!-- =========================
-         CARTES PRINCIPALES
-    ========================= -->
 
-    <section class="cards">
+<!-- INFORMATIONS -->
 
+<h2 class="section-title">
+    📋 Gestion
+</h2>
 
-        <div class="card">
+<div class="menu-list">
 
-            <div class="card-top">
+    <a href="produits.php" class="menu-item">
+        📦 <?= $total_produits ?> produit(s)
+    </a>
 
-                <small>
-                    Produits
-                </small>
+    <a href="ventes.php" class="menu-item">
+        🛍️ <?= $total_ventes ?> vente(s)
+    </a>
 
-                <div class="card-icon">
-                    📦
-                </div>
+    <a href="statistiques.php" class="menu-item">
+        📈 Voir les statistiques
+    </a>
 
-            </div>
+</div>
 
-            <h3>
-                <?= $total_produits ?>
-            </h3>
 
-        </div>
+<!-- DECONNEXION -->
 
-
-        <div class="card green">
-
-            <div class="card-top">
-
-                <small>
-                    Entrées
-                </small>
-
-                <div class="card-icon">
-                    💰
-                </div>
-
-            </div>
-
-            <h3>
-                <?= formatFG($total_entrees) ?>
-            </h3>
-
-        </div>
-
-
-        <div class="card red">
-
-            <div class="card-top">
-
-                <small>
-                    Dépenses
-                </small>
-
-                <div class="card-icon">
-                    💸
-                </div>
-
-            </div>
-
-            <h3>
-                <?= formatFG($total_depenses) ?>
-            </h3>
-
-        </div>
-
-
-        <div class="card orange">
-
-            <div class="card-top">
-
-                <small>
-                    Stock total
-                </small>
-
-                <div class="card-icon">
-                    📦
-                </div>
-
-            </div>
-
-            <h3>
-                <?= $total_stock ?>
-            </h3>
-
-        </div>
-
-
-    </section>
-
-
-    <!-- =========================
-         BLOCS
-    ========================= -->
-
-    <section class="dashboard-grid">
-
-
-        <!-- ACTIVITÉ DU JOUR -->
-
-        <div class="panel">
-
-            <div class="panel-header">
-
-                <h3>
-                    📅 Activité du jour
-                </h3>
-
-                <a href="statistiques.php">
-                    Voir tout →
-                </a>
-
-            </div>
-
-
-            <div class="today">
-
-
-                <div class="today-item">
-
-                    <small>
-                        Ventes
-                    </small>
-
-                    <strong>
-                        <?= formatFG($ventes_jour) ?>
-                    </strong>
-
-                </div>
-
-
-                <div class="today-item">
-
-                    <small>
-                        Recettes
-                    </small>
-
-                    <strong>
-                        <?= formatFG($recettes_jour) ?>
-                    </strong>
-
-                </div>
-
-
-                <div class="today-item">
-
-                    <small>
-                        Dépenses
-                    </small>
-
-                    <strong>
-                        <?= formatFG($depenses_jour) ?>
-                    </strong>
-
-                </div>
-
-
-            </div>
-
-
-            <div style="margin-top:12px">
-
-                <div class="result-box">
-
-                    <small>
-                        Résultat du jour
-                    </small>
-
-                    <strong>
-                        <?= formatFG($resultat_jour) ?>
-                    </strong>
-
-                </div>
-
-            </div>
-
-        </div>
-
-
-        <!-- ACTIONS -->
-
-        <div class="panel">
-
-            <div class="panel-header">
-
-                <h3>
-                    ⚡ Actions rapides
-                </h3>
-
-            </div>
-
-
-            <div class="shortcuts">
-
-
-                <a
-                    href="produits.php"
-                    class="shortcut"
-                >
-
-                    <div class="shortcut-icon">
-                        📦
-                    </div>
-
-                    <strong>
-                        Produit
-                    </strong>
-
-                    <span>
-                        Gérer le stock
-                    </span>
-
-                </a>
-
-
-                <a
-                    href="ventes.php"
-                    class="shortcut"
-                >
-
-                    <div class="shortcut-icon">
-                        🛒
-                    </div>
-
-                    <strong>
-                        Vente
-                    </strong>
-
-                    <span>
-                        Enregistrer une vente
-                    </span>
-
-                </a>
-
-
-                <a
-                    href="prestations.php"
-                    class="shortcut"
-                >
-
-                    <div class="shortcut-icon">
-                        👕
-                    </div>
-
-                    <strong>
-                        DTF
-                    </strong>
-
-                    <span>
-                        Nouvelle prestation
-                    </span>
-
-                </a>
-
-
-                <a
-                    href="depenses.php"
-                    class="shortcut"
-                >
-
-                    <div class="shortcut-icon">
-                        💸
-                    </div>
-
-                    <strong>
-                        Dépense
-                    </strong>
-
-                    <span>
-                        Enregistrer une sortie
-                    </span>
-
-                </a>
-
-
-            </div>
-
-        </div>
-
-
-    </section>
-
-
-    <!-- =========================
-         SITUATION GÉNÉRALE
-    ========================= -->
-
-    <section
-        class="panel"
-        style="margin-top:18px"
-    >
-
-        <div class="panel-header">
-
-            <h3>
-                💎 Situation générale
-            </h3>
-
-            <a href="statistiques.php">
-                Statistiques →
-            </a>
-
-        </div>
-
-
-        <div class="today">
-
-
-            <div class="today-item">
-
-                <small>
-                    Total ventes
-                </small>
-
-                <strong>
-                    <?= formatFG($total_ventes) ?>
-                </strong>
-
-            </div>
-
-
-            <div class="today-item">
-
-                <small>
-                    Total recettes
-                </small>
-
-                <strong>
-                    <?= formatFG($total_recettes) ?>
-                </strong>
-
-            </div>
-
-
-            <div class="today-item">
-
-                <small>
-                    Résultat estimé
-                </small>
-
-                <strong>
-                    <?= formatFG($benefice) ?>
-                </strong>
-
-            </div>
-
-
-        </div>
-
-    </section>
-
+<a href="index.php?logout=1" class="logout">
+    🚪 Se déconnecter
+</a>
+```
 
 </main>
 
-
-<!-- =========================
-     NAVIGATION MOBILE
-========================= -->
-
-<nav class="bottom-nav">
-
-
-    <a
-        href="index.php"
-        class="active"
-    >
-
-        <span>
-            ⌂
-        </span>
-
-        Accueil
-
-    </a>
-
-
-    <a href="produits.php">
-
-        <span>
-            📦
-        </span>
-
-        Produits
-
-    </a>
-
-
-    <a href="ventes.php">
-
-        <span>
-            🛒
-        </span>
-
-        Ventes
-
-    </a>
-
-
-    <a href="prestations.php">
-
-        <span>
-            👕
-        </span>
-
-        DTF
-
-    </a>
-
-
-    <a href="statistiques.php">
-
-        <span>
-            📊
-        </span>
-
-        Stats
-
-    </a>
-
-
-</nav>
-
-
-</div>
-
-
-<?php endif; ?>
-
-
 </body>
-
 </html>
