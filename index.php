@@ -34,7 +34,6 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["connexion"])) {
         );
 
         if ($stmt) {
-
             $stmt->bind_param("s", $username);
             $stmt->execute();
 
@@ -65,13 +64,13 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["connexion"])) {
             $stmt->close();
 
         } else {
-            $message = "Impossible de vérifier la connexion.";
+            $message = "Erreur lors de la connexion.";
         }
     }
 }
 
 /* =========================
-   STATISTIQUES DU TABLEAU DE BORD
+   VALEURS PAR DÉFAUT
 ========================= */
 
 $total_produits = 0;
@@ -80,21 +79,37 @@ $total_ventes = 0;
 $total_recettes = 0;
 $total_depenses = 0;
 
-/* PRODUITS */
+$ventes_jour = 0;
+$recettes_jour = 0;
+$depenses_jour = 0;
+
+
+/* =========================
+   PRODUITS
+========================= */
+
 $result = $conn->query(
-    "SELECT COUNT(*) AS nombre, COALESCE(SUM(stock),0) AS stock
+    "SELECT COUNT(*) AS nombre,
+            COALESCE(SUM(stock),0) AS stock
      FROM produits"
 );
 
 if ($result) {
     $data = $result->fetch_assoc();
+
     $total_produits = (int)$data["nombre"];
     $total_stock = (int)$data["stock"];
 }
 
-/* VENTES */
+
+/* =========================
+   VENTES
+   IMPORTANT : ta colonne est
+   'montant' et non 'total'
+========================= */
+
 $result = $conn->query(
-    "SELECT COALESCE(SUM(total),0) AS total
+    "SELECT COALESCE(SUM(montant),0) AS total
      FROM ventes"
 );
 
@@ -102,7 +117,11 @@ if ($result) {
     $total_ventes = (float)$result->fetch_assoc()["total"];
 }
 
-/* RECETTES */
+
+/* =========================
+   RECETTES
+========================= */
+
 $result = $conn->query(
     "SELECT COALESCE(SUM(montant),0) AS total
      FROM recettes"
@@ -112,7 +131,11 @@ if ($result) {
     $total_recettes = (float)$result->fetch_assoc()["total"];
 }
 
-/* DÉPENSES */
+
+/* =========================
+   DEPENSES
+========================= */
+
 $result = $conn->query(
     "SELECT COALESCE(SUM(montant),0) AS total
      FROM depenses"
@@ -122,20 +145,22 @@ if ($result) {
     $total_depenses = (float)$result->fetch_assoc()["total"];
 }
 
+
+/* =========================
+   TOTALS
+========================= */
+
 $total_entrees = $total_ventes + $total_recettes;
+
 $benefice = $total_entrees - $total_depenses;
 
 
 /* =========================
-   DONNÉES DU JOUR
+   ACTIVITÉ DU JOUR
 ========================= */
 
-$ventes_jour = 0;
-$recettes_jour = 0;
-$depenses_jour = 0;
-
 $result = $conn->query(
-    "SELECT COALESCE(SUM(total),0) AS total
+    "SELECT COALESCE(SUM(montant),0) AS total
      FROM ventes
      WHERE DATE(date_vente) = CURDATE()"
 );
@@ -143,6 +168,7 @@ $result = $conn->query(
 if ($result) {
     $ventes_jour = (float)$result->fetch_assoc()["total"];
 }
+
 
 $result = $conn->query(
     "SELECT COALESCE(SUM(montant),0) AS total
@@ -154,6 +180,7 @@ if ($result) {
     $recettes_jour = (float)$result->fetch_assoc()["total"];
 }
 
+
 $result = $conn->query(
     "SELECT COALESCE(SUM(montant),0) AS total
      FROM depenses
@@ -164,16 +191,24 @@ if ($result) {
     $depenses_jour = (float)$result->fetch_assoc()["total"];
 }
 
+
 $entrees_jour = $ventes_jour + $recettes_jour;
+
 $resultat_jour = $entrees_jour - $depenses_jour;
 
 
 /* =========================
-   FORMATAGE
+   FORMAT MONNAIE
 ========================= */
 
-function fg($montant) {
-    return number_format((float)$montant, 0, ",", " ") . " FG";
+function formatFG($montant)
+{
+    return number_format(
+        (float)$montant,
+        0,
+        ",",
+        " "
+    ) . " FG";
 }
 
 ?>
@@ -192,223 +227,249 @@ function fg($montant) {
 
 <style>
 
-*{
-    box-sizing:border-box;
-    margin:0;
-    padding:0;
+/* =========================
+   BASE
+========================= */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
 }
 
-:root{
-    --blue-dark:#071a35;
-    --blue:#0d6efd;
-    --blue-light:#eaf5ff;
-    --blue-soft:#f4f9ff;
-    --white:#ffffff;
-    --text:#172033;
-    --muted:#748096;
-    --border:#e5edf5;
-    --green:#0a9f63;
-    --red:#e34d59;
+:root {
+
+    --bleu-nuit: #071a35;
+
+    --bleu: #168cff;
+
+    --bleu-clair: #eaf6ff;
+
+    --bleu-tres-clair: #f5faff;
+
+    --blanc: #ffffff;
+
+    --texte: #172033;
+
+    --gris: #738096;
+
+    --bordure: #e3edf6;
+
+    --vert: #0a9f63;
+
+    --rouge: #e04d5b;
+
+    --orange: #e99722;
 }
 
-body{
+body {
+
     font-family:
-        -apple-system,
-        BlinkMacSystemFont,
-        "Segoe UI",
-        Roboto,
         Arial,
+        Helvetica,
         sans-serif;
 
-    background:#f4f8fc;
-    color:var(--text);
-    min-height:100vh;
+    background: #f3f7fb;
+
+    color: var(--texte);
+
+    min-height: 100vh;
 }
 
 
 /* =========================
-   PAGE DE CONNEXION
+   LOGIN
 ========================= */
 
-.login-page{
+.login-page {
 
-    min-height:100vh;
+    min-height: 100vh;
 
-    display:flex;
-    align-items:center;
-    justify-content:center;
+    display: flex;
 
-    padding:20px;
+    align-items: center;
+
+    justify-content: center;
+
+    padding: 20px;
 
     background:
         radial-gradient(
-            circle at top left,
-            #b9e5ff 0,
-            transparent 35%
+            circle at 15% 10%,
+            #7bd1ff 0,
+            transparent 28%
         ),
         linear-gradient(
             135deg,
-            #071a35,
-            #0b5796
+            #06162f,
+            #0b5998
         );
 }
 
-.login-box{
+.login-box {
 
-    width:100%;
-    max-width:430px;
+    width: 100%;
 
-    background:rgba(255,255,255,.98);
+    max-width: 430px;
 
-    border-radius:28px;
+    padding: 34px 28px;
 
-    padding:35px 28px;
+    background: rgba(255,255,255,.98);
+
+    border-radius: 28px;
 
     box-shadow:
         0 25px 70px rgba(0,0,0,.25);
 }
 
-.brand{
+.brand {
 
-    text-align:center;
-    margin-bottom:30px;
+    text-align: center;
+
+    margin-bottom: 30px;
 }
 
-.brand-logo{
+.brand-logo {
 
-    width:75px;
-    height:75px;
+    width: 76px;
 
-    margin:auto;
-    margin-bottom:15px;
+    height: 76px;
 
-    border-radius:23px;
+    margin: 0 auto 15px;
 
-    display:flex;
-    align-items:center;
-    justify-content:center;
+    display: flex;
+
+    align-items: center;
+
+    justify-content: center;
+
+    border-radius: 24px;
 
     background:
         linear-gradient(
             135deg,
-            #0d6efd,
+            #168cff,
             #071a35
         );
 
-    color:white;
+    color: white;
 
-    font-size:31px;
-
-    box-shadow:
-        0 12px 30px rgba(13,110,253,.3);
-}
-
-.brand h1{
-
-    font-size:27px;
-    color:var(--blue-dark);
-
-    margin-bottom:7px;
-}
-
-.brand p{
-
-    color:var(--muted);
-    font-size:14px;
-}
-
-.login-box h2{
-
-    font-size:22px;
-    margin-bottom:20px;
-    color:var(--blue-dark);
-}
-
-.form-group{
-    margin-bottom:17px;
-}
-
-.form-group label{
-
-    display:block;
-
-    font-size:14px;
-    font-weight:700;
-
-    margin-bottom:7px;
-}
-
-.form-group input{
-
-    width:100%;
-
-    padding:15px;
-
-    border:1px solid #dce6f0;
-
-    border-radius:13px;
-
-    outline:none;
-
-    font-size:15px;
-
-    transition:.2s;
-}
-
-.form-group input:focus{
-
-    border-color:var(--blue);
+    font-size: 32px;
 
     box-shadow:
-        0 0 0 4px rgba(13,110,253,.1);
+        0 12px 30px rgba(22,140,255,.3);
 }
 
-.login-button{
+.brand h1 {
 
-    width:100%;
+    font-size: 27px;
 
-    border:0;
+    color: var(--bleu-nuit);
 
-    padding:15px;
+    margin-bottom: 7px;
+}
 
-    border-radius:13px;
+.brand p {
+
+    color: var(--gris);
+
+    font-size: 14px;
+}
+
+.login-box h2 {
+
+    font-size: 21px;
+
+    margin-bottom: 20px;
+
+    color: var(--bleu-nuit);
+}
+
+.form-group {
+
+    margin-bottom: 17px;
+}
+
+.form-group label {
+
+    display: block;
+
+    margin-bottom: 7px;
+
+    font-size: 14px;
+
+    font-weight: bold;
+}
+
+.form-group input {
+
+    width: 100%;
+
+    padding: 15px;
+
+    border: 1px solid #d9e5ef;
+
+    border-radius: 13px;
+
+    outline: none;
+
+    font-size: 15px;
+
+    transition: .2s;
+}
+
+.form-group input:focus {
+
+    border-color: var(--bleu);
+
+    box-shadow:
+        0 0 0 4px rgba(22,140,255,.1);
+}
+
+.login-button {
+
+    width: 100%;
+
+    border: none;
+
+    padding: 15px;
+
+    border-radius: 13px;
 
     background:
         linear-gradient(
             135deg,
-            #0d6efd,
-            #0755a0
+            #168cff,
+            #07569c
         );
 
-    color:white;
+    color: white;
 
-    font-size:16px;
-    font-weight:700;
+    font-size: 16px;
 
-    cursor:pointer;
+    font-weight: bold;
+
+    cursor: pointer;
 
     box-shadow:
-        0 10px 25px rgba(13,110,253,.25);
+        0 10px 25px rgba(22,140,255,.25);
 }
 
-.login-button:hover{
-    transform:translateY(-1px);
-}
+.error {
 
-.error{
+    background: #fff0f1;
 
-    background:#fff0f1;
-    color:#c52f3b;
+    color: #c52e3a;
 
-    padding:13px;
+    padding: 13px;
 
-    border-radius:12px;
+    border-radius: 12px;
 
-    margin-bottom:18px;
+    margin-bottom: 18px;
 
-    font-size:14px;
+    text-align: center;
 
-    text-align:center;
+    font-size: 14px;
 }
 
 
@@ -416,781 +477,807 @@ body{
    APPLICATION
 ========================= */
 
-.app{
+.app {
 
-    min-height:100vh;
+    min-height: 100vh;
 
-    display:flex;
+    display: flex;
 }
 
 
-/* SIDEBAR */
+/* =========================
+   SIDEBAR
+========================= */
 
-.sidebar{
+.sidebar {
 
-    width:260px;
+    position: fixed;
 
-    position:fixed;
-    left:0;
-    top:0;
-    bottom:0;
+    left: 0;
 
-    padding:22px 15px;
+    top: 0;
+
+    bottom: 0;
+
+    width: 260px;
+
+    padding: 22px 15px;
 
     background:
         linear-gradient(
             180deg,
-            #06172f 0%,
+            #06172f,
             #092f58 55%,
-            #0b5b99 100%
+            #0a609f
         );
 
-    color:white;
+    color: white;
 
-    z-index:100;
+    overflow-y: auto;
 
-    overflow-y:auto;
+    z-index: 100;
 }
 
-.sidebar-brand{
+.sidebar-brand {
 
-    padding:8px 12px 25px;
+    padding: 8px 12px 23px;
+
+    margin-bottom: 18px;
 
     border-bottom:
         1px solid rgba(255,255,255,.1);
-
-    margin-bottom:18px;
 }
 
-.sidebar-brand h1{
+.sidebar-brand h1 {
 
-    font-size:21px;
-    margin-bottom:5px;
+    font-size: 21px;
+
+    margin-bottom: 5px;
 }
 
-.sidebar-brand p{
+.sidebar-brand p {
 
-    font-size:12px;
-    opacity:.7;
+    font-size: 11px;
+
+    opacity: .65;
 }
 
-.user-card{
+.user-card {
 
-    display:flex;
-    align-items:center;
-    gap:11px;
+    display: flex;
 
-    background:rgba(255,255,255,.08);
+    align-items: center;
 
-    padding:12px;
+    gap: 11px;
 
-    border-radius:15px;
+    padding: 12px;
 
-    margin-bottom:20px;
+    margin-bottom: 20px;
+
+    border-radius: 15px;
+
+    background:
+        rgba(255,255,255,.08);
 }
 
-.avatar{
+.avatar {
 
-    width:42px;
-    height:42px;
+    width: 42px;
 
-    flex-shrink:0;
+    height: 42px;
 
-    border-radius:13px;
+    flex-shrink: 0;
 
-    display:flex;
-    align-items:center;
-    justify-content:center;
+    display: flex;
 
-    background:#168cff;
+    align-items: center;
 
-    color:white;
+    justify-content: center;
 
-    font-weight:bold;
+    border-radius: 13px;
+
+    background: #168cff;
+
+    font-weight: bold;
 }
 
-.user-info strong{
+.user-info strong {
 
-    display:block;
+    display: block;
 
-    font-size:13px;
+    font-size: 13px;
 }
 
-.user-info span{
+.user-info span {
 
-    display:block;
+    display: block;
 
-    font-size:11px;
+    margin-top: 3px;
 
-    opacity:.65;
+    font-size: 11px;
 
-    margin-top:3px;
+    opacity: .65;
 }
 
-.menu-title{
+.menu-title {
 
-    color:rgba(255,255,255,.45);
+    padding: 0 12px 8px;
 
-    font-size:10px;
+    color: rgba(255,255,255,.45);
 
-    font-weight:bold;
+    font-size: 10px;
 
-    text-transform:uppercase;
+    font-weight: bold;
 
-    letter-spacing:1px;
+    letter-spacing: 1px;
 
-    padding:0 12px 8px;
+    text-transform: uppercase;
 }
 
-.menu a{
+.menu a {
 
-    display:flex;
+    display: flex;
 
-    align-items:center;
+    align-items: center;
 
-    gap:12px;
+    gap: 12px;
 
-    padding:12px 13px;
+    padding: 12px 13px;
 
-    border-radius:12px;
+    margin-bottom: 4px;
 
-    color:rgba(255,255,255,.82);
+    border-radius: 12px;
 
-    text-decoration:none;
+    color: rgba(255,255,255,.82);
 
-    font-size:14px;
+    text-decoration: none;
 
-    font-weight:600;
+    font-size: 14px;
 
-    margin-bottom:4px;
+    font-weight: 600;
 
-    transition:.2s;
+    transition: .2s;
 }
 
 .menu a:hover,
-.menu a.active{
+.menu a.active {
 
-    background:rgba(255,255,255,.14);
+    color: white;
 
-    color:white;
+    background:
+        rgba(255,255,255,.14);
 }
 
-.menu-icon{
+.menu-icon {
 
-    width:28px;
-    height:28px;
+    width: 29px;
 
-    display:flex;
-    align-items:center;
-    justify-content:center;
+    height: 29px;
 
-    background:rgba(255,255,255,.08);
+    display: flex;
 
-    border-radius:8px;
+    align-items: center;
 
-    font-size:14px;
+    justify-content: center;
+
+    border-radius: 8px;
+
+    background:
+        rgba(255,255,255,.08);
 }
 
-.logout-link{
+.logout-link {
 
-    margin-top:20px !important;
+    margin-top: 20px !important;
 
-    color:#ffb5bb !important;
-}
-
-
-/* CONTENU */
-
-.main{
-
-    margin-left:260px;
-
-    width:calc(100% - 260px);
-
-    min-height:100vh;
-
-    padding:25px;
-}
-
-.topbar{
-
-    display:flex;
-
-    justify-content:space-between;
-
-    align-items:center;
-
-    margin-bottom:25px;
-}
-
-.topbar h2{
-
-    font-size:25px;
-
-    color:var(--blue-dark);
-}
-
-.topbar p{
-
-    margin-top:4px;
-
-    color:var(--muted);
-
-    font-size:13px;
-}
-
-.mobile-menu{
-
-    display:none;
+    color: #ffb8bf !important;
 }
 
 
-/* HERO */
+/* =========================
+   CONTENU
+========================= */
 
-.hero{
+.main {
 
-    position:relative;
+    width: calc(100% - 260px);
 
-    overflow:hidden;
+    min-height: 100vh;
+
+    margin-left: 260px;
+
+    padding: 25px;
+}
+
+.topbar {
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: space-between;
+
+    margin-bottom: 24px;
+}
+
+.topbar h2 {
+
+    font-size: 25px;
+
+    color: var(--bleu-nuit);
+}
+
+.topbar p {
+
+    margin-top: 4px;
+
+    color: var(--gris);
+
+    font-size: 13px;
+}
+
+.mobile-menu {
+
+    display: none;
+}
+
+
+/* =========================
+   HERO
+========================= */
+
+.hero {
+
+    position: relative;
+
+    overflow: hidden;
+
+    padding: 28px;
+
+    margin-bottom: 20px;
+
+    border-radius: 23px;
+
+    color: white;
 
     background:
         linear-gradient(
             120deg,
-            #071a35,
-            #0b5796
+            #06172f,
+            #0b5998
         );
-
-    color:white;
-
-    padding:28px;
-
-    border-radius:23px;
-
-    margin-bottom:20px;
 
     box-shadow:
         0 15px 35px rgba(7,26,53,.16);
 }
 
-.hero:after{
+.hero h1 {
 
-    content:"";
+    position: relative;
 
-    position:absolute;
+    z-index: 2;
 
-    width:180px;
-    height:180px;
+    font-size: 24px;
 
-    right:-50px;
-    top:-70px;
-
-    border-radius:50%;
-
-    background:rgba(255,255,255,.08);
+    margin-bottom: 7px;
 }
 
-.hero h1{
+.hero p {
 
-    font-size:24px;
-    margin-bottom:7px;
+    position: relative;
 
-    position:relative;
-    z-index:2;
+    z-index: 2;
+
+    font-size: 14px;
+
+    opacity: .8;
 }
 
-.hero p{
+.hero-date {
 
-    opacity:.8;
+    display: inline-block;
 
-    font-size:14px;
+    margin-top: 18px;
 
-    position:relative;
-    z-index:2;
-}
+    padding: 8px 12px;
 
-.hero-date{
-
-    margin-top:18px;
-
-    display:inline-block;
-
-    padding:8px 12px;
-
-    background:rgba(255,255,255,.1);
-
-    border-radius:10px;
-
-    font-size:12px;
-}
-
-
-/* CARTES */
-
-.cards{
-
-    display:grid;
-
-    grid-template-columns:
-        repeat(4,1fr);
-
-    gap:15px;
-
-    margin-bottom:20px;
-}
-
-.card{
-
-    background:white;
-
-    border-radius:18px;
-
-    padding:18px;
-
-    border:1px solid var(--border);
-
-    box-shadow:
-        0 7px 25px rgba(0,0,0,.04);
-}
-
-.card-top{
-
-    display:flex;
-
-    justify-content:space-between;
-
-    align-items:center;
-
-    margin-bottom:15px;
-}
-
-.card-icon{
-
-    width:43px;
-    height:43px;
-
-    display:flex;
-    align-items:center;
-    justify-content:center;
-
-    border-radius:13px;
-
-    background:var(--blue-light);
-
-    font-size:20px;
-}
-
-.card small{
-
-    color:var(--muted);
-
-    font-weight:600;
-}
-
-.card h3{
-
-    margin-top:5px;
-
-    font-size:21px;
-
-    color:var(--blue-dark);
-}
-
-.card.green .card-icon{
-    background:#e9f9f2;
-}
-
-.card.red .card-icon{
-    background:#fff0f1;
-}
-
-.card.orange .card-icon{
-    background:#fff7e8;
-}
-
-
-/* DEUX COLONNES */
-
-.dashboard-grid{
-
-    display:grid;
-
-    grid-template-columns:
-        1.4fr .8fr;
-
-    gap:18px;
-}
-
-.panel{
-
-    background:white;
-
-    border:1px solid var(--border);
-
-    border-radius:19px;
-
-    padding:20px;
-
-    box-shadow:
-        0 7px 25px rgba(0,0,0,.04);
-}
-
-.panel-header{
-
-    display:flex;
-
-    align-items:center;
-
-    justify-content:space-between;
-
-    margin-bottom:18px;
-}
-
-.panel-header h3{
-
-    font-size:17px;
-
-    color:var(--blue-dark);
-}
-
-.panel-header a{
-
-    color:var(--blue);
-
-    font-size:12px;
-
-    font-weight:bold;
-
-    text-decoration:none;
-}
-
-
-/* JOUR */
-
-.today{
-
-    display:grid;
-
-    grid-template-columns:
-        repeat(3,1fr);
-
-    gap:10px;
-}
-
-.today-item{
-
-    padding:15px;
-
-    border-radius:14px;
-
-    background:var(--blue-soft);
-}
-
-.today-item small{
-
-    display:block;
-
-    color:var(--muted);
-
-    margin-bottom:7px;
-}
-
-.today-item strong{
-
-    font-size:17px;
-
-    color:var(--blue-dark);
-}
-
-
-/* RESULTAT */
-
-.result-box{
+    border-radius: 10px;
 
     background:
-        linear-gradient(
-            135deg,
-            #0d6efd,
-            #071a35
-        );
+        rgba(255,255,255,.1);
 
-    color:white;
-
-    padding:20px;
-
-    border-radius:17px;
-}
-
-.result-box small{
-
-    opacity:.75;
-}
-
-.result-box strong{
-
-    display:block;
-
-    font-size:28px;
-
-    margin-top:7px;
-}
-
-
-/* RACCOURCIS */
-
-.shortcuts{
-
-    display:grid;
-
-    grid-template-columns:
-        repeat(2,1fr);
-
-    gap:10px;
-}
-
-.shortcut{
-
-    text-decoration:none;
-
-    color:var(--text);
-
-    padding:15px;
-
-    border-radius:14px;
-
-    background:#f5f9fd;
-
-    border:1px solid #e7eff7;
-
-    transition:.2s;
-}
-
-.shortcut:hover{
-
-    background:var(--blue-light);
-
-    border-color:#cce6ff;
-}
-
-.shortcut-icon{
-
-    font-size:22px;
-
-    margin-bottom:8px;
-}
-
-.shortcut strong{
-
-    display:block;
-
-    font-size:13px;
-}
-
-.shortcut span{
-
-    display:block;
-
-    color:var(--muted);
-
-    font-size:11px;
-
-    margin-top:3px;
+    font-size: 12px;
 }
 
 
 /* =========================
-   MOBILE
+   CARTES
 ========================= */
 
-@media(max-width:900px){
+.cards {
 
-    .sidebar{
+    display: grid;
 
-        width:225px;
+    grid-template-columns:
+        repeat(4,1fr);
+
+    gap: 15px;
+
+    margin-bottom: 20px;
+}
+
+.card {
+
+    padding: 18px;
+
+    border-radius: 18px;
+
+    background: white;
+
+    border: 1px solid var(--bordure);
+
+    box-shadow:
+        0 7px 25px rgba(0,0,0,.04);
+}
+
+.card-top {
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: space-between;
+
+    margin-bottom: 15px;
+}
+
+.card small {
+
+    color: var(--gris);
+
+    font-weight: 600;
+}
+
+.card h3 {
+
+    color: var(--bleu-nuit);
+
+    font-size: 20px;
+}
+
+.card-icon {
+
+    width: 43px;
+
+    height: 43px;
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: center;
+
+    border-radius: 13px;
+
+    background: var(--bleu-clair);
+
+    font-size: 20px;
+}
+
+.card.green .card-icon {
+
+    background: #e8f9f1;
+}
+
+.card.red .card-icon {
+
+    background: #fff0f1;
+}
+
+.card.orange .card-icon {
+
+    background: #fff7e7;
+}
+
+
+/* =========================
+   PANELS
+========================= */
+
+.dashboard-grid {
+
+    display: grid;
+
+    grid-template-columns:
+        1.4fr .8fr;
+
+    gap: 18px;
+}
+
+.panel {
+
+    padding: 20px;
+
+    border-radius: 19px;
+
+    background: white;
+
+    border: 1px solid var(--bordure);
+
+    box-shadow:
+        0 7px 25px rgba(0,0,0,.04);
+}
+
+.panel-header {
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: space-between;
+
+    margin-bottom: 18px;
+}
+
+.panel-header h3 {
+
+    color: var(--bleu-nuit);
+
+    font-size: 17px;
+}
+
+.panel-header a {
+
+    color: var(--bleu);
+
+    text-decoration: none;
+
+    font-size: 12px;
+
+    font-weight: bold;
+}
+
+
+/* =========================
+   ACTIVITÉ
+========================= */
+
+.today {
+
+    display: grid;
+
+    grid-template-columns:
+        repeat(3,1fr);
+
+    gap: 10px;
+}
+
+.today-item {
+
+    padding: 15px;
+
+    border-radius: 14px;
+
+    background: var(--bleu-tres-clair);
+}
+
+.today-item small {
+
+    display: block;
+
+    color: var(--gris);
+
+    margin-bottom: 7px;
+}
+
+.today-item strong {
+
+    color: var(--bleu-nuit);
+
+    font-size: 17px;
+}
+
+
+/* =========================
+   RESULTAT
+========================= */
+
+.result-box {
+
+    padding: 20px;
+
+    border-radius: 17px;
+
+    color: white;
+
+    background:
+        linear-gradient(
+            135deg,
+            #168cff,
+            #06172f
+        );
+}
+
+.result-box small {
+
+    opacity: .75;
+}
+
+.result-box strong {
+
+    display: block;
+
+    margin-top: 7px;
+
+    font-size: 27px;
+}
+
+
+/* =========================
+   RACCOURCIS
+========================= */
+
+.shortcuts {
+
+    display: grid;
+
+    grid-template-columns:
+        repeat(2,1fr);
+
+    gap: 10px;
+}
+
+.shortcut {
+
+    padding: 15px;
+
+    border-radius: 14px;
+
+    color: var(--texte);
+
+    text-decoration: none;
+
+    background: #f5f9fd;
+
+    border: 1px solid #e7eff7;
+
+    transition: .2s;
+}
+
+.shortcut:hover {
+
+    background: var(--bleu-clair);
+
+    border-color: #cce6ff;
+}
+
+.shortcut-icon {
+
+    margin-bottom: 8px;
+
+    font-size: 22px;
+}
+
+.shortcut strong {
+
+    display: block;
+
+    font-size: 13px;
+}
+
+.shortcut span {
+
+    display: block;
+
+    margin-top: 3px;
+
+    color: var(--gris);
+
+    font-size: 11px;
+}
+
+
+/* =========================
+   RESPONSIVE
+========================= */
+
+@media(max-width:950px) {
+
+    .sidebar {
+
+        width: 225px;
     }
 
-    .main{
+    .main {
 
-        margin-left:225px;
+        width: calc(100% - 225px);
 
-        width:calc(100% - 225px);
+        margin-left: 225px;
     }
 
-    .cards{
+    .cards {
 
         grid-template-columns:
             repeat(2,1fr);
     }
 
-    .dashboard-grid{
+    .dashboard-grid {
 
-        grid-template-columns:1fr;
+        grid-template-columns: 1fr;
     }
 }
 
 
-@media(max-width:700px){
+@media(max-width:700px) {
 
-    .sidebar{
+    .sidebar {
 
-        display:none;
+        display: none;
     }
 
-    .main{
+    .main {
 
-        margin-left:0;
+        width: 100%;
 
-        width:100%;
+        margin-left: 0;
 
-        padding:12px;
+        padding: 13px;
 
-        padding-bottom:80px;
+        padding-bottom: 90px;
     }
 
-    .topbar{
+    .topbar {
 
-        margin-bottom:15px;
+        margin-bottom: 15px;
     }
 
-    .topbar h2{
+    .topbar h2 {
 
-        font-size:20px;
+        font-size: 20px;
     }
 
-    .mobile-menu{
+    .mobile-menu {
 
-        display:flex;
+        display: flex;
 
-        width:42px;
-        height:42px;
+        width: 42px;
 
-        align-items:center;
-        justify-content:center;
+        height: 42px;
 
-        background:white;
+        align-items: center;
 
-        border:1px solid var(--border);
+        justify-content: center;
 
-        border-radius:12px;
+        border: 1px solid var(--bordure);
 
-        color:var(--blue-dark);
+        border-radius: 12px;
 
-        font-size:20px;
+        background: white;
+
+        color: var(--bleu-nuit);
+
+        font-size: 20px;
     }
 
-    .hero{
+    .hero {
 
-        padding:22px;
+        padding: 22px;
 
-        border-radius:20px;
+        border-radius: 20px;
     }
 
-    .hero h1{
+    .hero h1 {
 
-        font-size:20px;
+        font-size: 20px;
     }
 
-    .cards{
+    .cards {
 
         grid-template-columns:
             repeat(2,1fr);
 
-        gap:10px;
+        gap: 10px;
     }
 
-    .card{
+    .card {
 
-        padding:14px;
+        padding: 14px;
 
-        border-radius:16px;
+        border-radius: 16px;
     }
 
-    .card h3{
+    .card h3 {
 
-        font-size:17px;
+        font-size: 16px;
     }
 
-    .card-icon{
+    .card-icon {
 
-        width:38px;
-        height:38px;
+        width: 38px;
+
+        height: 38px;
+
+        font-size: 17px;
     }
 
-    .today{
+    .today {
 
-        grid-template-columns:1fr;
+        grid-template-columns: 1fr;
     }
 
-    .shortcuts{
+    .shortcuts {
 
         grid-template-columns:
             repeat(2,1fr);
     }
-
 }
 
 
-/* BOTTOM NAVIGATION MOBILE */
+/* =========================
+   NAVIGATION MOBILE
+========================= */
 
-.bottom-nav{
+.bottom-nav {
 
-    display:none;
+    display: none;
 }
 
-@media(max-width:700px){
+@media(max-width:700px) {
 
-    .bottom-nav{
+    .bottom-nav {
 
-        display:flex;
+        position: fixed;
 
-        position:fixed;
+        left: 10px;
 
-        left:10px;
-        right:10px;
-        bottom:10px;
+        right: 10px;
 
-        height:65px;
+        bottom: 10px;
+
+        z-index: 999;
+
+        height: 65px;
+
+        display: flex;
+
+        align-items: center;
+
+        justify-content: space-around;
+
+        border-radius: 19px;
 
         background:
-            rgba(7,26,53,.96);
-
-        backdrop-filter:blur(15px);
-
-        border-radius:19px;
-
-        z-index:999;
+            rgba(6,23,47,.97);
 
         box-shadow:
             0 10px 35px rgba(0,0,0,.2);
-
-        align-items:center;
-        justify-content:space-around;
     }
 
-    .bottom-nav a{
+    .bottom-nav a {
 
-        color:rgba(255,255,255,.65);
+        display: flex;
 
-        text-decoration:none;
+        flex-direction: column;
 
-        display:flex;
+        align-items: center;
 
-        flex-direction:column;
+        gap: 4px;
 
-        align-items:center;
+        color: rgba(255,255,255,.65);
 
-        gap:4px;
+        text-decoration: none;
 
-        font-size:10px;
+        font-size: 10px;
     }
 
-    .bottom-nav a:first-child{
+    .bottom-nav a.active {
 
-        color:white;
+        color: white;
     }
 
-    .bottom-nav span{
+    .bottom-nav span {
 
-        font-size:19px;
+        font-size: 19px;
     }
 }
 
@@ -1198,10 +1285,12 @@ body{
 
 </head>
 
+
 <body>
 
 
 <?php if (!isset($_SESSION["id"])): ?>
+
 
 <!-- =========================
      CONNEXION
@@ -1217,7 +1306,9 @@ body{
                 💼
             </div>
 
-            <h1>LAMBEMAH GESTION</h1>
+            <h1>
+                LAMBEMAH GESTION
+            </h1>
 
             <p>
                 Votre activité, simplement maîtrisée.
@@ -1225,15 +1316,22 @@ body{
 
         </div>
 
-        <h2>Bienvenue 👋</h2>
+
+        <h2>
+            Bienvenue 👋
+        </h2>
+
 
         <?php if ($message !== ""): ?>
 
             <div class="error">
+
                 <?= htmlspecialchars($message) ?>
+
             </div>
 
         <?php endif; ?>
+
 
         <form method="POST">
 
@@ -1253,6 +1351,7 @@ body{
 
             </div>
 
+
             <div class="form-group">
 
                 <label>
@@ -1269,12 +1368,15 @@ body{
 
             </div>
 
+
             <button
-                class="login-button"
                 type="submit"
                 name="connexion"
+                class="login-button"
             >
+
                 Se connecter →
+
             </button>
 
         </form>
@@ -1294,13 +1396,18 @@ body{
 <div class="app">
 
 
-<!-- SIDEBAR -->
+<!-- =========================
+     SIDEBAR
+========================= -->
 
 <aside class="sidebar">
 
+
     <div class="sidebar-brand">
 
-        <h1>💼 LAMBEMAH</h1>
+        <h1>
+            💼 LAMBEMAH
+        </h1>
 
         <p>
             GESTION • PRESTATION • COMMERCE
@@ -1312,17 +1419,34 @@ body{
     <div class="user-card">
 
         <div class="avatar">
-            <?= strtoupper(substr($_SESSION["nom"],0,1)) ?>
+
+            <?= strtoupper(
+                substr(
+                    $_SESSION["nom"],
+                    0,
+                    1
+                )
+            ) ?>
+
         </div>
+
 
         <div class="user-info">
 
             <strong>
-                <?= htmlspecialchars($_SESSION["nom"]) ?>
+
+                <?= htmlspecialchars(
+                    $_SESSION["nom"]
+                ) ?>
+
             </strong>
 
             <span>
-                <?= htmlspecialchars($_SESSION["role"]) ?>
+
+                <?= htmlspecialchars(
+                    $_SESSION["role"]
+                ) ?>
+
             </span>
 
         </div>
@@ -1337,9 +1461,15 @@ body{
 
     <nav class="menu">
 
-        <a href="index.php" class="active">
 
-            <span class="menu-icon">⌂</span>
+        <a
+            href="index.php"
+            class="active"
+        >
+
+            <span class="menu-icon">
+                ⌂
+            </span>
 
             Tableau de bord
 
@@ -1348,7 +1478,9 @@ body{
 
         <a href="produits.php">
 
-            <span class="menu-icon">📦</span>
+            <span class="menu-icon">
+                📦
+            </span>
 
             Produits
 
@@ -1357,7 +1489,9 @@ body{
 
         <a href="ventes.php">
 
-            <span class="menu-icon">🛒</span>
+            <span class="menu-icon">
+                🛒
+            </span>
 
             Ventes
 
@@ -1366,7 +1500,9 @@ body{
 
         <a href="prestations.php">
 
-            <span class="menu-icon">👕</span>
+            <span class="menu-icon">
+                👕
+            </span>
 
             Prestations DTF
 
@@ -1375,7 +1511,9 @@ body{
 
         <a href="recettes.php">
 
-            <span class="menu-icon">💵</span>
+            <span class="menu-icon">
+                💵
+            </span>
 
             Recettes
 
@@ -1384,7 +1522,9 @@ body{
 
         <a href="depenses.php">
 
-            <span class="menu-icon">💸</span>
+            <span class="menu-icon">
+                💸
+            </span>
 
             Dépenses
 
@@ -1393,7 +1533,9 @@ body{
 
         <a href="statistiques.php">
 
-            <span class="menu-icon">📊</span>
+            <span class="menu-icon">
+                📊
+            </span>
 
             Statistiques
 
@@ -1402,7 +1544,9 @@ body{
 
         <a href="utilisateurs.php">
 
-            <span class="menu-icon">👥</span>
+            <span class="menu-icon">
+                👥
+            </span>
 
             Utilisateurs
 
@@ -1414,18 +1558,23 @@ body{
             class="logout-link"
         >
 
-            <span class="menu-icon">↪</span>
+            <span class="menu-icon">
+                ↪
+            </span>
 
             Déconnexion
 
         </a>
+
 
     </nav>
 
 </aside>
 
 
-<!-- CONTENU -->
+<!-- =========================
+     CONTENU
+========================= -->
 
 <main class="main">
 
@@ -1444,11 +1593,14 @@ body{
 
         </div>
 
+
         <button
             class="mobile-menu"
-            onclick="alert('Utilisez le menu en bas de l’écran.')"
+            onclick="alert('La navigation se trouve en bas de l’écran.')"
         >
+
             ☰
+
         </button>
 
     </div>
@@ -1459,24 +1611,33 @@ body{
     <section class="hero">
 
         <h1>
-            Bonjour <?= htmlspecialchars($_SESSION["nom"]) ?> 👋
+
+            Bonjour
+            <?= htmlspecialchars(
+                $_SESSION["nom"]
+            ) ?>
+            👋
+
         </h1>
+
 
         <p>
             Voici l'état actuel de votre entreprise.
         </p>
 
+
         <div class="hero-date">
 
-            📅
-            <?= date("d/m/Y") ?>
+            📅 <?= date("d/m/Y") ?>
 
         </div>
 
     </section>
 
 
-    <!-- CARTES -->
+    <!-- =========================
+         CARTES PRINCIPALES
+    ========================= -->
 
     <section class="cards">
 
@@ -1517,7 +1678,7 @@ body{
             </div>
 
             <h3>
-                <?= fg($total_entrees) ?>
+                <?= formatFG($total_entrees) ?>
             </h3>
 
         </div>
@@ -1538,7 +1699,7 @@ body{
             </div>
 
             <h3>
-                <?= fg($total_depenses) ?>
+                <?= formatFG($total_depenses) ?>
             </h3>
 
         </div>
@@ -1568,10 +1729,14 @@ body{
     </section>
 
 
-    <!-- DASHBOARD GRID -->
+    <!-- =========================
+         BLOCS
+    ========================= -->
 
     <section class="dashboard-grid">
 
+
+        <!-- ACTIVITÉ DU JOUR -->
 
         <div class="panel">
 
@@ -1598,7 +1763,7 @@ body{
                     </small>
 
                     <strong>
-                        <?= fg($ventes_jour) ?>
+                        <?= formatFG($ventes_jour) ?>
                     </strong>
 
                 </div>
@@ -1611,7 +1776,7 @@ body{
                     </small>
 
                     <strong>
-                        <?= fg($recettes_jour) ?>
+                        <?= formatFG($recettes_jour) ?>
                     </strong>
 
                 </div>
@@ -1624,7 +1789,7 @@ body{
                     </small>
 
                     <strong>
-                        <?= fg($depenses_jour) ?>
+                        <?= formatFG($depenses_jour) ?>
                     </strong>
 
                 </div>
@@ -1642,7 +1807,7 @@ body{
                     </small>
 
                     <strong>
-                        <?= fg($resultat_jour) ?>
+                        <?= formatFG($resultat_jour) ?>
                     </strong>
 
                 </div>
@@ -1651,6 +1816,8 @@ body{
 
         </div>
 
+
+        <!-- ACTIONS -->
 
         <div class="panel">
 
@@ -1754,7 +1921,9 @@ body{
     </section>
 
 
-    <!-- SITUATION GÉNÉRALE -->
+    <!-- =========================
+         SITUATION GÉNÉRALE
+    ========================= -->
 
     <section
         class="panel"
@@ -1784,7 +1953,7 @@ body{
                 </small>
 
                 <strong>
-                    <?= fg($total_ventes) ?>
+                    <?= formatFG($total_ventes) ?>
                 </strong>
 
             </div>
@@ -1797,7 +1966,7 @@ body{
                 </small>
 
                 <strong>
-                    <?= fg($total_recettes) ?>
+                    <?= formatFG($total_recettes) ?>
                 </strong>
 
             </div>
@@ -1806,11 +1975,11 @@ body{
             <div class="today-item">
 
                 <small>
-                    Bénéfice estimé
+                    Résultat estimé
                 </small>
 
                 <strong>
-                    <?= fg($benefice) ?>
+                    <?= formatFG($benefice) ?>
                 </strong>
 
             </div>
@@ -1824,13 +1993,21 @@ body{
 </main>
 
 
-<!-- NAVIGATION MOBILE -->
+<!-- =========================
+     NAVIGATION MOBILE
+========================= -->
 
 <nav class="bottom-nav">
 
-    <a href="index.php">
 
-        <span>⌂</span>
+    <a
+        href="index.php"
+        class="active"
+    >
+
+        <span>
+            ⌂
+        </span>
 
         Accueil
 
@@ -1839,7 +2016,9 @@ body{
 
     <a href="produits.php">
 
-        <span>📦</span>
+        <span>
+            📦
+        </span>
 
         Produits
 
@@ -1848,7 +2027,9 @@ body{
 
     <a href="ventes.php">
 
-        <span>🛒</span>
+        <span>
+            🛒
+        </span>
 
         Ventes
 
@@ -1857,7 +2038,9 @@ body{
 
     <a href="prestations.php">
 
-        <span>👕</span>
+        <span>
+            👕
+        </span>
 
         DTF
 
@@ -1866,16 +2049,20 @@ body{
 
     <a href="statistiques.php">
 
-        <span>📊</span>
+        <span>
+            📊
+        </span>
 
         Stats
 
     </a>
 
+
 </nav>
 
 
 </div>
+
 
 <?php endif; ?>
 
