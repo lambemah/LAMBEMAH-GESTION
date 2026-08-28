@@ -1,4 +1,3 @@
-```php
 <?php
 session_start();
 require_once "config.php";
@@ -14,43 +13,133 @@ $role = $_SESSION["role"] ?? "lecture";
 $message = "";
 $type = "";
 
-/* AJOUT PRODUIT */
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter"])) {
+/* =====================================================
+   ENREGISTRER UNE VENTE
+===================================================== */
 
-    $produit = trim($_POST["nom"] ?? "");
-    $categorie = trim($_POST["categorie"] ?? "");
-    $prix_achat = (float)($_POST["prix_achat"] ?? 0);
-    $prix_vente = (float)($_POST["prix_vente"] ?? 0);
-    $stock = (int)($_POST["stock"] ?? 0);
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_vente"])) {
 
-    if ($produit === "") {
-        $message = "Le nom du produit est obligatoire.";
+    $produit_id = (int)($_POST["produit_id"] ?? 0);
+    $quantite = (int)($_POST["quantite"] ?? 0);
+    $prix_unitaire = (float)($_POST["prix_unitaire"] ?? 0);
+    $description = trim($_POST["description"] ?? "");
+
+    if ($produit_id <= 0) {
+
+        $message = "Veuillez sélectionner un produit.";
         $type = "error";
-    } elseif ($prix_vente < 0 || $prix_achat < 0 || $stock < 0) {
-        $message = "Les valeurs ne peuvent pas être négatives.";
+
+    } elseif ($quantite <= 0) {
+
+        $message = "La quantité doit être supérieure à zéro.";
         $type = "error";
+
+    } elseif ($prix_unitaire <= 0) {
+
+        $message = "Le prix de vente est obligatoire.";
+        $type = "error";
+
     } else {
 
-        $stmt = $conn->prepare(
-            "INSERT INTO produits
-            (nom, categorie, prix_achat, prix_vente, stock)
-            VALUES (?, ?, ?, ?, ?)"
-        );
+        /* Récupérer le produit directement dans ta table produits */
+        $stmt = $conn->prepare("
+            SELECT id, nom, prix_vente, stock
+            FROM produits
+            WHERE id = ?
+            LIMIT 1
+        ");
 
-        $stmt->bind_param(
-            "ssddi",
-            $produit,
-            $categorie,
-            $prix_achat,
-            $prix_vente,
-            $stock
-        );
+        $stmt->bind_param("i", $produit_id);
+        $stmt->execute();
 
-        if ($stmt->execute()) {
-            $message = "Produit ajouté avec succès.";
-            $type = "success";
+        $resultat = $stmt->get_result();
+
+        if ($resultat && $resultat->num_rows === 1) {
+
+            $produit = $resultat->fetch_assoc();
+
+            $stock_actuel = (int)$produit["stock"];
+
+            if ($stock_actuel < $quantite) {
+
+                $message =
+                    "Stock insuffisant. Stock disponible pour " .
+                    $produit["nom"] .
+                    " : " .
+                    $stock_actuel;
+
+                $type = "error";
+
+            } else {
+
+                $montant = $quantite * $prix_unitaire;
+
+                /* Ajouter la vente */
+                $vente = $conn->prepare("
+                    INSERT INTO ventes
+                    (
+                        produit_id,
+                        quantite,
+                        prix_unitaire,
+                        montant,
+                        description
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                ");
+
+                $vente->bind_param(
+                    "iidds",
+                    $produit_id,
+                    $quantite,
+                    $prix_unitaire,
+                    $montant,
+                    $description
+                );
+
+                if ($vente->execute()) {
+
+                    /* Retirer la quantité du stock */
+                    $stock = $conn->prepare("
+                        UPDATE produits
+                        SET stock = stock - ?
+                        WHERE id = ?
+                    ");
+
+                    $stock->bind_param(
+                        "ii",
+                        $quantite,
+                        $produit_id
+                    );
+
+                    if ($stock->execute()) {
+
+                        $message = "Vente enregistrée avec succès.";
+                        $type = "success";
+
+                    } else {
+
+                        $message =
+                            "La vente a été enregistrée mais le stock n'a pas pu être mis à jour.";
+
+                        $type = "error";
+                    }
+
+                    $stock->close();
+
+                } else {
+
+                    $message =
+                        "Erreur lors de l'enregistrement de la vente.";
+
+                    $type = "error";
+                }
+
+                $vente->close();
+            }
+
         } else {
-            $message = "Erreur lors de l'ajout du produit.";
+
+            $message = "Produit introuvable dans la base de données.";
             $type = "error";
         }
 
@@ -59,106 +148,85 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter"])) {
 }
 
 
-/* SUPPRESSION */
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["supprimer"])) {
+/* =====================================================
+   RÉCUPÉRER LES PRODUITS
+===================================================== */
 
-    if ($role !== "admin") {
-        $message = "Seul un administrateur peut supprimer un produit.";
-        $type = "error";
-    } else {
+$produits = $conn->query("
+    SELECT
+        id,
+        nom,
+        categorie,
+        prix_achat,
+        prix_vente,
+        stock
+    FROM produits
+    ORDER BY nom ASC
+");
 
-        $id = (int)$_POST["id"];
 
-        $stmt = $conn->prepare(
-            "DELETE FROM produits WHERE id = ?"
-        );
+/* =====================================================
+   HISTORIQUE DES VENTES
+===================================================== */
 
-        $stmt->bind_param("i", $id);
+$ventes = $conn->query("
+    SELECT
+        v.id,
+        v.produit_id,
+        v.quantite,
+        v.prix_unitaire,
+        v.montant,
+        v.description,
+        v.date_vente,
+        p.nom AS produit_nom
+    FROM ventes v
+    LEFT JOIN produits p
+        ON p.id = v.produit_id
+    ORDER BY v.id DESC
+");
 
-        if ($stmt->execute()) {
-            $message = "Produit supprimé.";
-            $type = "success";
-        } else {
-            $message = "Impossible de supprimer ce produit.";
-            $type = "error";
-        }
 
-        $stmt->close();
-    }
+/* =====================================================
+   TOTAL DES VENTES
+===================================================== */
+
+$total_ventes = 0;
+
+$total = $conn->query("
+    SELECT COALESCE(SUM(montant), 0) AS total
+    FROM ventes
+");
+
+if ($total) {
+
+    $data = $total->fetch_assoc();
+
+    $total_ventes = (float)$data["total"];
 }
 
 
-/* MODIFICATION */
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["modifier"])) {
+/* =====================================================
+   NOMBRE DE VENTES
+===================================================== */
 
-    $id = (int)$_POST["id"];
-    $produit = trim($_POST["nom"] ?? "");
-    $categorie = trim($_POST["categorie"] ?? "");
-    $prix_achat = (float)($_POST["prix_achat"] ?? 0);
-    $prix_vente = (float)($_POST["prix_vente"] ?? 0);
-    $stock = (int)($_POST["stock"] ?? 0);
+$nombre_ventes = 0;
 
-    $stmt = $conn->prepare(
-        "UPDATE produits
-         SET nom = ?,
-             categorie = ?,
-             prix_achat = ?,
-             prix_vente = ?,
-             stock = ?
-         WHERE id = ?"
-    );
+$count = $conn->query("
+    SELECT COUNT(*) AS total
+    FROM ventes
+");
 
-    $stmt->bind_param(
-        "ssddii",
-        $produit,
-        $categorie,
-        $prix_achat,
-        $prix_vente,
-        $stock,
-        $id
-    );
+if ($count) {
 
-    if ($stmt->execute()) {
-        $message = "Produit modifié avec succès.";
-        $type = "success";
-    } else {
-        $message = "Erreur lors de la modification.";
-        $type = "error";
-    }
+    $data_count = $count->fetch_assoc();
 
-    $stmt->close();
+    $nombre_ventes = (int)$data_count["total"];
 }
 
 
-/* STATISTIQUES */
-$total_produits = 0;
-$total_stock = 0;
-$valeur_stock = 0;
-
-$result = $conn->query(
-    "SELECT
-        COUNT(*) AS total,
-        COALESCE(SUM(stock),0) AS stock,
-        COALESCE(SUM(stock * prix_achat),0) AS valeur
-     FROM produits"
-);
-
-if ($result) {
-    $data = $result->fetch_assoc();
-
-    $total_produits = (int)$data["total"];
-    $total_stock = (int)$data["stock"];
-    $valeur_stock = (float)$data["valeur"];
-}
-
-
-/* LISTE */
-$produits = $conn->query(
-    "SELECT *
-     FROM produits
-     ORDER BY id DESC"
-);
-
+/* =====================================================
+   FORMAT ARGENT
+===================================================== */
 
 function argent($montant)
 {
@@ -173,6 +241,7 @@ function argent($montant)
 ?>
 
 <!DOCTYPE html>
+
 <html lang="fr">
 
 <head>
@@ -180,13 +249,18 @@ function argent($montant)
 <meta charset="UTF-8">
 
 <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
+name="viewport"
+content="width=device-width, initial-scale=1.0"
+
 >
 
-<title>Produits - LAMBEMAH GESTION</title>
+<title>Ventes - LAMBEMAH GESTION</title>
 
 <style>
+
+/* =====================================================
+   GLOBAL
+===================================================== */
 
 * {
     box-sizing: border-box;
@@ -195,58 +269,104 @@ function argent($montant)
 }
 
 body {
+
     font-family: Arial, sans-serif;
-    background: #f3f7fb;
+
+    background:
+        linear-gradient(
+            135deg,
+            #eef7ff,
+            #f7fbff
+        );
+
     color: #172536;
+
+    min-height: 100vh;
 }
 
+
+/* =====================================================
+   SIDEBAR
+===================================================== */
+
 .sidebar {
+
     position: fixed;
+
     left: 0;
     top: 0;
     bottom: 0;
+
     width: 250px;
-    background: linear-gradient(
-        180deg,
-        #071b2e,
-        #0b2944,
-        #07395b
-    );
+
+    background:
+        linear-gradient(
+            180deg,
+            #06182c,
+            #092b49,
+            #073f66
+        );
+
     color: white;
+
     padding: 24px 15px;
+
     z-index: 1000;
+
+    box-shadow:
+        5px 0 25px rgba(0,0,0,.10);
 }
+
 
 .brand {
+
     display: flex;
+
     align-items: center;
+
     gap: 11px;
-    padding: 5px 10px 25px;
+
+    padding:
+        5px
+        10px
+        25px;
 }
 
+
 .brand-icon {
+
     width: 45px;
     height: 45px;
+
     border-radius: 14px;
+
     display: flex;
+
     align-items: center;
     justify-content: center;
-    background: linear-gradient(
-        135deg,
-        #21b8ff,
-        #1264c7
-    );
+
+    background:
+        linear-gradient(
+            135deg,
+            #20b8ff,
+            #1264c7
+        );
+
     font-size: 22px;
 }
+
 
 .brand h2 {
     font-size: 18px;
 }
 
 .brand span {
+
     font-size: 9px;
+
     color: #86a9c0;
 }
+
 
 .nav {
     list-style: none;
@@ -257,342 +377,733 @@ body {
 }
 
 .nav a {
+
     display: flex;
+
     gap: 12px;
+
     align-items: center;
+
     padding: 12px 14px;
+
     border-radius: 12px;
+
     color: #c5d5e1;
+
     text-decoration: none;
+
     font-size: 13px;
+
+    transition: .2s;
 }
 
 .nav a:hover,
 .nav a.active {
-    background: rgba(32,184,255,.15);
+
+    background:
+        rgba(32,184,255,.16);
+
     color: white;
 }
 
 .nav a.active {
-    border-left: 3px solid #20b8ff;
+
+    border-left:
+        3px solid #20b8ff;
 }
 
+
 .sidebar-bottom {
+
     position: absolute;
+
     left: 15px;
     right: 15px;
+
     bottom: 20px;
 }
 
+
 .profile {
+
     padding: 12px;
+
     border-radius: 12px;
-    background: rgba(255,255,255,.06);
+
+    background:
+        rgba(255,255,255,.06);
+
     margin-bottom: 10px;
 }
 
 .profile strong {
+
     display: block;
+
     font-size: 12px;
 }
 
 .profile span {
+
     color: #8ca8bb;
+
     font-size: 10px;
 }
 
+
 .logout {
+
     display: block;
+
     text-align: center;
+
     text-decoration: none;
+
     color: #ffbaba;
-    background: rgba(255,70,70,.08);
+
+    background:
+        rgba(255,70,70,.08);
+
     padding: 10px;
+
     border-radius: 10px;
+
     font-size: 11px;
 }
 
+
+/* =====================================================
+   CONTENU
+===================================================== */
+
 .main {
+
     margin-left: 250px;
+
     padding: 28px;
+
+    max-width: 1500px;
 }
 
+
 .header {
+
     display: flex;
+
     justify-content: space-between;
+
     align-items: center;
+
     margin-bottom: 22px;
 }
 
+
 .header h1 {
-    font-size: 25px;
+
+    font-size: 26px;
+
+    color: #061a35;
 }
 
+
 .header p {
+
     color: #8998a5;
+
     font-size: 12px;
+
     margin-top: 5px;
 }
 
+
 .avatar {
-    width: 42px;
-    height: 42px;
-    border-radius: 13px;
+
+    width: 44px;
+    height: 44px;
+
+    border-radius: 14px;
+
     display: flex;
+
     align-items: center;
     justify-content: center;
-    background: linear-gradient(
-        135deg,
-        #21b8ff,
-        #1264c7
-    );
+
+    background:
+        linear-gradient(
+            135deg,
+            #20b8ff,
+            #1264c7
+        );
+
     color: white;
+
     font-weight: bold;
 }
 
+
+/* =====================================================
+   CARTES STATISTIQUES
+===================================================== */
+
 .cards {
+
     display: grid;
-    grid-template-columns: repeat(3,1fr);
+
+    grid-template-columns:
+        repeat(2, 1fr);
+
     gap: 15px;
+
     margin-bottom: 20px;
 }
 
+
 .stat {
+
     background: white;
-    border-radius: 17px;
-    padding: 18px;
-    box-shadow: 0 6px 25px rgba(25,55,80,.06);
+
+    border-radius: 18px;
+
+    padding: 19px;
+
+    box-shadow:
+        0 6px 25px
+        rgba(25,55,80,.06);
 }
 
+
 .stat small {
+
     color: #8c9aa6;
+
     font-size: 10px;
 }
 
 .stat h2 {
+
     margin-top: 8px;
-    font-size: 21px;
+
+    font-size: 23px;
+
+    color: #071b2e;
 }
 
+
+/* =====================================================
+   LAYOUT
+===================================================== */
+
 .content {
+
     display: grid;
-    grid-template-columns: 350px 1fr;
+
+    grid-template-columns:
+        360px 1fr;
+
     gap: 20px;
 }
 
+
 .card {
+
     background: white;
+
     border-radius: 20px;
+
     padding: 22px;
-    box-shadow: 0 6px 25px rgba(25,55,80,.06);
+
+    box-shadow:
+        0 6px 25px
+        rgba(25,55,80,.06);
 }
 
+
 .card h2 {
+
     font-size: 17px;
+
+    color: #061a35;
+
     margin-bottom: 6px;
 }
 
+
 .card > p {
+
     color: #8b99a5;
+
     font-size: 11px;
+
     margin-bottom: 18px;
 }
 
-.group {
-    margin-bottom: 13px;
-}
 
-label {
-    display: block;
-    font-size: 10px;
-    font-weight: bold;
-    color: #536675;
-    margin-bottom: 6px;
-}
-
-input,
-select {
-    width: 100%;
-    padding: 11px;
-    border: 1px solid #dfe8ee;
-    border-radius: 10px;
-    background: #fbfdff;
-    outline: none;
-}
-
-input:focus,
-select:focus {
-    border-color: #20b8ff;
-}
-
-button {
-    border: 0;
-    border-radius: 10px;
-    padding: 11px 14px;
-    cursor: pointer;
-    font-weight: bold;
-}
-
-.btn-primary {
-    width: 100%;
-    color: white;
-    background: linear-gradient(
-        135deg,
-        #20b8ff,
-        #1264c7
-    );
-}
-
-.btn-delete {
-    background: #fff0f0;
-    color: #d64545;
-    font-size: 10px;
-}
+/* =====================================================
+   MESSAGE
+===================================================== */
 
 .message {
-    padding: 11px;
-    border-radius: 10px;
+
+    padding: 12px;
+
+    border-radius: 11px;
+
     margin-bottom: 15px;
+
     font-size: 11px;
+
+    font-weight: bold;
 }
 
 .success {
+
     background: #eafaf2;
+
     color: #168653;
 }
 
 .error {
+
     background: #fff0f0;
+
     color: #d33;
 }
 
+
+/* =====================================================
+   FORMULAIRE
+===================================================== */
+
+.group {
+
+    margin-bottom: 14px;
+}
+
+
+label {
+
+    display: block;
+
+    font-size: 10px;
+
+    font-weight: bold;
+
+    color: #536675;
+
+    margin-bottom: 6px;
+}
+
+
+input,
+select,
+textarea {
+
+    width: 100%;
+
+    padding: 12px;
+
+    border:
+        1px solid #dfe8ee;
+
+    border-radius: 11px;
+
+    background: #fbfdff;
+
+    outline: none;
+
+    font-size: 13px;
+
+    color: #172536;
+}
+
+
+input:focus,
+select:focus,
+textarea:focus {
+
+    border-color: #20b8ff;
+
+    box-shadow:
+        0 0 0 3px
+        rgba(32,184,255,.08);
+}
+
+
+textarea {
+
+    resize: vertical;
+
+    min-height: 75px;
+}
+
+
+.product-info {
+
+    margin-top: 7px;
+
+    padding: 9px 11px;
+
+    border-radius: 9px;
+
+    background: #eef8ff;
+
+    color: #176ba4;
+
+    font-size: 10px;
+
+    display: none;
+}
+
+
+.montant {
+
+    padding: 13px;
+
+    border-radius: 11px;
+
+    background:
+        linear-gradient(
+            135deg,
+            #edf8ff,
+            #e5f3ff
+        );
+
+    color: #096bc4;
+
+    font-weight: bold;
+
+    font-size: 15px;
+
+    margin-bottom: 12px;
+}
+
+
+.btn-primary {
+
+    width: 100%;
+
+    color: white;
+
+    background:
+        linear-gradient(
+            135deg,
+            #20b8ff,
+            #1264c7
+        );
+
+    padding: 13px;
+
+    border: 0;
+
+    border-radius: 11px;
+
+    font-weight: bold;
+
+    cursor: pointer;
+}
+
+
+/* =====================================================
+   HISTORIQUE
+===================================================== */
+
+.history {
+
+    margin-top: 20px;
+}
+
+
+.sale {
+
+    border:
+        1px solid #e8eef3;
+
+    border-radius: 14px;
+
+    padding: 15px;
+
+    margin-bottom: 10px;
+
+    background: #fff;
+}
+
+
+.sale-top {
+
+    display: flex;
+
+    justify-content: space-between;
+
+    gap: 10px;
+}
+
+
+.sale-product {
+
+    font-weight: bold;
+
+    color: #17324d;
+
+    font-size: 13px;
+}
+
+
+.sale-amount {
+
+    color: #0877e8;
+
+    font-weight: bold;
+
+    white-space: nowrap;
+
+    font-size: 13px;
+}
+
+
+.sale-info {
+
+    display: flex;
+
+    flex-wrap: wrap;
+
+    gap: 7px;
+
+    margin-top: 8px;
+}
+
+
+.badge {
+
+    background: #f0f6fb;
+
+    color: #627488;
+
+    padding: 6px 8px;
+
+    border-radius: 8px;
+
+    font-size: 10px;
+}
+
+
+.sale-description {
+
+    color: #647587;
+
+    font-size: 11px;
+
+    margin-top: 9px;
+}
+
+
+.sale-date {
+
+    color: #98a5b2;
+
+    font-size: 10px;
+
+    margin-top: 8px;
+}
+
+
+/* =====================================================
+   TABLEAU DESKTOP
+===================================================== */
+
 .table-wrap {
+
     overflow-x: auto;
 }
 
+
 table {
+
     width: 100%;
+
     border-collapse: collapse;
 }
 
+
 th {
+
     text-align: left;
-    padding: 10px;
+
+    padding: 11px;
+
     color: #8998a5;
+
     font-size: 9px;
-    border-bottom: 1px solid #edf1f4;
+
+    border-bottom:
+        1px solid #edf1f4;
 }
 
+
 td {
+
     padding: 12px 10px;
-    border-bottom: 1px solid #edf1f4;
+
+    border-bottom:
+        1px solid #edf1f4;
+
     font-size: 11px;
 }
 
-td strong {
-    color: #20394c;
-}
 
 .price {
+
     color: #1477ae;
+
     font-weight: bold;
 }
 
-.stock {
-    font-weight: bold;
-}
 
-.low {
-    color: #d94b4b;
-}
-
-.good {
-    color: #159765;
-}
+/* =====================================================
+   MOBILE
+===================================================== */
 
 @media(max-width:900px) {
 
     .content {
+
         grid-template-columns: 1fr;
     }
 
-    .cards {
-        grid-template-columns: repeat(3,1fr);
-    }
 }
+
 
 @media(max-width:700px) {
 
     .sidebar {
+
         position: relative;
+
         width: 100%;
+
         height: auto;
+
         padding: 10px;
     }
 
+
     .brand {
-        padding: 4px 7px 10px;
+
+        padding:
+            4px
+            7px
+            10px;
     }
 
+
     .brand-icon {
+
         width: 39px;
         height: 39px;
     }
 
+
     .brand h2 {
+
         font-size: 15px;
     }
 
+
     .nav {
+
         display: grid;
-        grid-template-columns: repeat(4,1fr);
+
+        grid-template-columns:
+            repeat(4,1fr);
+
         gap: 4px;
     }
 
+
     .nav a {
+
         flex-direction: column;
+
         gap: 4px;
+
         padding: 8px 3px;
+
         text-align: center;
+
         font-size: 8px;
     }
 
+
     .nav a.active {
+
         border-left: 0;
-        border-bottom: 2px solid #20b8ff;
+
+        border-bottom:
+            2px solid #20b8ff;
     }
 
+
     .sidebar-bottom {
+
         position: static;
+
         margin-top: 8px;
     }
 
+
     .profile {
+
         display: none;
     }
 
+
     .main {
+
         margin-left: 0;
+
         padding: 14px;
     }
 
+
     .header h1 {
-        font-size: 20px;
+
+        font-size: 21px;
     }
 
+
     .cards {
-        grid-template-columns: 1fr 1fr;
+
+        grid-template-columns:
+            1fr 1fr;
+
         gap: 9px;
     }
 
-    .stat:last-child {
-        grid-column: 1 / -1;
+
+    .stat {
+
+        padding: 15px;
     }
 
-    .card {
-        padding: 15px;
-        border-radius: 16px;
+
+    .stat h2 {
+
+        font-size: 17px;
     }
+
+
+    .card {
+
+        padding: 16px;
+
+        border-radius: 17px;
+    }
+
+
+    .table-wrap {
+
+        display: none;
+    }
+
 }
 
 </style>
@@ -601,432 +1112,629 @@ td strong {
 
 <body>
 
+<!-- =====================================================
+     MENU
+===================================================== -->
 
 <aside class="sidebar">
 
-    <div class="brand">
+```
+<div class="brand">
 
-        <div class="brand-icon">
-            💼
-        </div>
+    <div class="brand-icon">
+        💼
+    </div>
 
-        <div>
-            <h2>LAMBEMAH</h2>
-            <span>GESTION • PRESTATION</span>
-        </div>
+    <div>
+
+        <h2>LAMBEMAH</h2>
+
+        <span>
+            GESTION • PRESTATION
+        </span>
 
     </div>
 
-    <ul class="nav">
+</div>
 
-        <li>
-            <a href="index.php">
-                🏠 <span>Accueil</span>
-            </a>
-        </li>
 
-        <li>
-            <a href="produits.php" class="active">
-                📦 <span>Produits</span>
-            </a>
-        </li>
+<ul class="nav">
 
-        <li>
-            <a href="ventes.php">
-                💰 <span>Ventes</span>
-            </a>
-        </li>
+    <li>
+        <a href="index.php">
+            🏠 <span>Accueil</span>
+        </a>
+    </li>
 
-        <li>
-            <a href="prestations.php">
-                🖨️ <span>Prestations</span>
-            </a>
-        </li>
 
-        <li>
-            <a href="depenses.php">
-                💸 <span>Dépenses</span>
-            </a>
-        </li>
+    <li>
+        <a href="produits.php">
+            📦 <span>Produits</span>
+        </a>
+    </li>
 
-        <li>
-            <a href="statistiques.php">
-                📊 <span>Stats</span>
-            </a>
-        </li>
 
-        <?php if ($role === "admin"): ?>
-
-        <li>
-            <a href="utilisateurs.php">
-                👥 <span>Équipe</span>
-            </a>
-        </li>
-
-        <?php endif; ?>
-
-    </ul>
-
-    <div class="sidebar-bottom">
-
-        <div class="profile">
-            <strong><?= htmlspecialchars($nom) ?></strong>
-            <span><?= htmlspecialchars($role) ?></span>
-        </div>
-
+    <li>
         <a
-            class="logout"
-            href="index.php?logout=1"
+            href="ventes.php"
+            class="active"
         >
-            🚪 Déconnexion
+            💰 <span>Ventes</span>
+        </a>
+    </li>
+
+
+    <li>
+        <a href="prestations.php">
+            🖨️ <span>Prestations</span>
+        </a>
+    </li>
+
+
+    <li>
+        <a href="recettes.php">
+            💵 <span>Recettes</span>
+        </a>
+    </li>
+
+
+    <li>
+        <a href="depenses.php">
+            💸 <span>Dépenses</span>
+        </a>
+    </li>
+
+
+    <li>
+        <a href="statistiques.php">
+            📊 <span>Statistiques</span>
+        </a>
+    </li>
+
+
+    <?php if ($role === "admin"): ?>
+
+    <li>
+
+        <a href="utilisateurs.php">
+
+            👥 <span>Équipe</span>
+
         </a>
 
+    </li>
+
+    <?php endif; ?>
+
+</ul>
+
+
+<div class="sidebar-bottom">
+
+    <div class="profile">
+
+        <strong>
+            <?= htmlspecialchars($nom) ?>
+        </strong>
+
+        <span>
+            <?= htmlspecialchars($role) ?>
+        </span>
+
     </div>
+
+
+    <a
+        class="logout"
+        href="index.php?logout=1"
+    >
+        🚪 Déconnexion
+    </a>
+
+</div>
+```
 
 </aside>
 
+<!-- =====================================================
+     CONTENU
+===================================================== -->
 
 <main class="main">
 
-    <div class="header">
+```
+<div class="header">
 
-        <div>
+    <div>
 
-            <h1>📦 Produits</h1>
+        <h1>
+            💰 Ventes
+        </h1>
 
-            <p>
-                Gère ton stock de T-shirts, chemises, pulls, képis et autres articles.
-            </p>
-
-        </div>
-
-        <div class="avatar">
-            <?= strtoupper(substr($nom,0,1)) ?>
-        </div>
+        <p>
+            Enregistre tes ventes et suis ton chiffre d'affaires.
+        </p>
 
     </div>
 
 
-    <div class="cards">
+    <div class="avatar">
 
-        <div class="stat">
+        <?= strtoupper(
+            substr($nom, 0, 1)
+        ) ?>
 
-            <small>
-                PRODUITS
-            </small>
+    </div>
 
-            <h2>
-                <?= $total_produits ?>
-            </h2>
+</div>
 
-        </div>
 
-        <div class="stat">
+<?php if ($message !== ""): ?>
 
-            <small>
-                STOCK TOTAL
-            </small>
+    <div class="message <?= $type ?>">
 
-            <h2>
-                <?= $total_stock ?>
-            </h2>
+        <?= htmlspecialchars($message) ?>
 
-        </div>
+    </div>
 
-        <div class="stat">
+<?php endif; ?>
 
-            <small>
-                VALEUR DU STOCK
-            </small>
 
-            <h2>
-                <?= argent($valeur_stock) ?>
-            </h2>
+<!-- =================================================
+     STATISTIQUES
+================================================== -->
 
-        </div>
+<div class="cards">
+
+    <div class="stat">
+
+        <small>
+            TOTAL DES VENTES
+        </small>
+
+        <h2>
+            <?= argent($total_ventes) ?>
+        </h2>
 
     </div>
 
 
-    <div class="content">
+    <div class="stat">
+
+        <small>
+            NOMBRE DE VENTES
+        </small>
+
+        <h2>
+            <?= $nombre_ventes ?>
+        </h2>
+
+    </div>
+
+</div>
 
 
-        <div class="card">
-
-            <h2>
-                ➕ Ajouter un produit
-            </h2>
-
-            <p>
-                Ajoute un article disponible à la vente.
-            </p>
-
-            <?php if ($message !== ""): ?>
-
-                <div class="message <?= $type ?>">
-                    <?= htmlspecialchars($message) ?>
-                </div>
-
-            <?php endif; ?>
+<div class="content">
 
 
-            <form method="POST">
+    <!-- =================================================
+         FORMULAIRE
+    ================================================== -->
 
-                <input
-                    type="hidden"
-                    name="ajouter"
-                    value="1"
+    <div class="card">
+
+        <h2>
+            ➕ Nouvelle vente
+        </h2>
+
+        <p>
+            Choisis un produit enregistré dans ton stock.
+        </p>
+
+
+        <form method="POST">
+
+
+            <input
+                type="hidden"
+                name="ajouter_vente"
+                value="1"
+            >
+
+
+            <div class="group">
+
+                <label>
+                    PRODUIT
+                </label>
+
+
+                <select
+                    name="produit_id"
+                    id="produit_id"
+                    required
+                    onchange="produitSelectionne()"
                 >
 
-                <div class="group">
+                    <option value="">
+                        -- Sélectionner un produit --
+                    </option>
 
-                    <label>
-                        NOM DU PRODUIT
-                    </label>
-
-                    <input
-                        type="text"
-                        name="nom"
-                        placeholder="Ex : T-shirt adulte"
-                        required
-                    >
-
-                </div>
-
-
-                <div class="group">
-
-                    <label>
-                        CATÉGORIE
-                    </label>
-
-                    <input
-                        type="text"
-                        name="categorie"
-                        placeholder="Ex : T-shirts"
-                    >
-
-                </div>
-
-
-                <div class="group">
-
-                    <label>
-                        PRIX D'ACHAT
-                    </label>
-
-                    <input
-                        type="number"
-                        name="prix_achat"
-                        min="0"
-                        step="500"
-                        placeholder="Ex : 180000"
-                    >
-
-                </div>
-
-
-                <div class="group">
-
-                    <label>
-                        PRIX DE VENTE
-                    </label>
-
-                    <input
-                        type="number"
-                        name="prix_vente"
-                        min="0"
-                        step="500"
-                        placeholder="Ex : 220000"
-                        required
-                    >
-
-                </div>
-
-
-                <div class="group">
-
-                    <label>
-                        STOCK INITIAL
-                    </label>
-
-                    <input
-                        type="number"
-                        name="stock"
-                        min="0"
-                        value="0"
-                        required
-                    >
-
-                </div>
-
-
-                <button
-                    class="btn-primary"
-                    type="submit"
-                >
-                    📦 Ajouter au stock
-                </button>
-
-            </form>
-
-        </div>
-
-
-        <div class="card">
-
-            <h2>
-                📋 Mon stock
-            </h2>
-
-            <p>
-                Tous les produits actuellement enregistrés.
-            </p>
-
-            <div class="table-wrap">
-
-                <table>
-
-                    <thead>
-
-                    <tr>
-
-                        <th>
-                            PRODUIT
-                        </th>
-
-                        <th>
-                            CATÉGORIE
-                        </th>
-
-                        <th>
-                            ACHAT
-                        </th>
-
-                        <th>
-                            VENTE
-                        </th>
-
-                        <th>
-                            STOCK
-                        </th>
-
-                        <th>
-                            ACTION
-                        </th>
-
-                    </tr>
-
-                    </thead>
-
-                    <tbody>
 
                     <?php if ($produits && $produits->num_rows > 0): ?>
 
                         <?php while ($p = $produits->fetch_assoc()): ?>
 
-                        <tr>
-
-                            <td>
-                                <strong>
-                                    <?= htmlspecialchars($p["nom"]) ?>
-                                </strong>
-                            </td>
-
-                            <td>
-                                <?= htmlspecialchars($p["categorie"] ?? "") ?>
-                            </td>
-
-                            <td>
-                                <?= argent($p["prix_achat"]) ?>
-                            </td>
-
-                            <td class="price">
-                                <?= argent($p["prix_vente"]) ?>
-                            </td>
-
-                            <td class="stock
-                                <?= $p["stock"] <= 2 ? "low" : "good" ?>"
+                            <option
+                                value="<?= (int)$p["id"] ?>"
+                                data-prix="<?= htmlspecialchars($p["prix_vente"]) ?>"
+                                data-stock="<?= (int)$p["stock"] ?>"
                             >
+
+                                <?= htmlspecialchars($p["nom"]) ?>
+
+                                —
+                                Stock :
                                 <?= (int)$p["stock"] ?>
-                            </td>
 
-                            <td>
-
-                                <?php if ($role === "admin"): ?>
-
-                                <form
-                                    method="POST"
-                                    onsubmit="return confirm('Supprimer ce produit ?');"
-                                >
-
-                                    <input
-                                        type="hidden"
-                                        name="id"
-                                        value="<?= $p["id"] ?>"
-                                    >
-
-                                    <input
-                                        type="hidden"
-                                        name="supprimer"
-                                        value="1"
-                                    >
-
-                                    <button
-                                        class="btn-delete"
-                                        type="submit"
-                                    >
-                                        Supprimer
-                                    </button>
-
-                                </form>
-
-                                <?php else: ?>
-
-                                    <span
-                                        style="
-                                        color:#9aa5ad;
-                                        font-size:9px;
-                                        "
-                                    >
-                                        Lecture
-                                    </span>
-
-                                <?php endif; ?>
-
-                            </td>
-
-                        </tr>
+                            </option>
 
                         <?php endwhile; ?>
 
                     <?php else: ?>
 
-                        <tr>
-
-                            <td colspan="6">
-
-                                Aucun produit enregistré.
-
-                            </td>
-
-                        </tr>
+                        <option value="" disabled>
+                            Aucun produit enregistré
+                        </option>
 
                     <?php endif; ?>
 
-                    </tbody>
+                </select>
 
-                </table>
+
+                <div
+                    class="product-info"
+                    id="productInfo"
+                ></div>
 
             </div>
 
-        </div>
+
+            <div class="group">
+
+                <label>
+                    QUANTITÉ
+                </label>
+
+                <input
+                    type="number"
+                    name="quantite"
+                    id="quantite"
+                    value="1"
+                    min="1"
+                    required
+                    oninput="calculer()"
+                >
+
+            </div>
+
+
+            <div class="group">
+
+                <label>
+                    PRIX UNITAIRE
+                </label>
+
+                <input
+                    type="number"
+                    name="prix_unitaire"
+                    id="prix_unitaire"
+                    min="1"
+                    step="500"
+                    required
+                    oninput="calculer()"
+                >
+
+            </div>
+
+
+            <div class="group">
+
+                <label>
+                    MONTANT TOTAL
+                </label>
+
+                <div
+                    class="montant"
+                    id="montant"
+                >
+                    0 FG
+                </div>
+
+            </div>
+
+
+            <div class="group">
+
+                <label>
+                    DESCRIPTION
+                </label>
+
+                <textarea
+                    name="description"
+                    placeholder="Ex : T-shirts vendus au client..."
+                ></textarea>
+
+            </div>
+
+
+            <button
+                type="submit"
+                class="btn-primary"
+            >
+                💾 Enregistrer la vente
+            </button>
+
+        </form>
 
     </div>
 
+
+    <!-- =================================================
+         HISTORIQUE
+    ================================================== -->
+
+    <div class="card">
+
+        <h2>
+            📋 Historique des ventes
+        </h2>
+
+        <p>
+            Les dernières ventes enregistrées.
+        </p>
+
+
+        <?php if ($ventes && $ventes->num_rows > 0): ?>
+
+
+            <?php while ($v = $ventes->fetch_assoc()): ?>
+
+                <div class="sale">
+
+
+                    <div class="sale-top">
+
+                        <div class="sale-product">
+
+                            👕
+                            <?= htmlspecialchars(
+                                $v["produit_nom"]
+                                ?? "Produit supprimé"
+                            ) ?>
+
+                        </div>
+
+
+                        <div class="sale-amount">
+
+                            <?= argent(
+                                $v["montant"]
+                            ) ?>
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="sale-info">
+
+                        <span class="badge">
+
+                            Quantité :
+                            <?= (int)$v["quantite"] ?>
+
+                        </span>
+
+
+                        <span class="badge">
+
+                            Prix unitaire :
+                            <?= argent(
+                                $v["prix_unitaire"]
+                            ) ?>
+
+                        </span>
+
+                    </div>
+
+
+                    <?php if (
+                        !empty($v["description"])
+                    ): ?>
+
+                        <div class="sale-description">
+
+                            <?= htmlspecialchars(
+                                $v["description"]
+                            ) ?>
+
+                        </div>
+
+                    <?php endif; ?>
+
+
+                    <div class="sale-date">
+
+                        📅
+                        <?= htmlspecialchars(
+                            $v["date_vente"]
+                        ) ?>
+
+                    </div>
+
+                </div>
+
+            <?php endwhile; ?>
+
+
+        <?php else: ?>
+
+            <div
+                style="
+                text-align:center;
+                padding:30px 10px;
+                color:#8998a5;
+                font-size:12px;
+                "
+            >
+
+                🛒
+
+                <br><br>
+
+                Aucune vente enregistrée pour le moment.
+
+            </div>
+
+        <?php endif; ?>
+
+    </div>
+
+</div>
+```
+
 </main>
+
+<script>
+
+/* =====================================================
+   SÉLECTION DU PRODUIT
+===================================================== */
+
+function produitSelectionne() {
+
+    const select =
+        document.getElementById("produit_id");
+
+    const prix =
+        document.getElementById("prix_unitaire");
+
+    const info =
+        document.getElementById("productInfo");
+
+    const option =
+        select.options[
+            select.selectedIndex
+        ];
+
+
+    if (
+        !select.value ||
+        !option
+    ) {
+
+        info.style.display = "none";
+
+        prix.value = "";
+
+        calculer();
+
+        return;
+    }
+
+
+    const prixProduit =
+        parseFloat(
+            option.getAttribute(
+                "data-prix"
+            )
+        ) || 0;
+
+
+    const stock =
+        parseInt(
+            option.getAttribute(
+                "data-stock"
+            )
+        ) || 0;
+
+
+    prix.value = prixProduit;
+
+
+    info.innerHTML =
+        "📦 Stock disponible : <strong>"
+        + stock
+        + "</strong>"
+        + " &nbsp; • &nbsp; "
+        + "💰 Prix : <strong>"
+        + formatNombre(prixProduit)
+        + " FG</strong>";
+
+
+    info.style.display = "block";
+
+
+    const quantite =
+        document.getElementById(
+            "quantite"
+        );
+
+    quantite.max = stock;
+
+
+    calculer();
+}
+
+
+/* =====================================================
+   CALCUL DU MONTANT
+===================================================== */
+
+function calculer() {
+
+    const quantite =
+        parseFloat(
+            document.getElementById(
+                "quantite"
+            ).value
+        ) || 0;
+
+
+    const prix =
+        parseFloat(
+            document.getElementById(
+                "prix_unitaire"
+            ).value
+        ) || 0;
+
+
+    const total =
+        quantite * prix;
+
+
+    document.getElementById(
+        "montant"
+    ).textContent =
+        formatNombre(total)
+        + " FG";
+}
+
+
+/* =====================================================
+   FORMAT NOMBRE
+===================================================== */
+
+function formatNombre(nombre) {
+
+    return new Intl.NumberFormat(
+        "fr-FR"
+    ).format(nombre);
+}
+
+</script>
 
 </body>
 
 </html>
-```
