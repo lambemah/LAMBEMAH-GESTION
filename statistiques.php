@@ -1,4 +1,3 @@
-```php
 <?php
 session_start();
 require_once "config.php";
@@ -8,344 +7,393 @@ if (!isset($_SESSION["id"])) {
     exit;
 }
 
-/* RECETTES */
-$r = $conn->query(
-    "SELECT COALESCE(SUM(montant),0) AS total FROM recettes"
-);
-$total_recettes = $r->fetch_assoc()["total"];
+/* =========================
+   DONNÉES STATISTIQUES
+========================= */
 
-/* DEPENSES */
-$d = $conn->query(
-    "SELECT COALESCE(SUM(montant),0) AS total FROM depenses"
-);
-$total_depenses = $d->fetch_assoc()["total"];
+// Produits
+$total_produits = 0;
+$stock_total = 0;
+$valeur_stock = 0;
 
-/* VENTES */
-$v = $conn->query(
-    "SELECT 
-        COUNT(*) AS nombre,
-        COALESCE(SUM(total),0) AS total
-     FROM ventes"
-);
+$result = $conn->query("
+    SELECT 
+        COUNT(*) AS total_produits,
+        COALESCE(SUM(stock), 0) AS stock_total,
+        COALESCE(SUM(stock * prix_achat), 0) AS valeur_stock
+    FROM produits
+");
 
-$ventes_data = $v->fetch_assoc();
+if ($result) {
+    $data = $result->fetch_assoc();
+    $total_produits = (int)$data["total_produits"];
+    $stock_total = (int)$data["stock_total"];
+    $valeur_stock = (float)$data["valeur_stock"];
+}
 
-$nombre_ventes = $ventes_data["nombre"];
-$total_ventes = $ventes_data["total"];
+// Ventes
+$total_ventes = 0;
+$montant_ventes = 0;
 
-/* PRODUITS */
-$p = $conn->query(
-    "SELECT 
-        COUNT(*) AS nombre,
-        COALESCE(SUM(stock),0) AS stock
-     FROM produits"
-);
+$result = $conn->query("
+    SELECT 
+        COUNT(*) AS total_ventes,
+        COALESCE(SUM(montant), 0) AS montant_ventes
+    FROM ventes
+");
 
-$produits_data = $p->fetch_assoc();
+if ($result) {
+    $data = $result->fetch_assoc();
+    $total_ventes = (int)$data["total_ventes"];
+    $montant_ventes = (float)$data["montant_ventes"];
+}
 
-$nombre_produits = $produits_data["nombre"];
-$stock_total = $produits_data["stock"];
+// Recettes
+$total_recettes = 0;
+$montant_recettes = 0;
 
-/* BENEFICE */
-$benefice = ($total_recettes + $total_ventes) - $total_depenses;
+$result = $conn->query("
+    SELECT 
+        COUNT(*) AS total_recettes,
+        COALESCE(SUM(montant), 0) AS montant_recettes
+    FROM recettes
+");
+
+if ($result) {
+    $data = $result->fetch_assoc();
+    $total_recettes = (int)$data["total_recettes"];
+    $montant_recettes = (float)$data["montant_recettes"];
+}
+
+// Dépenses
+$total_depenses = 0;
+$montant_depenses = 0;
+
+$result = $conn->query("
+    SELECT 
+        COUNT(*) AS total_depenses,
+        COALESCE(SUM(montant), 0) AS montant_depenses
+    FROM depenses
+");
+
+if ($result) {
+    $data = $result->fetch_assoc();
+    $total_depenses = (int)$data["total_depenses"];
+    $montant_depenses = (float)$data["montant_depenses"];
+}
+
+// Résultat global
+$revenus = $montant_ventes + $montant_recettes;
+$resultat = $revenus - $montant_depenses;
+
+
+/* =========================
+   FORMATAGE
+========================= */
+
+function fcfa($montant) {
+    return number_format((float)$montant, 0, ',', ' ') . " FG";
+}
 ?>
 
 <!DOCTYPE html>
+
 <html lang="fr">
-
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-
+```
 <title>Statistiques - LAMBEMAH GESTION</title>
 
 <style>
+    * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+    }
 
-*{
-box-sizing:border-box;
-}
+    body {
+        font-family: Arial, sans-serif;
+        background: #f4f8fc;
+        color: #172b4d;
+        min-height: 100vh;
+    }
 
-body{
-margin:0;
-font-family:Arial,sans-serif;
-background:#f3f7fb;
-color:#172033;
-}
+    /* HEADER */
+    .header {
+        background: linear-gradient(135deg, #071b3a, #0d6efd);
+        color: white;
+        padding: 22px 25px;
+        border-radius: 0 0 25px 25px;
+        box-shadow: 0 5px 20px rgba(7, 27, 58, .18);
+    }
 
-.header{
-background:linear-gradient(135deg,#061a38,#0c5795);
-color:white;
-padding:25px 20px;
-border-radius:0 0 28px 28px;
-}
+    .header-content {
+        max-width: 1200px;
+        margin: auto;
+    }
 
-.header h1{
-margin:0;
-font-size:26px;
-}
+    .header h1 {
+        font-size: 25px;
+        margin-bottom: 5px;
+    }
 
-.header p{
-margin:7px 0 0;
-opacity:.85;
-}
+    .header p {
+        opacity: .85;
+        font-size: 14px;
+    }
 
-.container{
-max-width:1100px;
-margin:auto;
-padding:20px;
-}
+    /* CONTENU */
+    .container {
+        max-width: 1200px;
+        margin: auto;
+        padding: 25px 18px 40px;
+    }
 
-.back{
-display:inline-block;
-margin-bottom:18px;
-color:#0d6efd;
-font-weight:bold;
-text-decoration:none;
-}
+    .back {
+        display: inline-block;
+        margin-bottom: 20px;
+        text-decoration: none;
+        color: #0d6efd;
+        font-weight: bold;
+    }
 
-.grid{
-display:grid;
-grid-template-columns:repeat(2,1fr);
-gap:15px;
-}
+    /* CARTES */
+    .cards {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 18px;
+        margin-bottom: 25px;
+    }
 
-.stat{
-background:white;
-padding:20px;
-border-radius:18px;
-box-shadow:0 8px 25px rgba(0,0,0,.06);
-}
+    .card {
+        background: white;
+        border-radius: 18px;
+        padding: 22px;
+        box-shadow: 0 6px 22px rgba(7, 27, 58, .08);
+        border: 1px solid #e8eef5;
+    }
 
-.icon{
-font-size:30px;
-}
+    .card .icon {
+        font-size: 28px;
+        margin-bottom: 12px;
+    }
 
-.stat h3{
-margin:12px 0 5px;
-font-size:15px;
-color:#687386;
-}
+    .card .label {
+        color: #718096;
+        font-size: 13px;
+        margin-bottom: 8px;
+    }
 
-.stat strong{
-font-size:25px;
-color:#092f58;
-}
+    .card .value {
+        font-size: 23px;
+        font-weight: bold;
+        color: #071b3a;
+    }
 
-.big{
-margin-top:20px;
-background:linear-gradient(135deg,#071b3a,#0d6efd);
-color:white;
-padding:25px;
-border-radius:20px;
-box-shadow:0 10px 30px rgba(0,0,0,.1);
-}
+    /* RESULTAT */
+    .result {
+        background: linear-gradient(135deg, #071b3a, #0d6efd);
+        color: white;
+        border-radius: 22px;
+        padding: 28px;
+        margin-bottom: 25px;
+        box-shadow: 0 8px 25px rgba(7, 27, 58, .18);
+    }
 
-.big h2{
-margin-top:0;
-}
+    .result h2 {
+        font-size: 18px;
+        margin-bottom: 15px;
+    }
 
-.big strong{
-font-size:35px;
-}
+    .result .amount {
+        font-size: 32px;
+        font-weight: bold;
+    }
 
-.section{
-background:white;
-margin-top:20px;
-padding:20px;
-border-radius:18px;
-box-shadow:0 8px 25px rgba(0,0,0,.06);
-}
+    .result p {
+        margin-top: 8px;
+        opacity: .85;
+        font-size: 13px;
+    }
 
-.section h2{
-margin-top:0;
-}
+    /* DETAILS */
+    .section {
+        background: white;
+        border-radius: 20px;
+        padding: 22px;
+        box-shadow: 0 6px 22px rgba(7, 27, 58, .07);
+    }
 
-.info{
-padding:15px;
-background:#f2f7fc;
-border-radius:12px;
-margin-top:10px;
-}
+    .section h2 {
+        margin-bottom: 18px;
+        color: #071b3a;
+        font-size: 19px;
+    }
 
-@media(max-width:650px){
+    .row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 15px 5px;
+        border-bottom: 1px solid #edf1f6;
+    }
 
-.container{
-padding:12px;
-}
+    .row:last-child {
+        border-bottom: none;
+    }
 
-.grid{
-grid-template-columns:1fr 1fr;
-gap:10px;
-}
+    .row span:first-child {
+        color: #64748b;
+    }
 
-.stat{
-padding:15px;
-}
+    .row strong {
+        color: #071b3a;
+    }
 
-.stat strong{
-font-size:20px;
-}
+    /* MOBILE */
+    @media (max-width: 850px) {
+        .cards {
+            grid-template-columns: repeat(2, 1fr);
+        }
+    }
 
-.big{
-padding:20px;
-}
+    @media (max-width: 550px) {
+        .header {
+            padding: 20px 17px;
+            border-radius: 0 0 20px 20px;
+        }
 
-.big strong{
-font-size:28px;
-}
+        .header h1 {
+            font-size: 21px;
+        }
 
-}
+        .container {
+            padding: 20px 13px 35px;
+        }
 
+        .cards {
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .card {
+            padding: 17px 14px;
+            border-radius: 15px;
+        }
+
+        .card .icon {
+            font-size: 24px;
+        }
+
+        .card .value {
+            font-size: 18px;
+        }
+
+        .result {
+            padding: 22px;
+            border-radius: 18px;
+        }
+
+        .result .amount {
+            font-size: 26px;
+        }
+    }
 </style>
+```
 
 </head>
 
 <body>
 
-<div class="header">
-
-<h1>📊 Statistiques</h1>
-
-<p>
-Vue générale de LAMBEMAH GESTION
-</p>
-
-</div>
+<header class="header">
+    <div class="header-content">
+        <h1>📊 Statistiques</h1>
+        <p>LAMBEMAH GESTION — Vue générale de votre activité</p>
+    </div>
+</header>
 
 <div class="container">
 
-<a class="back" href="index.php">
-← Retour à l'accueil
-</a>
+```
+<a href="index.php" class="back">← Retour au tableau de bord</a>
 
-<div class="grid">
+<div class="cards">
 
-<div class="stat">
+    <div class="card">
+        <div class="icon">📦</div>
+        <div class="label">Produits</div>
+        <div class="value"><?= $total_produits ?></div>
+    </div>
 
-<div class="icon">💵</div>
+    <div class="card">
+        <div class="icon">🛍️</div>
+        <div class="label">Ventes</div>
+        <div class="value"><?= $total_ventes ?></div>
+    </div>
 
-<h3>Recettes</h3>
+    <div class="card">
+        <div class="icon">💰</div>
+        <div class="label">Recettes</div>
+        <div class="value"><?= fcfa($montant_recettes) ?></div>
+    </div>
 
-<strong>
-<?= number_format($total_recettes,0,","," ") ?> FG
-</strong>
-
-</div>
-
-<div class="stat">
-
-<div class="icon">💸</div>
-
-<h3>Dépenses</h3>
-
-<strong>
-<?= number_format($total_depenses,0,","," ") ?> FG
-</strong>
-
-</div>
-
-<div class="stat">
-
-<div class="icon">💰</div>
-
-<h3>Ventes</h3>
-
-<strong>
-<?= number_format($total_ventes,0,","," ") ?> FG
-</strong>
+    <div class="card">
+        <div class="icon">💸</div>
+        <div class="label">Dépenses</div>
+        <div class="value"><?= fcfa($montant_depenses) ?></div>
+    </div>
 
 </div>
 
-<div class="stat">
+<div class="result">
 
-<div class="icon">📦</div>
+    <h2>💎 Résultat actuel</h2>
 
-<h3>Produits</h3>
+    <div class="amount">
+        <?= fcfa($resultat) ?>
+    </div>
 
-<strong>
-<?= $nombre_produits ?>
-</strong>
-
-</div>
-
-<div class="stat">
-
-<div class="icon">🛒</div>
-
-<h3>Nombre de ventes</h3>
-
-<strong>
-<?= $nombre_ventes ?>
-</strong>
-
-</div>
-
-<div class="stat">
-
-<div class="icon">📦</div>
-
-<h3>Stock total</h3>
-
-<strong>
-<?= $stock_total ?>
-</strong>
-
-</div>
-
-</div>
-
-<div class="big">
-
-<h2>📈 Résultat actuel</h2>
-
-<p>
-Recettes + ventes − dépenses
-</p>
-
-<strong>
-<?= number_format($benefice,0,","," ") ?> FG
-</strong>
+    <p>
+        Ventes + recettes − dépenses
+    </p>
 
 </div>
 
 <div class="section">
 
-<h2>💡 Suivi de l'activité</h2>
+    <h2>📋 Détails de l'activité</h2>
 
-<div class="info">
+    <div class="row">
+        <span>🛍️ Montant total des ventes</span>
+        <strong><?= fcfa($montant_ventes) ?></strong>
+    </div>
 
-<strong>DTF :</strong>
+    <div class="row">
+        <span>💰 Total des recettes</span>
+        <strong><?= fcfa($montant_recettes) ?></strong>
+    </div>
 
-Ton coût fournisseur actuel pour un DTF A4 est de
-<strong>5 000 FG</strong>.
+    <div class="row">
+        <span>💸 Total des dépenses</span>
+        <strong><?= fcfa($montant_depenses) ?></strong>
+    </div>
 
-</div>
+    <div class="row">
+        <span>📦 Quantité totale en stock</span>
+        <strong><?= $stock_total ?></strong>
+    </div>
 
-<div class="info">
-
-<strong>Prestations :</strong>
-
-Les clients peuvent apporter leur propre T-shirt.
-Tu peux enregistrer uniquement la prestation d'impression
-et le montant facturé.
-
-</div>
-
-<div class="info">
-
-<strong>Conseil de gestion :</strong>
-
-Enregistre chaque entrée d'argent dans
-<strong>Recettes</strong> et chaque sortie dans
-<strong>Dépenses</strong>.
-</div>
+    <div class="row">
+        <span>💼 Valeur du stock à l'achat</span>
+        <strong><?= fcfa($valeur_stock) ?></strong>
+    </div>
 
 </div>
+```
 
 </div>
 
 </body>
-
 </html>
-```
