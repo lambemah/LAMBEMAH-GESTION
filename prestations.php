@@ -3,293 +3,24 @@
 session_start();
 require_once "config.php";
 
-/*
-|--------------------------------------------------------------------------
-| PROTECTION
-|--------------------------------------------------------------------------
-*/
+/* =========================================================
+   PROTECTION
+========================================================= */
 
 if (!isset($_SESSION["id"])) {
     header("Location: index.php");
     exit;
 }
 
-$nom = $_SESSION["nom"] ?? "Utilisateur";
+$nom  = $_SESSION["nom"] ?? "Utilisateur";
 $role = $_SESSION["role"] ?? "lecture";
 
 $message = "";
-$type_message = "";
-
-
-/*
-|--------------------------------------------------------------------------
-| TRAITEMENT D'UNE PRESTATION
-|--------------------------------------------------------------------------
-|
-| Le client peut :
-| - apporter son propre T-shirt
-| - demander seulement une impression
-| - demander DTF + impression
-|
-| Le coût fournisseur actuel du DTF A4 = 5 000 FG
-|--------------------------------------------------------------------------
-*/
-
-if ($_SERVER["REQUEST_METHOD"] === "POST") {
-
-    $client = trim($_POST["client"] ?? "");
-    $format = trim($_POST["format"] ?? "A4");
-    $quantite = (int)($_POST["quantite"] ?? 1);
-
-    $cout_dtf = (float)($_POST["cout_dtf"] ?? 0);
-    $prix_impression = (float)($_POST["prix_impression"] ?? 0);
-
-    $description = trim($_POST["description"] ?? "");
-
-    if ($quantite < 1) {
-        $message = "La quantité doit être au moins égale à 1.";
-        $type_message = "error";
-
-    } elseif ($prix_impression <= 0) {
-
-        $message = "Veuillez indiquer le prix facturé au client.";
-        $type_message = "error";
-
-    } else {
-
-        /*
-        | Coût DTF total
-        */
-
-        $cout_total_dtf = $cout_dtf * $quantite;
-
-
-        /*
-        | Prix total facturé
-        */
-
-        $total_facture = $prix_impression * $quantite;
-
-
-        /*
-        | Bénéfice brut
-        */
-
-        $benefice = $total_facture - $cout_total_dtf;
-
-
-        /*
-        | Libellé automatique
-        */
-
-        if ($client !== "") {
-
-            $libelle =
-                "Prestation DTF - " .
-                $client .
-                " - " .
-                $format;
-
-        } else {
-
-            $libelle =
-                "Prestation DTF - " .
-                $format;
-        }
-
-
-        /*
-        | Description
-        */
-
-        $description_finale =
-            "Client : " . ($client ?: "Non renseigné") .
-            " | Format : " . $format .
-            " | Quantité : " . $quantite .
-            " | Coût DTF : " . number_format($cout_dtf, 0, ",", " ") . " FG/unité" .
-            " | Prix impression : " . number_format($prix_impression, 0, ",", " ") . " FG/unité" .
-            " | Coût DTF total : " . number_format($cout_total_dtf, 0, ",", " ") . " FG" .
-            " | Bénéfice : " . number_format($benefice, 0, ",", " ") . " FG";
-
-        if ($description !== "") {
-            $description_finale .= " | Note : " . $description;
-        }
-
-
-        /*
-        | Enregistrer comme recette
-        */
-
-        $stmt = $conn->prepare(
-            "INSERT INTO recettes
-            (libelle, montant, description)
-            VALUES (?, ?, ?)"
-        );
-
-        if ($stmt) {
-
-            $stmt->bind_param(
-                "sds",
-                $libelle,
-                $total_facture,
-                $description_finale
-            );
-
-            if ($stmt->execute()) {
-
-                /*
-                | Enregistrer le coût DTF comme dépense
-                | seulement si le coût fournisseur est supérieur à 0.
-                */
-
-                if ($cout_total_dtf > 0) {
-
-                    $libelle_depense =
-                        "DTF fournisseur - " .
-                        ($client ?: "Prestation") .
-                        " - " .
-                        $format;
-
-                    $stmt_depense = $conn->prepare(
-                        "INSERT INTO depenses
-                        (libelle, montant, description)
-                        VALUES (?, ?, ?)"
-                    );
-
-                    if ($stmt_depense) {
-
-                        $description_depense =
-                            "Coût fournisseur DTF pour " .
-                            $quantite .
-                            " impression(s), format " .
-                            $format .
-                            ". Client : " .
-                            ($client ?: "Non renseigné");
-
-                        $stmt_depense->bind_param(
-                            "sds",
-                            $libelle_depense,
-                            $cout_total_dtf,
-                            $description_depense
-                        );
-
-                        $stmt_depense->execute();
-
-                        $stmt_depense->close();
-                    }
-                }
-
-
-                $message =
-                    "Prestation enregistrée avec succès.";
-
-                $type_message = "success";
-
-            } else {
-
-                $message =
-                    "Erreur lors de l'enregistrement.";
-
-                $type_message = "error";
-            }
-
-            $stmt->close();
-
-        } else {
-
-            $message =
-                "Impossible de préparer l'enregistrement.";
-
-            $type_message = "error";
-        }
-    }
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| CALCULS POUR LA PAGE
-|--------------------------------------------------------------------------
-*/
-
-$total_prestations = 0;
-$nombre_prestations = 0;
-$total_couts_dtf = 0;
-
-
-/*
-| On récupère les recettes contenant "Prestation DTF".
-*/
-
-$result = $conn->query(
-    "SELECT
-        COUNT(*) AS nombre,
-        COALESCE(SUM(montant),0) AS total
-     FROM recettes
-     WHERE libelle LIKE '%Prestation DTF%'"
-);
-
-if ($result) {
-
-    $data = $result->fetch_assoc();
-
-    $nombre_prestations =
-        (int)$data["nombre"];
-
-    $total_prestations =
-        (float)$data["total"];
-}
-
-
-/*
-| Coûts DTF enregistrés dans les dépenses.
-*/
-
-$result = $conn->query(
-    "SELECT
-        COALESCE(SUM(montant),0) AS total
-     FROM depenses
-     WHERE libelle LIKE 'DTF fournisseur%'"
-);
-
-if ($result) {
-
-    $data = $result->fetch_assoc();
-
-    $total_couts_dtf =
-        (float)$data["total"];
-}
-
-
-$total_benefice =
-    $total_prestations - $total_couts_dtf;
-
-
-/*
-|--------------------------------------------------------------------------
-| DERNIÈRES PRESTATIONS
-|--------------------------------------------------------------------------
-*/
-
-$prestations = $conn->query(
-    "SELECT
-        id,
-        libelle,
-        montant,
-        description,
-        date_recette
-     FROM recettes
-     WHERE libelle LIKE '%Prestation DTF%'
-     ORDER BY id DESC
-     LIMIT 10"
-);
-
-
-/*
-|--------------------------------------------------------------------------
-| FORMAT ARGENT
-|--------------------------------------------------------------------------
-*/
+$type = "";
+
+/* =========================================================
+   FORMAT ARGENT
+========================================================= */
 
 function argent($montant)
 {
@@ -300,6 +31,387 @@ function argent($montant)
         " "
     ) . " FG";
 }
+
+/* =========================================================
+   ENREGISTREMENT PRESTATION
+   AUCUNE NOUVELLE TABLE
+========================================================= */
+
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_prestation"])) {
+
+    $client = trim($_POST["client"] ?? "");
+    $description = trim($_POST["description"] ?? "");
+
+    $articles = $_POST["article"] ?? [];
+    $quantites = $_POST["quantite"] ?? [];
+    $prix_articles = $_POST["prix_article"] ?? [];
+    $types_dtf = $_POST["type_dtf"] ?? [];
+    $prix_dtf = $_POST["prix_dtf"] ?? [];
+
+    if ($client === "") {
+        $client = "Client non renseigné";
+    }
+
+    if (empty($articles)) {
+
+        $message = "Ajoute au moins un article.";
+        $type = "error";
+
+    } else {
+
+        $total_articles = 0;
+        $total_dtf_facture = 0;
+        $total_dtf_a4 = 0;
+        $details = [];
+
+        $valide = true;
+
+        /*
+        -----------------------------------------------------
+        TRAITEMENT DES ARTICLES
+        -----------------------------------------------------
+        */
+
+        foreach ($articles as $i => $article) {
+
+            $article = trim($article);
+
+            $qte = (int)($quantites[$i] ?? 0);
+            $prix_article = (float)($prix_articles[$i] ?? 0);
+
+            if ($article === "" || $qte <= 0) {
+                $valide = false;
+                break;
+            }
+
+            /*
+            Prix des articles :
+            T-shirt, Lacoste, Chemise, Képi, Pull...
+            */
+
+            $montant_article = $qte * $prix_article;
+
+            $total_articles += $montant_article;
+
+            /*
+            -------------------------------------------------
+            CALCUL DTF
+            -------------------------------------------------
+            
+            ADULTE :
+            1 T-shirt = 1 DTF A4
+
+            ENFANT :
+            2 T-shirts = 1 DTF A4
+
+            -------------------------------------------------
+            */
+
+            $type_dtf = strtolower(
+                trim($types_dtf[$i] ?? "aucun")
+            );
+
+            $prix_dtf_unitaire = (float)(
+                $prix_dtf[$i] ?? 0
+            );
+
+            $nombre_dtf = 0;
+
+            if ($type_dtf === "adulte") {
+
+                $nombre_dtf = $qte;
+
+            } elseif ($type_dtf === "enfant") {
+
+                $nombre_dtf = (int)ceil($qte / 2);
+
+            }
+
+            /*
+            Prix DTF facturé au client.
+            */
+
+            $montant_dtf = $nombre_dtf * $prix_dtf_unitaire;
+
+            $total_dtf_facture += $montant_dtf;
+            $total_dtf_a4 += $nombre_dtf;
+
+            /*
+            Détails pour la recette
+            */
+
+            $ligne =
+                $article .
+                " × " .
+                $qte .
+                " = " .
+                argent($montant_article);
+
+            if ($nombre_dtf > 0) {
+
+                $ligne .=
+                    " | DTF " .
+                    ucfirst($type_dtf) .
+                    " : " .
+                    $nombre_dtf .
+                    " A4 × " .
+                    argent($prix_dtf_unitaire) .
+                    " = " .
+                    argent($montant_dtf);
+            }
+
+            $details[] = $ligne;
+        }
+
+        if (!$valide) {
+
+            $message = "Vérifie les articles et les quantités.";
+            $type = "error";
+
+        } else {
+
+            /*
+            -------------------------------------------------
+            TOTAL FACTURÉ
+            -------------------------------------------------
+            */
+
+            $total_facture =
+                $total_articles +
+                $total_dtf_facture;
+
+            if ($total_facture <= 0) {
+
+                $message =
+                    "Le montant total doit être supérieur à zéro.";
+
+                $type = "error";
+
+            } else {
+
+                /*
+                -------------------------------------------------
+                DESCRIPTION FINALE
+                -------------------------------------------------
+                */
+
+                $description_finale =
+                    "Client : " .
+                    $client .
+                    " | " .
+                    implode(" || ", $details);
+
+                if ($description !== "") {
+
+                    $description_finale .=
+                        " | Note : " .
+                        $description;
+                }
+
+                /*
+                -------------------------------------------------
+                ENREGISTRER COMME RECETTE
+                -------------------------------------------------
+                */
+
+                $libelle =
+                    "Prestation - " .
+                    $client;
+
+                $stmt = $conn->prepare(
+                    "INSERT INTO recettes
+                    (libelle, montant, description)
+                    VALUES (?, ?, ?)"
+                );
+
+                if ($stmt) {
+
+                    $stmt->bind_param(
+                        "sds",
+                        $libelle,
+                        $total_facture,
+                        $description_finale
+                    );
+
+                    if ($stmt->execute()) {
+
+                        /*
+                        -------------------------------------------------
+                        DÉDUCTION DU STOCK DTF
+                        -------------------------------------------------
+
+                        On cherche le produit DTF dans produits.
+
+                        Le nom peut contenir :
+                        DTF
+                        DTF A4
+                        DTF A4 5000
+                        -------------------------------------------------
+                        */
+
+                        if ($total_dtf_a4 > 0) {
+
+                            $stmt_dtf = $conn->prepare(
+                                "SELECT id, stock
+                                 FROM produits
+                                 WHERE nom LIKE '%DTF%'
+                                 ORDER BY id ASC
+                                 LIMIT 1"
+                            );
+
+                            if ($stmt_dtf) {
+
+                                $stmt_dtf->execute();
+
+                                $result_dtf =
+                                    $stmt_dtf->get_result();
+
+                                $dtf =
+                                    $result_dtf->fetch_assoc();
+
+                                $stmt_dtf->close();
+
+                                if ($dtf) {
+
+                                    /*
+                                    Stock DTF A4 diminué
+                                    */
+
+                                    $stmt_stock =
+                                        $conn->prepare(
+                                            "UPDATE produits
+                                             SET stock =
+                                             CASE
+                                                 WHEN stock >= ?
+                                                 THEN stock - ?
+                                                 ELSE 0
+                                             END
+                                             WHERE id = ?"
+                                        );
+
+                                    if ($stmt_stock) {
+
+                                        $stmt_stock->bind_param(
+                                            "iii",
+                                            $total_dtf_a4,
+                                            $total_dtf_a4,
+                                            $dtf["id"]
+                                        );
+
+                                        $stmt_stock->execute();
+
+                                        $stmt_stock->close();
+                                    }
+                                }
+                            }
+                        }
+
+                        /*
+                        -------------------------------------------------
+                        MESSAGE
+                        -------------------------------------------------
+                        */
+
+                        $message =
+                            "Prestation enregistrée avec succès. " .
+                            "Total : " .
+                            argent($total_facture) .
+                            " | DTF utilisés : " .
+                            $total_dtf_a4 .
+                            " A4.";
+
+                        $type = "success";
+
+                    } else {
+
+                        $message =
+                            "Erreur lors de l'enregistrement.";
+
+                        $type = "error";
+                    }
+
+                    $stmt->close();
+
+                } else {
+
+                    $message =
+                        "Impossible de préparer l'enregistrement.";
+
+                    $type = "error";
+                }
+            }
+        }
+    }
+}
+
+/* =========================================================
+   STATISTIQUES
+========================================================= */
+
+$total_prestations = 0;
+$nombre_prestations = 0;
+
+$result = $conn->query(
+    "SELECT
+        COALESCE(SUM(montant),0) AS total,
+        COUNT(*) AS nombre
+     FROM recettes
+     WHERE libelle LIKE 'Prestation - %'"
+);
+
+if ($result) {
+
+    $data = $result->fetch_assoc();
+
+    $total_prestations =
+        (float)$data["total"];
+
+    $nombre_prestations =
+        (int)$data["nombre"];
+}
+
+/* =========================================================
+   STOCK DTF
+========================================================= */
+
+$stock_dtf = 0;
+
+$result_dtf_stock = $conn->query(
+    "SELECT stock
+     FROM produits
+     WHERE nom LIKE '%DTF%'
+     ORDER BY id ASC
+     LIMIT 1"
+);
+
+if ($result_dtf_stock) {
+
+    $dtf_stock_data =
+        $result_dtf_stock->fetch_assoc();
+
+    if ($dtf_stock_data) {
+
+        $stock_dtf =
+            (int)$dtf_stock_data["stock"];
+    }
+}
+
+/* =========================================================
+   HISTORIQUE
+========================================================= */
+
+$prestations = $conn->query(
+    "SELECT
+        id,
+        libelle,
+        montant,
+        description,
+        date_recette
+     FROM recettes
+     WHERE libelle LIKE 'Prestation - %'
+     ORDER BY id DESC
+     LIMIT 50"
+);
 
 ?>
 
@@ -318,14 +430,7 @@ function argent($montant)
 
 <title>Prestations - LAMBEMAH GESTION</title>
 
-
 <style>
-
-/*
-|--------------------------------------------------------------------------
-| GLOBAL
-|--------------------------------------------------------------------------
-*/
 
 * {
     box-sizing: border-box;
@@ -334,192 +439,132 @@ function argent($montant)
 }
 
 body {
-
-    font-family:
-        Inter,
-        Arial,
-        sans-serif;
-
+    font-family: Arial, sans-serif;
     background: #f3f7fb;
-
     color: #172536;
-
 }
 
-
-/*
-|--------------------------------------------------------------------------
-| SIDEBAR
-|--------------------------------------------------------------------------
-*/
+/* =========================================================
+   SIDEBAR
+========================================================= */
 
 .sidebar {
-
     position: fixed;
-
     left: 0;
     top: 0;
     bottom: 0;
-
     width: 250px;
 
     background:
         linear-gradient(
             180deg,
-            #071b2e,
-            #0b2944,
-            #07395b
+            #061a2d,
+            #092d4b,
+            #07527c
         );
 
     color: white;
-
     padding: 24px 15px;
 
     z-index: 1000;
-
 }
 
 .brand {
-
     display: flex;
-
     align-items: center;
-
     gap: 11px;
-
     padding: 5px 10px 25px;
-
 }
 
 .brand-icon {
-
     width: 45px;
     height: 45px;
-
     border-radius: 14px;
 
     display: flex;
-
-    justify-content: center;
     align-items: center;
+    justify-content: center;
 
     background:
         linear-gradient(
             135deg,
-            #21b8ff,
+            #20b8ff,
             #1264c7
         );
 
     font-size: 22px;
-
 }
 
 .brand h2 {
-
     font-size: 18px;
-
 }
 
 .brand span {
-
     font-size: 9px;
-
     color: #86a9c0;
-
 }
 
 .nav {
-
     list-style: none;
-
 }
 
 .nav li {
-
     margin: 4px 0;
-
 }
 
 .nav a {
-
     display: flex;
-
-    gap: 12px;
-
     align-items: center;
+    gap: 12px;
 
     padding: 12px 14px;
 
     border-radius: 12px;
 
     color: #c5d5e1;
-
     text-decoration: none;
 
     font-size: 13px;
-
 }
 
-.nav a:hover {
-
-    background: rgba(255,255,255,.08);
-
+.nav a:hover,
+.nav a.active {
+    background: rgba(32,184,255,.16);
     color: white;
-
 }
 
 .nav a.active {
-
-    background: rgba(32,184,255,.15);
-
-    color: white;
-
     border-left: 3px solid #20b8ff;
-
 }
 
 .sidebar-bottom {
-
     position: absolute;
-
     left: 15px;
     right: 15px;
     bottom: 20px;
-
 }
 
 .profile {
-
     padding: 12px;
-
     border-radius: 12px;
 
     background: rgba(255,255,255,.06);
 
     margin-bottom: 10px;
-
 }
 
 .profile strong {
-
     display: block;
-
     font-size: 12px;
-
 }
 
 .profile span {
-
     color: #8ca8bb;
-
     font-size: 10px;
-
 }
 
 .logout {
-
     display: block;
-
     text-align: center;
 
     text-decoration: none;
@@ -533,283 +578,44 @@ body {
     border-radius: 10px;
 
     font-size: 11px;
-
 }
 
-
-/*
-|--------------------------------------------------------------------------
-| MAIN
-|--------------------------------------------------------------------------
-*/
+/* =========================================================
+   MAIN
+========================================================= */
 
 .main {
-
     margin-left: 250px;
-
     padding: 28px;
-
-    max-width: 1500px;
-
 }
 
-
-/*
-|--------------------------------------------------------------------------
-| HEADER
-|--------------------------------------------------------------------------
-*/
-
 .header {
-
     display: flex;
-
     justify-content: space-between;
-
     align-items: center;
 
     margin-bottom: 22px;
-
 }
 
 .header h1 {
-
     font-size: 25px;
-
 }
 
 .header p {
-
     color: #8998a5;
-
     font-size: 12px;
-
     margin-top: 5px;
-
 }
 
-.user {
-
+.avatar {
     width: 42px;
     height: 42px;
 
     border-radius: 13px;
 
     display: flex;
-
     align-items: center;
-
     justify-content: center;
-
-    background:
-        linear-gradient(
-            135deg,
-            #21b8ff,
-            #1264c7
-        );
-
-    color: white;
-
-    font-weight: bold;
-
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| CARDS
-|--------------------------------------------------------------------------
-*/
-
-.cards {
-
-    display: grid;
-
-    grid-template-columns:
-        repeat(3, 1fr);
-
-    gap: 15px;
-
-    margin-bottom: 20px;
-
-}
-
-.card-stat {
-
-    background: white;
-
-    border-radius: 17px;
-
-    padding: 18px;
-
-    box-shadow:
-        0 6px 25px rgba(25,55,80,.06);
-
-}
-
-.card-stat small {
-
-    color: #8c9aa6;
-
-    font-size: 10px;
-
-}
-
-.card-stat h2 {
-
-    margin-top: 8px;
-
-    font-size: 21px;
-
-}
-
-.card-stat .icon {
-
-    font-size: 20px;
-
-    margin-bottom: 10px;
-
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| LAYOUT
-|--------------------------------------------------------------------------
-*/
-
-.grid {
-
-    display: grid;
-
-    grid-template-columns:
-        400px 1fr;
-
-    gap: 20px;
-
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| FORM CARD
-|--------------------------------------------------------------------------
-*/
-
-.form-card {
-
-    background: white;
-
-    border-radius: 20px;
-
-    padding: 22px;
-
-    box-shadow:
-        0 6px 25px rgba(25,55,80,.06);
-
-}
-
-.form-card h2 {
-
-    font-size: 17px;
-
-    margin-bottom: 5px;
-
-}
-
-.form-card > p {
-
-    color: #8b99a5;
-
-    font-size: 11px;
-
-    margin-bottom: 20px;
-
-}
-
-.group {
-
-    margin-bottom: 14px;
-
-}
-
-label {
-
-    display: block;
-
-    margin-bottom: 6px;
-
-    font-size: 11px;
-
-    font-weight: bold;
-
-    color: #536675;
-
-}
-
-input,
-select,
-textarea {
-
-    width: 100%;
-
-    border: 1px solid #e0e8ee;
-
-    border-radius: 10px;
-
-    padding: 11px;
-
-    font-size: 12px;
-
-    outline: none;
-
-    background: #fbfdff;
-
-}
-
-input:focus,
-select:focus,
-textarea:focus {
-
-    border-color: #21aee9;
-
-}
-
-textarea {
-
-    resize: vertical;
-
-    min-height: 70px;
-
-}
-
-.price-info {
-
-    background: #eff9ff;
-
-    border: 1px solid #d5effb;
-
-    color: #24779e;
-
-    border-radius: 10px;
-
-    padding: 10px;
-
-    margin-bottom: 15px;
-
-    font-size: 10px;
-
-}
-
-button {
-
-    width: 100%;
-
-    border: none;
-
-    border-radius: 11px;
-
-    padding: 13px;
 
     background:
         linear-gradient(
@@ -819,239 +625,435 @@ button {
         );
 
     color: white;
-
     font-weight: bold;
-
-    cursor: pointer;
-
-    font-size: 12px;
-
 }
 
-button:hover {
+/* =========================================================
+   STATS
+========================================================= */
 
-    opacity: .92;
+.cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
 
+    gap: 15px;
+
+    margin-bottom: 20px;
 }
 
-
-/*
-|--------------------------------------------------------------------------
-| MESSAGES
-|--------------------------------------------------------------------------
-*/
-
-.message {
-
-    padding: 12px;
-
-    border-radius: 11px;
-
-    margin-bottom: 15px;
-
-    font-size: 11px;
-
-}
-
-.success {
-
-    background: #eafaf2;
-
-    color: #198754;
-
-}
-
-.error {
-
-    background: #fff0f0;
-
-    color: #d33;
-
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| TABLE CARD
-|--------------------------------------------------------------------------
-*/
-
-.list-card {
-
+.stat {
     background: white;
+    border-radius: 17px;
+    padding: 18px;
 
+    box-shadow:
+        0 6px 25px rgba(25,55,80,.06);
+}
+
+.stat small {
+    color: #8c9aa6;
+    font-size: 10px;
+}
+
+.stat h2 {
+    margin-top: 8px;
+    font-size: 21px;
+    color: #0c79b5;
+}
+
+.stat.green h2 {
+    color: #159765;
+}
+
+/* =========================================================
+   CONTENU
+========================================================= */
+
+.content {
+    display: grid;
+
+    grid-template-columns:
+        430px 1fr;
+
+    gap: 20px;
+}
+
+.card {
+    background: white;
     border-radius: 20px;
 
     padding: 22px;
 
     box-shadow:
         0 6px 25px rgba(25,55,80,.06);
-
 }
 
-.list-header {
+.card h2 {
+    font-size: 17px;
+    margin-bottom: 6px;
+}
 
+.card > p {
+    color: #8b99a5;
+    font-size: 11px;
+    margin-bottom: 18px;
+}
+
+/* =========================================================
+   MESSAGE
+========================================================= */
+
+.message {
+    padding: 12px;
+    border-radius: 10px;
+
+    margin-bottom: 15px;
+
+    font-size: 11px;
+}
+
+.success {
+    background: #eafaf2;
+    color: #168653;
+}
+
+.error {
+    background: #fff0f0;
+    color: #d33;
+}
+
+/* =========================================================
+   INFO DTF
+========================================================= */
+
+.dtf-info {
+    background: #eef9ff;
+    border: 1px solid #d6effb;
+
+    color: #1679ad;
+
+    padding: 12px;
+
+    border-radius: 11px;
+
+    font-size: 10px;
+
+    margin-bottom: 16px;
+}
+
+.dtf-info strong {
+    color: #086b9d;
+}
+
+/* =========================================================
+   ARTICLES
+========================================================= */
+
+.article-box {
+    border: 1px solid #e2e9ee;
+
+    border-radius: 13px;
+
+    padding: 13px;
+
+    margin-bottom: 12px;
+
+    background: #fbfdff;
+}
+
+.article-title {
     display: flex;
 
     justify-content: space-between;
 
-    margin-bottom: 18px;
+    align-items: center;
 
+    margin-bottom: 10px;
 }
 
-.list-header h2 {
-
-    font-size: 17px;
-
+.article-title strong {
+    font-size: 11px;
 }
 
-.list-header span {
+.remove-btn {
+    width: auto;
 
-    color: #8c99a5;
+    padding: 5px 8px;
+
+    background: #fff0f0;
+
+    color: #d33;
 
     font-size: 10px;
 
+    border-radius: 7px;
 }
 
-.table-wrap {
+.row {
+    display: grid;
 
-    overflow-x: auto;
+    grid-template-columns:
+        1.3fr .7fr .9fr;
 
+    gap: 7px;
+
+    margin-bottom: 9px;
 }
 
-table {
+.row-2 {
+    display: grid;
 
-    width: 100%;
+    grid-template-columns:
+        1fr 1fr;
 
-    border-collapse: collapse;
-
+    gap: 7px;
 }
 
-th {
+.group {
+    margin-bottom: 13px;
+}
 
-    color: #95a1aa;
+label {
+    display: block;
 
     font-size: 9px;
 
-    text-align: left;
+    font-weight: bold;
+
+    color: #536675;
+
+    margin-bottom: 5px;
+}
+
+input,
+select,
+textarea {
+    width: 100%;
+
+    padding: 10px;
+
+    border:
+        1px solid #dfe8ee;
+
+    border-radius: 9px;
+
+    background: #fbfdff;
+
+    outline: none;
+
+    font-family: Arial, sans-serif;
+
+    font-size: 11px;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+    border-color: #20b8ff;
+}
+
+textarea {
+    min-height: 65px;
+    resize: vertical;
+}
+
+.add-btn {
+    width: 100%;
+
+    margin-bottom: 13px;
+
+    border: 1px dashed #20b8ff;
+
+    background: #eef9ff;
+
+    color: #0878b7;
+
+    padding: 10px;
+
+    border-radius: 10px;
+
+    cursor: pointer;
+
+    font-weight: bold;
+}
+
+.total-box {
+    background:
+        linear-gradient(
+            135deg,
+            #eef9ff,
+            #f7fcff
+        );
+
+    border-radius: 12px;
+
+    padding: 14px;
+
+    margin: 15px 0;
+
+    text-align: center;
+}
+
+.total-box small {
+    display: block;
+
+    color: #7b909f;
+
+    font-size: 9px;
+
+    margin-bottom: 5px;
+}
+
+.total-box strong {
+    color: #0878b7;
+
+    font-size: 21px;
+}
+
+/* =========================================================
+   BOUTON
+========================================================= */
+
+.btn-primary {
+    width: 100%;
+
+    border: 0;
+
+    border-radius: 11px;
+
+    padding: 13px;
+
+    cursor: pointer;
+
+    color: white;
+
+    background:
+        linear-gradient(
+            135deg,
+            #20b8ff,
+            #1264c7
+        );
+
+    font-weight: bold;
+
+    font-size: 12px;
+}
+
+/* =========================================================
+   HISTORIQUE
+========================================================= */
+
+.sale {
+    padding: 14px 0;
+
+    border-bottom:
+        1px solid #edf1f4;
+}
+
+.sale:first-child {
+    padding-top: 0;
+}
+
+.sale-top {
+    display: flex;
+
+    justify-content: space-between;
+
+    gap: 10px;
+}
+
+.sale-product {
+    font-weight: bold;
+
+    font-size: 12px;
+
+    color: #20394c;
+}
+
+.sale-amount {
+    color: #0878b7;
+
+    font-weight: bold;
+
+    white-space: nowrap;
+
+    font-size: 12px;
+}
+
+.sale-description {
+    margin-top: 8px;
 
     padding: 9px;
 
-    border-bottom: 1px solid #edf1f4;
+    background: #f8fafc;
 
-}
+    border-radius: 8px;
 
-td {
-
-    padding: 12px 9px;
-
-    border-bottom: 1px solid #f0f3f5;
-
-    font-size: 11px;
-
-}
-
-td strong {
-
-    color: #20394c;
-
-}
-
-.amount {
-
-    color: #1377b1;
-
-    font-weight: bold;
-
-}
-
-.profit {
-
-    color: #159765;
-
-    font-weight: bold;
-
-}
-
-.date {
-
-    color: #9ba5ad;
+    color: #637581;
 
     font-size: 9px;
 
+    line-height: 1.6;
 }
 
+.sale-date {
+    margin-top: 7px;
 
-/*
-|--------------------------------------------------------------------------
-| MOBILE
-|--------------------------------------------------------------------------
-*/
+    color: #9aa6ae;
 
-@media (max-width: 900px) {
+    font-size: 9px;
+}
 
-    .grid {
+/* =========================================================
+   MOBILE
+========================================================= */
 
+@media(max-width:900px) {
+
+    .content {
         grid-template-columns: 1fr;
-
     }
 
     .cards {
-
         grid-template-columns:
             repeat(3, 1fr);
-
     }
-
 }
 
-
-@media (max-width: 700px) {
+@media(max-width:700px) {
 
     .sidebar {
-
         position: relative;
 
         width: 100%;
-
         height: auto;
 
         padding: 10px;
-
     }
 
     .brand {
-
         padding: 4px 7px 10px;
-
     }
 
     .brand-icon {
-
         width: 39px;
         height: 39px;
-
     }
 
     .brand h2 {
-
         font-size: 15px;
-
     }
 
     .nav {
-
         display: grid;
 
         grid-template-columns:
             repeat(4, 1fr);
 
         gap: 4px;
-
     }
 
     .nav a {
-
         flex-direction: column;
 
         gap: 4px;
@@ -1061,125 +1063,93 @@ td strong {
         text-align: center;
 
         font-size: 8px;
-
     }
 
     .nav a.active {
+        border-left: 0;
 
-        border-left: none;
-
-        border-bottom: 2px solid #20b8ff;
-
+        border-bottom:
+            2px solid #20b8ff;
     }
 
     .sidebar-bottom {
-
         position: static;
 
         margin-top: 8px;
-
     }
 
     .profile {
-
         display: none;
-
     }
 
     .main {
-
         margin-left: 0;
 
         padding: 14px;
-
     }
 
     .header h1 {
-
         font-size: 20px;
+    }
 
+    .header p {
+        font-size: 10px;
     }
 
     .cards {
-
         grid-template-columns:
             1fr 1fr;
 
         gap: 9px;
-
     }
 
-    .card-stat {
-
+    .stat {
         padding: 14px;
-
     }
 
-    .card-stat:last-child {
-
-        grid-column:
-            1 / -1;
-
+    .stat:last-child {
+        grid-column: 1 / -1;
     }
 
-    .grid {
-
+    .content {
         gap: 13px;
-
     }
 
-    .form-card,
-    .list-card {
-
+    .card {
         padding: 15px;
 
         border-radius: 16px;
-
     }
 
+    .row {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .row > div:first-child {
+        grid-column: 1 / -1;
+    }
 }
 
-
-/*
-|--------------------------------------------------------------------------
-| PETIT TELEPHONE
-|--------------------------------------------------------------------------
-*/
-
-@media (max-width: 390px) {
+@media(max-width:390px) {
 
     .nav a {
-
         font-size: 7px;
-
     }
 
-    .cards {
-
-        grid-template-columns:
-            1fr 1fr;
-
-    }
-
-    .card-stat h2 {
-
+    .stat h2 {
         font-size: 16px;
-
     }
-
 }
 
 </style>
 
 </head>
 
-
 <body>
 
-
-<!-- ==========================================================
-     SIDEBAR
-=========================================================== -->
+<!-- =========================================================
+     MENU
+========================================================= -->
 
 <aside class="sidebar">
 
@@ -1191,9 +1161,7 @@ td strong {
 
         <div>
 
-            <h2>
-                LAMBEMAH
-            </h2>
+            <h2>LAMBEMAH</h2>
 
             <span>
                 GESTION • PRESTATION
@@ -1203,51 +1171,47 @@ td strong {
 
     </div>
 
-
     <ul class="nav">
 
         <li>
             <a href="index.php">
-                🏠
-                <span>Accueil</span>
+                🏠 <span>Accueil</span>
             </a>
         </li>
 
         <li>
             <a href="produits.php">
-                📦
-                <span>Produits</span>
+                📦 <span>Produits</span>
             </a>
         </li>
 
         <li>
             <a href="ventes.php">
-                💰
-                <span>Ventes</span>
+                💰 <span>Ventes</span>
             </a>
         </li>
 
         <li>
-            <a
-                href="prestations.php"
-                class="active"
-            >
-                🖨️
-                <span>Prestations</span>
+            <a href="prestations.php" class="active">
+                🖨️ <span>Prestations</span>
+            </a>
+        </li>
+
+        <li>
+            <a href="recettes.php">
+                💵 <span>Recettes</span>
             </a>
         </li>
 
         <li>
             <a href="depenses.php">
-                💸
-                <span>Dépenses</span>
+                💸 <span>Dépenses</span>
             </a>
         </li>
 
         <li>
             <a href="statistiques.php">
-                📊
-                <span>Stats</span>
+                📊 <span>Statistiques</span>
             </a>
         </li>
 
@@ -1255,15 +1219,13 @@ td strong {
 
         <li>
             <a href="utilisateurs.php">
-                👥
-                <span>Équipe</span>
+                👥 <span>Équipe</span>
             </a>
         </li>
 
         <?php endif; ?>
 
     </ul>
-
 
     <div class="sidebar-bottom">
 
@@ -1290,13 +1252,11 @@ td strong {
 
 </aside>
 
-
-<!-- ==========================================================
+<!-- =========================================================
      MAIN
-=========================================================== -->
+========================================================= -->
 
 <main class="main">
-
 
     <div class="header">
 
@@ -1307,12 +1267,12 @@ td strong {
             </h1>
 
             <p>
-                Gérez les impressions DTF et les T-shirts apportés par les clients.
+                Articles du client + impression DTF.
             </p>
 
         </div>
 
-        <div class="user">
+        <div class="avatar">
 
             <?= strtoupper(
                 substr($nom, 0, 1)
@@ -1322,19 +1282,23 @@ td strong {
 
     </div>
 
+    <?php if ($message !== ""): ?>
 
-    <!-- ======================================================
-         STATISTIQUES
-    ======================================================= -->
+        <div class="message <?= htmlspecialchars($type) ?>">
+
+            <?= $message ?>
+
+        </div>
+
+    <?php endif; ?>
+
+    <!-- =====================================================
+         STATS
+    ====================================================== -->
 
     <div class="cards">
 
-
-        <div class="card-stat">
-
-            <div class="icon">
-                💵
-            </div>
+        <div class="stat">
 
             <small>
                 CA PRESTATIONS
@@ -1346,89 +1310,76 @@ td strong {
 
         </div>
 
-
-        <div class="card-stat">
-
-            <div class="icon">
-                🧾
-            </div>
+        <div class="stat">
 
             <small>
-                COÛT DTF
+                PRESTATIONS
             </small>
 
             <h2>
-                <?= argent($total_couts_dtf) ?>
+                <?= $nombre_prestations ?>
             </h2>
 
         </div>
 
-
-        <div class="card-stat">
-
-            <div class="icon">
-                📈
-            </div>
+        <div class="stat green">
 
             <small>
-                BÉNÉFICE DTF
+                STOCK DTF A4
             </small>
 
-            <h2 class="profit">
-                <?= argent($total_benefice) ?>
+            <h2>
+                <?= $stock_dtf ?>
             </h2>
 
         </div>
 
     </div>
 
+    <div class="content">
 
-    <!-- ======================================================
-         CONTENU
-    ======================================================= -->
+        <!-- =================================================
+             FORMULAIRE
+        ================================================== -->
 
-    <div class="grid">
-
-
-        <!-- FORMULAIRE -->
-
-        <div class="form-card">
+        <div class="card">
 
             <h2>
                 ➕ Nouvelle prestation
             </h2>
 
             <p>
-                Enregistrer une impression pour un client.
+                Le client peut apporter plusieurs articles.
             </p>
 
+            <div class="dtf-info">
 
-            <?php if ($message !== ""): ?>
-
-                <div class="message <?= $type_message ?>">
-
-                    <?= htmlspecialchars($message) ?>
-
-                </div>
-
-            <?php endif; ?>
-
-
-            <div class="price-info">
-
-                💡 <strong>Prix fournisseur DTF A4 :</strong>
-                5 000 FG
+                🖨️ <strong>Règle DTF :</strong>
 
                 <br><br>
 
-                Le client peut apporter son propre T-shirt.
-                Tu factures alors directement ta prestation d'impression.
+                👕 Adulte :
+                <strong>1 T-shirt = 1 A4</strong>
+
+                <br>
+
+                👶 Enfant :
+                <strong>2 T-shirts = 1 A4</strong>
+
+                <br><br>
+
+                Le prix facturé au client est libre :
+                5 000, 10 000, 15 000 FG...
 
             </div>
 
-
             <form method="POST">
 
+                <input
+                    type="hidden"
+                    name="ajouter_prestation"
+                    value="1"
+                >
 
                 <div class="group">
 
@@ -1439,89 +1390,134 @@ td strong {
                     <input
                         type="text"
                         name="client"
-                        placeholder="Nom du client"
-                    >
-
-                </div>
-
-
-                <div class="group">
-
-                    <label>
-                        FORMAT DTF
-                    </label>
-
-                    <select name="format">
-
-                        <option value="A4">
-                            A4 — 5 000 FG fournisseur
-                        </option>
-
-                        <option value="A3">
-                            A3
-                        </option>
-
-                        <option value="Autre">
-                            Autre format
-                        </option>
-
-                    </select>
-
-                </div>
-
-
-                <div class="group">
-
-                    <label>
-                        QUANTITÉ
-                    </label>
-
-                    <input
-                        type="number"
-                        name="quantite"
-                        value="1"
-                        min="1"
+                        placeholder="Ex : Fanta"
                         required
                     >
 
                 </div>
 
+                <div id="articles">
 
-                <div class="group">
+                    <div class="article-box">
 
-                    <label>
-                        COÛT DTF FOURNISSEUR / UNITÉ
-                    </label>
+                        <div class="article-title">
 
-                    <input
-                        type="number"
-                        name="cout_dtf"
-                        value="5000"
-                        min="0"
-                        step="500"
-                        required
-                    >
+                            <strong>
+                                ARTICLE 1
+                            </strong>
+
+                        </div>
+
+                        <div class="row">
+
+                            <div>
+
+                                <label>
+                                    ARTICLE
+                                </label>
+
+                                <input
+                                    type="text"
+                                    name="article[]"
+                                    placeholder="T-shirt, Lacoste..."
+                                    required
+                                >
+
+                            </div>
+
+                            <div>
+
+                                <label>
+                                    QUANTITÉ
+                                </label>
+
+                                <input
+                                    type="number"
+                                    name="quantite[]"
+                                    value="1"
+                                    min="1"
+                                    required
+                                >
+
+                            </div>
+
+                            <div>
+
+                                <label>
+                                    PRIX ARTICLE
+                                </label>
+
+                                <input
+                                    type="number"
+                                    name="prix_article[]"
+                                    value="0"
+                                    min="0"
+                                    step="500"
+                                    required
+                                >
+
+                            </div>
+
+                        </div>
+
+                        <div class="row-2">
+
+                            <div>
+
+                                <label>
+                                    DTF
+                                </label>
+
+                                <select
+                                    name="type_dtf[]"
+                                >
+
+                                    <option value="aucun">
+                                        Aucun
+                                    </option>
+
+                                    <option value="adulte">
+                                        Adulte — 1 T-shirt = 1 A4
+                                    </option>
+
+                                    <option value="enfant">
+                                        Enfant — 2 T-shirts = 1 A4
+                                    </option>
+
+                                </select>
+
+                            </div>
+
+                            <div>
+
+                                <label>
+                                    PRIX DTF / A4
+                                </label>
+
+                                <input
+                                    type="number"
+                                    name="prix_dtf[]"
+                                    value="0"
+                                    min="0"
+                                    step="500"
+                                    placeholder="Ex : 10000"
+                                >
+
+                            </div>
+
+                        </div>
+
+                    </div>
 
                 </div>
 
-
-                <div class="group">
-
-                    <label>
-                        PRIX FACTURÉ AU CLIENT / UNITÉ
-                    </label>
-
-                    <input
-                        type="number"
-                        name="prix_impression"
-                        placeholder="Exemple : 15000"
-                        min="1"
-                        step="500"
-                        required
-                    >
-
-                </div>
-
+                <button
+                    type="button"
+                    class="add-btn"
+                    onclick="ajouterArticle()"
+                >
+                    ➕ Ajouter un autre article
+                </button>
 
                 <div class="group">
 
@@ -1531,186 +1527,274 @@ td strong {
 
                     <textarea
                         name="description"
-                        placeholder="Ex : T-shirt blanc apporté par le client..."
+                        placeholder="Ex : Fanta apporte ses propres T-shirts..."
                     ></textarea>
 
                 </div>
 
+                <div class="total-box">
 
-                <button type="submit">
+                    <small>
+                        LE TOTAL SERA CALCULÉ APRÈS ENREGISTREMENT
+                    </small>
 
+                    <strong>
+                        Articles + DTF
+                    </strong>
+
+                </div>
+
+                <button
+                    type="submit"
+                    class="btn-primary"
+                >
                     🖨️ ENREGISTRER LA PRESTATION
-
                 </button>
 
             </form>
 
         </div>
 
+        <!-- =================================================
+             HISTORIQUE
+        ================================================== -->
 
-        <!-- HISTORIQUE -->
+        <div class="card">
 
-        <div class="list-card">
+            <h2>
+                📋 Prestations récentes
+            </h2>
 
-            <div class="list-header">
+            <p>
+                Les 50 dernières prestations.
+            </p>
 
-                <h2>
-                    📋 Prestations récentes
-                </h2>
+            <?php if (
+                $prestations &&
+                $prestations->num_rows > 0
+            ): ?>
 
-                <span>
-                    <?= $nombre_prestations ?> prestation(s)
-                </span>
+                <?php while (
+                    $p =
+                    $prestations->fetch_assoc()
+                ): ?>
 
-            </div>
+                    <div class="sale">
 
+                        <div class="sale-top">
 
-            <div class="table-wrap">
+                            <div class="sale-product">
 
-                <table>
+                                🖨️
+                                <?= htmlspecialchars(
+                                    $p["libelle"]
+                                ) ?>
 
-                    <thead>
+                            </div>
 
-                    <tr>
+                            <div class="sale-amount">
 
-                        <th>
-                            CLIENT / PRESTATION
-                        </th>
+                                <?= argent(
+                                    $p["montant"]
+                                ) ?>
 
-                        <th>
-                            MONTANT
-                        </th>
+                            </div>
 
-                        <th>
-                            BÉNÉFICE
-                        </th>
+                        </div>
 
-                        <th>
-                            DATE
-                        </th>
+                        <div class="sale-description">
 
-                    </tr>
-
-                    </thead>
-
-
-                    <tbody>
-
-                    <?php if (
-                        $prestations &&
-                        $prestations->num_rows > 0
-                    ): ?>
-
-
-                        <?php while (
-                            $p =
-                            $prestations->fetch_assoc()
-                        ): ?>
-
-
-                            <?php
-
-                            /*
-                            | Récupération du bénéfice
-                            | depuis la description.
-                            */
-
-                            $benefice_ligne = 0;
-
-                            if (
-                                preg_match(
-                                    '/Bénéfice : ([0-9 ]+)/',
-                                    $p["description"],
-                                    $matches
+                            <?= nl2br(
+                                htmlspecialchars(
+                                    $p["description"]
                                 )
-                            ) {
+                            ) ?>
 
-                                $benefice_ligne =
-                                    (float)str_replace(
-                                        " ",
-                                        "",
-                                        $matches[1]
-                                    );
-                            }
+                        </div>
 
-                            ?>
+                        <div class="sale-date">
 
+                            📅
+                            <?= date(
+                                "d/m/Y H:i",
+                                strtotime(
+                                    $p["date_recette"]
+                                )
+                            ) ?>
 
-                            <tr>
+                        </div>
 
-                                <td>
+                    </div>
 
-                                    <strong>
+                <?php endwhile; ?>
 
-                                        <?= htmlspecialchars(
-                                            $p["libelle"]
-                                        ) ?>
+            <?php else: ?>
 
-                                    </strong>
+                <div
+                    style="
+                    text-align:center;
+                    padding:35px 10px;
+                    color:#8998a5;
+                    font-size:12px;
+                    "
+                >
 
-                                </td>
+                    🖨️
 
+                    <br><br>
 
-                                <td class="amount">
+                    Aucune prestation enregistrée.
 
-                                    <?= argent(
-                                        $p["montant"]
-                                    ) ?>
+                </div>
 
-                                </td>
-
-
-                                <td class="profit">
-
-                                    <?= argent(
-                                        $benefice_ligne
-                                    ) ?>
-
-                                </td>
-
-
-                                <td class="date">
-
-                                    <?= date(
-                                        "d/m/Y",
-                                        strtotime(
-                                            $p["date_recette"]
-                                        )
-                                    ) ?>
-
-                                </td>
-
-                            </tr>
-
-
-                        <?php endwhile; ?>
-
-
-                    <?php else: ?>
-
-                        <tr>
-
-                            <td colspan="4">
-
-                                Aucune prestation enregistrée.
-
-                            </td>
-
-                        </tr>
-
-                    <?php endif; ?>
-
-                    </tbody>
-
-                </table>
-
-            </div>
+            <?php endif; ?>
 
         </div>
 
     </div>
 
 </main>
+
+<script>
+
+/* =========================================================
+   AJOUTER UN ARTICLE
+========================================================= */
+
+let numeroArticle = 1;
+
+function ajouterArticle() {
+
+    numeroArticle++;
+
+    const container =
+        document.getElementById("articles");
+
+    const div =
+        document.createElement("div");
+
+    div.className = "article-box";
+
+    div.innerHTML = `
+
+        <div class="article-title">
+
+            <strong>
+                ARTICLE ${numeroArticle}
+            </strong>
+
+            <button
+                type="button"
+                class="remove-btn"
+                onclick="this.closest('.article-box').remove()"
+            >
+                ✕
+            </button>
+
+        </div>
+
+        <div class="row">
+
+            <div>
+
+                <label>
+                    ARTICLE
+                </label>
+
+                <input
+                    type="text"
+                    name="article[]"
+                    placeholder="T-shirt, Lacoste..."
+                    required
+                >
+
+            </div>
+
+            <div>
+
+                <label>
+                    QUANTITÉ
+                </label>
+
+                <input
+                    type="number"
+                    name="quantite[]"
+                    value="1"
+                    min="1"
+                    required
+                >
+
+            </div>
+
+            <div>
+
+                <label>
+                    PRIX ARTICLE
+                </label>
+
+                <input
+                    type="number"
+                    name="prix_article[]"
+                    value="0"
+                    min="0"
+                    step="500"
+                    required
+                >
+
+            </div>
+
+        </div>
+
+        <div class="row-2">
+
+            <div>
+
+                <label>
+                    DTF
+                </label>
+
+                <select name="type_dtf[]">
+
+                    <option value="aucun">
+                        Aucun
+                    </option>
+
+                    <option value="adulte">
+                        Adulte — 1 T-shirt = 1 A4
+                    </option>
+
+                    <option value="enfant">
+                        Enfant — 2 T-shirts = 1 A4
+                    </option>
+
+                </select>
+
+            </div>
+
+            <div>
+
+                <label>
+                    PRIX DTF / A4
+                </label>
+
+                <input
+                    type="number"
+                    name="prix_dtf[]"
+                    value="0"
+                    min="0"
+                    step="500"
+                    placeholder="Ex : 10000"
+                >
+
+            </div>
+
+        </div>
+    `;
+
+    container.appendChild(div);
+}
+
+</script>
 
 </body>
 
