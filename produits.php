@@ -15,7 +15,7 @@ $message = "";
 $type = "";
 
 /* =========================================================
-   AJOUT D'UN PRODUIT
+   AJOUTER UN PRODUIT
 ========================================================= */
 
 if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_produit"])) {
@@ -24,27 +24,58 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_produit"])) {
     $categorie = trim($_POST["categorie"] ?? "");
     $prix_achat = (float)($_POST["prix_achat"] ?? 0);
     $prix_vente = (float)($_POST["prix_vente"] ?? 0);
-    $stock = (int)($_POST["stock"] ?? 0);
+    $stock_initial = (int)($_POST["stock_initial"] ?? 0);
 
     if ($nom_produit === "") {
 
-        $message = "Veuillez saisir le nom du produit.";
+        $message = "Le nom du produit est obligatoire.";
         $type = "error";
 
-    } elseif ($stock < 0) {
+    } elseif ($prix_achat < 0 || $prix_vente < 0) {
+
+        $message = "Les prix ne peuvent pas être négatifs.";
+        $type = "error";
+
+    } elseif ($stock_initial < 0) {
 
         $message = "Le stock ne peut pas être négatif.";
         $type = "error";
 
     } else {
 
-        $stmt = $conn->prepare(
-            "INSERT INTO produits
-            (nom, categorie, prix_achat, prix_vente, stock)
-            VALUES (?, ?, ?, ?, ?)"
-        );
+        $conn->begin_transaction();
 
-        if ($stmt) {
+        try {
+
+            /* Vérifier si le produit existe déjà */
+            $check = $conn->prepare(
+                "SELECT id
+                 FROM produits
+                 WHERE nom = ?
+                 LIMIT 1"
+            );
+
+            $check->bind_param("s", $nom_produit);
+            $check->execute();
+
+            $result = $check->get_result();
+
+            if ($result->num_rows > 0) {
+
+                throw new Exception(
+                    "Ce produit existe déjà."
+                );
+            }
+
+            $check->close();
+
+
+            /* Ajouter le produit */
+            $stmt = $conn->prepare(
+                "INSERT INTO produits
+                (nom, categorie, prix_achat, prix_vente, stock)
+                VALUES (?, ?, ?, ?, ?)"
+            );
 
             $stmt->bind_param(
                 "ssddi",
@@ -52,25 +83,68 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_produit"])) {
                 $categorie,
                 $prix_achat,
                 $prix_vente,
-                $stock
+                $stock_initial
             );
 
-            if ($stmt->execute()) {
+            if (!$stmt->execute()) {
 
-                $message = "Produit ajouté avec succès.";
-                $type = "success";
-
-            } else {
-
-                $message = "Impossible d'ajouter le produit.";
-                $type = "error";
+                throw new Exception(
+                    "Impossible d'ajouter le produit."
+                );
             }
+
+            $produit_id = $stmt->insert_id;
 
             $stmt->close();
 
-        } else {
 
-            $message = "Erreur de préparation.";
+            /*
+             * Si un stock initial est indiqué,
+             * on crée également un mouvement ENTREE.
+             */
+
+            if ($stock_initial > 0) {
+
+                $description =
+                    "Stock initial du produit.";
+
+                $mouvement = $conn->prepare(
+                    "INSERT INTO mouvements
+                    (produit_id, type, quantite, prix, description)
+                    VALUES (?, 'ENTREE', ?, ?, ?)"
+                );
+
+                $mouvement->bind_param(
+                    "iids",
+                    $produit_id,
+                    $stock_initial,
+                    $prix_achat,
+                    $description
+                );
+
+                if (!$mouvement->execute()) {
+
+                    throw new Exception(
+                        "Impossible d'enregistrer le mouvement."
+                    );
+                }
+
+                $mouvement->close();
+            }
+
+
+            $conn->commit();
+
+            $message =
+                "Produit ajouté avec succès.";
+
+            $type = "success";
+
+        } catch (Exception $e) {
+
+            $conn->rollback();
+
+            $message = $e->getMessage();
             $type = "error";
         }
     }
@@ -78,68 +152,145 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_produit"])) {
 
 
 /* =========================================================
-   MODIFICATION D'UN PRODUIT
+   AJOUTER UNE ENTRÉE / ACHAT DE STOCK
 ========================================================= */
 
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["modifier_produit"])) {
+if (
+    $_SERVER["REQUEST_METHOD"] === "POST"
+    && isset($_POST["ajouter_entree"])
+) {
 
-    $id = (int)($_POST["id"] ?? 0);
-    $nom_produit = trim($_POST["nom"] ?? "");
-    $categorie = trim($_POST["categorie"] ?? "");
-    $prix_achat = (float)($_POST["prix_achat"] ?? 0);
-    $prix_vente = (float)($_POST["prix_vente"] ?? 0);
-    $stock = (int)($_POST["stock"] ?? 0);
+    $produit_id = (int)($_POST["produit_id"] ?? 0);
+    $quantite = (int)($_POST["quantite"] ?? 0);
+    $prix = (float)($_POST["prix"] ?? 0);
+    $description = trim($_POST["description"] ?? "");
 
-    if ($id <= 0 || $nom_produit === "") {
+    if ($produit_id <= 0) {
 
-        $message = "Informations invalides.";
+        $message = "Veuillez sélectionner un produit.";
         $type = "error";
 
-    } elseif ($stock < 0) {
+    } elseif ($quantite <= 0) {
 
-        $message = "Le stock ne peut pas être négatif.";
+        $message = "La quantité doit être supérieure à zéro.";
+        $type = "error";
+
+    } elseif ($prix < 0) {
+
+        $message = "Le prix ne peut pas être négatif.";
         $type = "error";
 
     } else {
 
-        $stmt = $conn->prepare(
-            "UPDATE produits
-             SET nom = ?,
-                 categorie = ?,
-                 prix_achat = ?,
-                 prix_vente = ?,
-                 stock = ?
-             WHERE id = ?"
-        );
+        $conn->begin_transaction();
 
-        if ($stmt) {
+        try {
 
-            $stmt->bind_param(
-                "ssddii",
-                $nom_produit,
-                $categorie,
-                $prix_achat,
-                $prix_vente,
-                $stock,
-                $id
+            /* Vérifier le produit */
+            $stmt = $conn->prepare(
+                "SELECT id, nom
+                 FROM produits
+                 WHERE id = ?
+                 LIMIT 1"
             );
 
-            if ($stmt->execute()) {
+            $stmt->bind_param(
+                "i",
+                $produit_id
+            );
 
-                $message = "Produit modifié avec succès.";
-                $type = "success";
+            $stmt->execute();
 
-            } else {
-
-                $message = "Impossible de modifier le produit.";
-                $type = "error";
-            }
+            $result = $stmt->get_result();
+            $produit = $result->fetch_assoc();
 
             $stmt->close();
 
-        } else {
+            if (!$produit) {
 
-            $message = "Erreur de préparation.";
+                throw new Exception(
+                    "Produit introuvable."
+                );
+            }
+
+
+            /* Enregistrer le mouvement */
+            $description_finale =
+                $description !== ""
+                ? $description
+                : "Achat / entrée de stock";
+
+
+            $mouvement = $conn->prepare(
+                "INSERT INTO mouvements
+                (produit_id, type, quantite, prix, description)
+                VALUES (?, 'ENTREE', ?, ?, ?)"
+            );
+
+            $mouvement->bind_param(
+                "iids",
+                $produit_id,
+                $quantite,
+                $prix,
+                $description_finale
+            );
+
+            if (!$mouvement->execute()) {
+
+                throw new Exception(
+                    "Impossible d'enregistrer l'entrée."
+                );
+            }
+
+            $mouvement->close();
+
+
+            /*
+             * Augmenter le stock
+             */
+            $stock = $conn->prepare(
+                "UPDATE produits
+                 SET stock = stock + ?,
+                     prix_achat = ?
+                 WHERE id = ?"
+            );
+
+            $stock->bind_param(
+                "idi",
+                $quantite,
+                $prix,
+                $produit_id
+            );
+
+            if (
+                !$stock->execute()
+                || $stock->affected_rows !== 1
+            ) {
+
+                throw new Exception(
+                    "Impossible de mettre à jour le stock."
+                );
+            }
+
+            $stock->close();
+
+
+            $conn->commit();
+
+            $message =
+                "Entrée enregistrée : "
+                . $produit["nom"]
+                . " × "
+                . $quantite
+                . ".";
+
+            $type = "success";
+
+        } catch (Exception $e) {
+
+            $conn->rollback();
+
+            $message = $e->getMessage();
             $type = "error";
         }
     }
@@ -147,38 +298,84 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["modifier_produit"])) 
 
 
 /* =========================================================
-   SUPPRESSION D'UN PRODUIT
+   SUPPRIMER UN PRODUIT
 ========================================================= */
 
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["supprimer_produit"])) {
+if (
+    $_SERVER["REQUEST_METHOD"] === "POST"
+    && isset($_POST["supprimer_produit"])
+) {
 
     if ($role !== "admin") {
 
-        $message = "Seul l'administrateur peut supprimer un produit.";
+        $message =
+            "Seul l'administrateur peut supprimer un produit.";
+
         $type = "error";
 
     } else {
 
-        $id = (int)($_POST["id"] ?? 0);
+        $produit_id =
+            (int)($_POST["produit_id"] ?? 0);
 
-        if ($id > 0) {
+        if ($produit_id > 0) {
 
-            $stmt = $conn->prepare(
-                "DELETE FROM produits WHERE id = ?"
+            /*
+             * On vérifie d'abord s'il existe
+             * dans les ventes.
+             */
+
+            $check = $conn->prepare(
+                "SELECT COUNT(*) AS total
+                 FROM ventes
+                 WHERE produit_id = ?"
             );
 
-            if ($stmt) {
+            $check->bind_param(
+                "i",
+                $produit_id
+            );
 
-                $stmt->bind_param("i", $id);
+            $check->execute();
+
+            $result = $check->get_result();
+            $data = $result->fetch_assoc();
+
+            $check->close();
+
+
+            if ((int)$data["total"] > 0) {
+
+                $message =
+                    "Impossible de supprimer ce produit : "
+                    . "il possède déjà des ventes.";
+
+                $type = "error";
+
+            } else {
+
+                $stmt = $conn->prepare(
+                    "DELETE FROM produits
+                     WHERE id = ?"
+                );
+
+                $stmt->bind_param(
+                    "i",
+                    $produit_id
+                );
 
                 if ($stmt->execute()) {
 
-                    $message = "Produit supprimé.";
+                    $message =
+                        "Produit supprimé.";
+
                     $type = "success";
 
                 } else {
 
-                    $message = "Impossible de supprimer le produit.";
+                    $message =
+                        "Impossible de supprimer le produit.";
+
                     $type = "error";
                 }
 
@@ -190,70 +387,39 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["supprimer_produit"]))
 
 
 /* =========================================================
-   RECHERCHE
+   RÉCUPÉRER LES PRODUITS
 ========================================================= */
 
-$recherche = trim($_GET["recherche"] ?? "");
-
-if ($recherche !== "") {
-
-    $motif = "%" . $recherche . "%";
-
-    $stmt = $conn->prepare(
-        "SELECT
-            id,
-            nom,
-            categorie,
-            prix_achat,
-            prix_vente,
-            stock,
-            date_creation
-         FROM produits
-         WHERE nom LIKE ?
-            OR categorie LIKE ?
-         ORDER BY id DESC"
-    );
-
-    $stmt->bind_param(
-        "ss",
-        $motif,
-        $motif
-    );
-
-    $stmt->execute();
-
-    $produits = $stmt->get_result();
-
-} else {
-
-    $produits = $conn->query(
-        "SELECT
-            id,
-            nom,
-            categorie,
-            prix_achat,
-            prix_vente,
-            stock,
-            date_creation
-         FROM produits
-         ORDER BY id DESC"
-    );
-}
+$produits = $conn->query(
+    "SELECT
+        id,
+        nom,
+        categorie,
+        prix_achat,
+        prix_vente,
+        stock,
+        date_creation
+     FROM produits
+     ORDER BY nom ASC"
+);
 
 
 /* =========================================================
-   STATISTIQUES
+   STATISTIQUES STOCK
 ========================================================= */
 
 $total_produits = 0;
-$total_stock = 0;
+$total_articles = 0;
 $valeur_stock = 0;
 
 $result = $conn->query(
     "SELECT
-        COUNT(*) AS nombre,
-        COALESCE(SUM(stock),0) AS stock_total,
-        COALESCE(SUM(stock * prix_achat),0) AS valeur
+        COUNT(*) AS produits,
+        COALESCE(SUM(stock),0) AS articles,
+        COALESCE(
+            SUM(stock * prix_achat),
+            0
+        ) AS valeur
      FROM produits"
 );
 
@@ -261,10 +427,51 @@ if ($result) {
 
     $data = $result->fetch_assoc();
 
-    $total_produits = (int)$data["nombre"];
-    $total_stock = (int)$data["stock_total"];
-    $valeur_stock = (float)$data["valeur"];
+    $total_produits =
+        (int)$data["produits"];
+
+    $total_articles =
+        (int)$data["articles"];
+
+    $valeur_stock =
+        (float)$data["valeur"];
 }
+
+
+/* =========================================================
+   PRODUITS POUR LE FORMULAIRE D'ENTRÉE
+========================================================= */
+
+$produits_entree = $conn->query(
+    "SELECT
+        id,
+        nom,
+        stock,
+        prix_achat
+     FROM produits
+     ORDER BY nom ASC"
+);
+
+
+/* =========================================================
+   DERNIERS MOUVEMENTS
+========================================================= */
+
+$mouvements = $conn->query(
+    "SELECT
+        m.id,
+        m.type,
+        m.quantite,
+        m.prix,
+        m.description,
+        m.date_mouvement,
+        p.nom AS produit_nom
+     FROM mouvements m
+     INNER JOIN produits p
+        ON p.id = m.produit_id
+     ORDER BY m.id DESC
+     LIMIT 30"
+);
 
 
 /* =========================================================
@@ -306,9 +513,19 @@ function argent($montant)
 }
 
 body {
+
     font-family: Arial, sans-serif;
-    background: #f3f7fb;
+
+    background:
+        linear-gradient(
+            135deg,
+            #eef7ff,
+            #f8fbff
+        );
+
     color: #172536;
+
+    min-height: 100vh;
 }
 
 
@@ -319,6 +536,7 @@ body {
 .sidebar {
 
     position: fixed;
+
     left: 0;
     top: 0;
     bottom: 0;
@@ -328,9 +546,9 @@ body {
     background:
         linear-gradient(
             180deg,
-            #061a2d,
-            #092d4b,
-            #07527c
+            #06182c,
+            #092b49,
+            #073f66
         );
 
     color: white;
@@ -343,11 +561,15 @@ body {
 .brand {
 
     display: flex;
+
     align-items: center;
 
     gap: 11px;
 
-    padding: 5px 10px 25px;
+    padding:
+        5px
+        10px
+        25px;
 }
 
 .brand-icon {
@@ -358,6 +580,7 @@ body {
     border-radius: 14px;
 
     display: flex;
+
     align-items: center;
     justify-content: center;
 
@@ -376,7 +599,9 @@ body {
 }
 
 .brand span {
+
     font-size: 9px;
+
     color: #86a9c0;
 }
 
@@ -391,6 +616,7 @@ body {
 .nav a {
 
     display: flex;
+
     align-items: center;
 
     gap: 12px;
@@ -404,14 +630,13 @@ body {
     text-decoration: none;
 
     font-size: 13px;
-
-    transition: .2s;
 }
 
 .nav a:hover,
 .nav a.active {
 
-    background: rgba(32,184,255,.16);
+    background:
+        rgba(32,184,255,.16);
 
     color: white;
 }
@@ -503,7 +728,10 @@ body {
 }
 
 .header h1 {
-    font-size: 25px;
+
+    font-size: 26px;
+
+    color: #061a35;
 }
 
 .header p {
@@ -517,10 +745,10 @@ body {
 
 .avatar {
 
-    width: 42px;
-    height: 42px;
+    width: 44px;
+    height: 44px;
 
-    border-radius: 13px;
+    border-radius: 14px;
 
     display: flex;
 
@@ -548,11 +776,13 @@ body {
 
     padding: 12px;
 
-    border-radius: 10px;
+    border-radius: 11px;
 
     margin-bottom: 15px;
 
     font-size: 11px;
+
+    font-weight: bold;
 }
 
 .success {
@@ -574,7 +804,7 @@ body {
    STATISTIQUES
 ========================================================= */
 
-.cards {
+.stats {
 
     display: grid;
 
@@ -590,9 +820,9 @@ body {
 
     background: white;
 
-    border-radius: 17px;
+    border-radius: 18px;
 
-    padding: 18px;
+    padding: 19px;
 
     box-shadow:
         0 6px 25px
@@ -610,25 +840,30 @@ body {
 
     margin-top: 8px;
 
-    font-size: 21px;
+    font-size: 22px;
 
-    color: #0c79b5;
+    color: #0878b7;
 }
 
 
 /* =========================================================
-   LAYOUT
+   GRILLE
 ========================================================= */
 
-.content {
+.grid {
 
     display: grid;
 
     grid-template-columns:
-        360px 1fr;
+        370px 1fr;
 
     gap: 20px;
 }
+
+
+/* =========================================================
+   CARDS
+========================================================= */
 
 .card {
 
@@ -648,6 +883,8 @@ body {
     font-size: 17px;
 
     margin-bottom: 6px;
+
+    color: #061a35;
 }
 
 .card > p {
@@ -661,10 +898,11 @@ body {
 
 
 /* =========================================================
-   FORMULAIRE
+   FORM
 ========================================================= */
 
 .group {
+
     margin-bottom: 14px;
 }
 
@@ -682,7 +920,8 @@ label {
 }
 
 input,
-select {
+select,
+textarea {
 
     width: 100%;
 
@@ -697,18 +936,24 @@ select {
 
     outline: none;
 
-    font-family: Arial, sans-serif;
-
     font-size: 12px;
 }
 
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
 
     border-color: #20b8ff;
 }
 
-.btn-primary {
+textarea {
+
+    resize: vertical;
+
+    min-height: 70px;
+}
+
+.btn {
 
     width: 100%;
 
@@ -717,8 +962,6 @@ select:focus {
     border-radius: 11px;
 
     padding: 13px;
-
-    cursor: pointer;
 
     color: white;
 
@@ -731,49 +974,11 @@ select:focus {
 
     font-weight: bold;
 
-    font-size: 12px;
-}
-
-.btn-primary:hover {
-    opacity: .9;
-}
-
-
-/* =========================================================
-   RECHERCHE
-========================================================= */
-
-.search {
-
-    display: flex;
-
-    gap: 8px;
-
-    margin-bottom: 18px;
-}
-
-.search input {
-
-    flex: 1;
-}
-
-.btn-search {
-
-    width: auto;
-
-    padding:
-        0 18px;
-
-    border: 0;
-
-    border-radius: 10px;
-
-    background:
-        #0c79b5;
-
-    color: white;
-
     cursor: pointer;
+}
+
+.btn:hover {
+    opacity: .92;
 }
 
 
@@ -782,6 +987,7 @@ select:focus {
 ========================================================= */
 
 .table-wrap {
+
     overflow-x: auto;
 }
 
@@ -790,19 +996,17 @@ table {
     width: 100%;
 
     border-collapse: collapse;
-
-    min-width: 720px;
 }
 
 th {
 
-    color: #95a1aa;
-
-    font-size: 9px;
-
     text-align: left;
 
-    padding: 10px;
+    padding: 11px;
+
+    color: #8998a5;
+
+    font-size: 9px;
 
     border-bottom:
         1px solid #edf1f4;
@@ -813,164 +1017,102 @@ td {
     padding: 12px 10px;
 
     border-bottom:
-        1px solid #f0f3f5;
+        1px solid #edf1f4;
 
     font-size: 11px;
 }
 
 td strong {
-    color: #20394c;
+    color: #17324d;
+}
+
+.price {
+
+    color: #0877b7;
+
+    font-weight: bold;
 }
 
 .stock {
 
     font-weight: bold;
 
-    color: #159765;
+    color: #168653;
 }
 
-.stock.zero {
-    color: #d33;
+.low {
+
+    color: #d9822b;
 }
 
-.prix {
-    color: #0878b7;
-    font-weight: bold;
-}
-
-.actions {
-
-    display: flex;
-
-    gap: 5px;
-}
-
-.btn-edit,
-.btn-delete {
+.delete-btn {
 
     border: 0;
-
-    border-radius: 7px;
-
-    padding: 7px 9px;
-
-    cursor: pointer;
-
-    font-size: 10px;
-}
-
-.btn-edit {
-
-    background: #eef8ff;
-
-    color: #0878b7;
-}
-
-.btn-delete {
 
     background: #fff0f0;
 
     color: #d33;
+
+    padding: 6px 9px;
+
+    border-radius: 7px;
+
+    cursor: pointer;
+
+    font-size: 9px;
 }
 
 
 /* =========================================================
-   MODAL
+   MOUVEMENTS
 ========================================================= */
 
-.modal {
+.movement {
 
-    display: none;
-
-    position: fixed;
-
-    inset: 0;
-
-    background:
-        rgba(5,25,40,.55);
-
-    z-index: 2000;
+    display: flex;
 
     align-items: center;
 
-    justify-content: center;
+    justify-content: space-between;
 
-    padding: 15px;
+    gap: 10px;
+
+    padding: 12px 0;
+
+    border-bottom:
+        1px solid #edf1f4;
 }
 
-.modal.show {
-    display: flex;
+.movement:last-child {
+    border-bottom: 0;
 }
 
-.modal-box {
+.movement-left strong {
 
-    width: 100%;
+    display: block;
 
-    max-width: 430px;
-
-    background: white;
-
-    border-radius: 18px;
-
-    padding: 22px;
-
+    font-size: 11px;
 }
 
-.modal-box h2 {
+.movement-left span {
 
-    font-size: 18px;
+    color: #8c99a5;
 
-    margin-bottom: 18px;
+    font-size: 9px;
 }
 
-.modal-actions {
+.entree {
 
-    display: flex;
-
-    gap: 8px;
-
-    margin-top: 18px;
-}
-
-.btn-cancel {
-
-    flex: 1;
-
-    border: 0;
-
-    border-radius: 10px;
-
-    padding: 12px;
-
-    background: #edf2f5;
-
-    color: #536675;
-
-    cursor: pointer;
-}
-
-.btn-save {
-
-    flex: 1;
-
-    border: 0;
-
-    border-radius: 10px;
-
-    padding: 12px;
-
-    background:
-        linear-gradient(
-            135deg,
-            #20b8ff,
-            #1264c7
-        );
-
-    color: white;
+    color: #159765;
 
     font-weight: bold;
+}
 
-    cursor: pointer;
+.sortie {
+
+    color: #d33;
+
+    font-weight: bold;
 }
 
 
@@ -980,16 +1122,11 @@ td strong {
 
 @media(max-width:900px) {
 
-    .content {
+    .grid {
 
         grid-template-columns: 1fr;
     }
 
-    .cards {
-
-        grid-template-columns:
-            repeat(3, 1fr);
-    }
 }
 
 @media(max-width:700px) {
@@ -1008,7 +1145,9 @@ td strong {
     .brand {
 
         padding:
-            4px 7px 10px;
+            4px
+            7px
+            10px;
     }
 
     .brand-icon {
@@ -1026,7 +1165,7 @@ td strong {
         display: grid;
 
         grid-template-columns:
-            repeat(4, 1fr);
+            repeat(4,1fr);
 
         gap: 4px;
     }
@@ -1071,10 +1210,10 @@ td strong {
     }
 
     .header h1 {
-        font-size: 20px;
+        font-size: 21px;
     }
 
-    .cards {
+    .stats {
 
         grid-template-columns:
             1fr 1fr;
@@ -1083,13 +1222,8 @@ td strong {
     }
 
     .stat {
-        padding: 14px;
-    }
 
-    .stat:last-child {
-
-        grid-column:
-            1 / -1;
+        padding: 15px;
     }
 
     .stat h2 {
@@ -1098,32 +1232,11 @@ td strong {
 
     .card {
 
-        padding: 15px;
+        padding: 16px;
 
-        border-radius: 16px;
+        border-radius: 17px;
     }
 
-    .search {
-        flex-direction: column;
-    }
-
-    .btn-search {
-
-        width: 100%;
-
-        padding: 11px;
-    }
-}
-
-@media(max-width:390px) {
-
-    .nav a {
-        font-size: 7px;
-    }
-
-    .stat h2 {
-        font-size: 15px;
-    }
 }
 
 </style>
@@ -1229,6 +1342,7 @@ td strong {
 
         </div>
 
+
         <a
             class="logout"
             href="index.php?logout=1"
@@ -1247,16 +1361,17 @@ td strong {
 
 <main class="main">
 
+
     <div class="header">
 
         <div>
 
             <h1>
-                📦 Produits
+                📦 Produits & Stock
             </h1>
 
             <p>
-                Gère tes produits, leurs prix et ton stock.
+                Gère tes produits, tes achats et ton stock.
             </p>
 
         </div>
@@ -1287,7 +1402,7 @@ td strong {
          STATISTIQUES
     ====================================================== -->
 
-    <div class="cards">
+    <div class="stats">
 
         <div class="stat">
 
@@ -1309,7 +1424,7 @@ td strong {
             </small>
 
             <h2>
-                <?= $total_stock ?>
+                <?= $total_articles ?>
             </h2>
 
         </div>
@@ -1330,165 +1445,284 @@ td strong {
     </div>
 
 
-    <!-- =====================================================
-         CONTENU
-    ====================================================== -->
-
-    <div class="content">
+    <div class="grid">
 
 
         <!-- =================================================
-             AJOUT
+             GAUCHE
         ================================================== -->
 
-        <div class="card">
-
-            <h2>
-                ➕ Nouveau produit
-            </h2>
-
-            <p>
-                Ajoute un article à ton stock.
-            </p>
+        <div>
 
 
-            <form method="POST">
+            <!-- AJOUT PRODUIT -->
 
-                <input
-                    type="hidden"
-                    name="ajouter_produit"
-                    value="1"
-                >
+            <div class="card">
+
+                <h2>
+                    ➕ Nouveau produit
+                </h2>
+
+                <p>
+                    Ajoute un article à ton catalogue.
+                </p>
 
 
-                <div class="group">
-
-                    <label>
-                        NOM DU PRODUIT
-                    </label>
+                <form method="POST">
 
                     <input
-                        type="text"
-                        name="nom"
-                        placeholder="Ex : T-shirt adulte"
-                        required
+                        type="hidden"
+                        name="ajouter_produit"
+                        value="1"
                     >
 
-                </div>
+
+                    <div class="group">
+
+                        <label>
+                            NOM DU PRODUIT
+                        </label>
+
+                        <input
+                            type="text"
+                            name="nom"
+                            placeholder="Ex : T-shirt enfant"
+                            required
+                        >
+
+                    </div>
 
 
-                <div class="group">
+                    <div class="group">
 
-                    <label>
-                        CATÉGORIE
-                    </label>
+                        <label>
+                            CATÉGORIE
+                        </label>
+
+                        <input
+                            type="text"
+                            name="categorie"
+                            placeholder="Ex : T-shirt, DTF, Lacoste..."
+                        >
+
+                    </div>
+
+
+                    <div class="group">
+
+                        <label>
+                            PRIX D'ACHAT
+                        </label>
+
+                        <input
+                            type="number"
+                            name="prix_achat"
+                            min="0"
+                            step="500"
+                            value="0"
+                        >
+
+                    </div>
+
+
+                    <div class="group">
+
+                        <label>
+                            PRIX DE VENTE
+                        </label>
+
+                        <input
+                            type="number"
+                            name="prix_vente"
+                            min="0"
+                            step="500"
+                            value="0"
+                        >
+
+                    </div>
+
+
+                    <div class="group">
+
+                        <label>
+                            STOCK INITIAL
+                        </label>
+
+                        <input
+                            type="number"
+                            name="stock_initial"
+                            min="0"
+                            value="0"
+                        >
+
+                    </div>
+
+
+                    <button
+                        type="submit"
+                        class="btn"
+                    >
+                        💾 Ajouter le produit
+                    </button>
+
+                </form>
+
+            </div>
+
+
+            <br>
+
+
+            <!-- NOUVEL ACHAT -->
+
+            <div class="card">
+
+                <h2>
+                    🛒 Nouvelle entrée / achat
+                </h2>
+
+                <p>
+                    Ajoute une quantité achetée au stock.
+                </p>
+
+
+                <form method="POST">
 
                     <input
-                        type="text"
-                        name="categorie"
-                        placeholder="Ex : T-shirt, Lacoste, Képi..."
+                        type="hidden"
+                        name="ajouter_entree"
+                        value="1"
                     >
 
-                </div>
+
+                    <div class="group">
+
+                        <label>
+                            PRODUIT
+                        </label>
+
+                        <select
+                            name="produit_id"
+                            required
+                        >
+
+                            <option value="">
+                                -- Sélectionner --
+                            </option>
+
+                            <?php
+                            if (
+                                $produits_entree
+                                && $produits_entree->num_rows > 0
+                            ):
+                            ?>
+
+                                <?php
+                                while (
+                                    $p =
+                                    $produits_entree->fetch_assoc()
+                                ):
+                                ?>
+
+                                    <option
+                                        value="<?= (int)$p["id"] ?>"
+                                    >
+
+                                        <?= htmlspecialchars(
+                                            $p["nom"]
+                                        ) ?>
+
+                                        —
+                                        Stock :
+                                        <?= (int)$p["stock"] ?>
+
+                                    </option>
+
+                                <?php endwhile; ?>
+
+                            <?php endif; ?>
+
+                        </select>
+
+                    </div>
 
 
-                <div class="group">
+                    <div class="group">
 
-                    <label>
-                        PRIX D'ACHAT / UNITÉ
-                    </label>
+                        <label>
+                            QUANTITÉ ACHETÉE
+                        </label>
 
-                    <input
-                        type="number"
-                        name="prix_achat"
-                        value="0"
-                        min="0"
-                        step="500"
+                        <input
+                            type="number"
+                            name="quantite"
+                            min="1"
+                            value="1"
+                            required
+                        >
+
+                    </div>
+
+
+                    <div class="group">
+
+                        <label>
+                            PRIX D'ACHAT / UNITÉ
+                        </label>
+
+                        <input
+                            type="number"
+                            name="prix"
+                            min="0"
+                            step="500"
+                            value="0"
+                            required
+                        >
+
+                    </div>
+
+
+                    <div class="group">
+
+                        <label>
+                            FOURNISSEUR / NOTE
+                        </label>
+
+                        <textarea
+                            name="description"
+                            placeholder="Ex : Achat chez fournisseur X, transport inclus..."
+                        ></textarea>
+
+                    </div>
+
+
+                    <button
+                        type="submit"
+                        class="btn"
                     >
+                        📥 Enregistrer l'entrée
+                    </button>
 
-                </div>
+                </form>
 
-
-                <div class="group">
-
-                    <label>
-                        PRIX DE VENTE / UNITÉ
-                    </label>
-
-                    <input
-                        type="number"
-                        name="prix_vente"
-                        value="0"
-                        min="0"
-                        step="500"
-                    >
-
-                </div>
-
-
-                <div class="group">
-
-                    <label>
-                        STOCK INITIAL
-                    </label>
-
-                    <input
-                        type="number"
-                        name="stock"
-                        value="0"
-                        min="0"
-                    >
-
-                </div>
-
-
-                <button
-                    type="submit"
-                    class="btn-primary"
-                >
-                    💾 Ajouter le produit
-                </button>
-
-            </form>
+            </div>
 
         </div>
 
 
         <!-- =================================================
-             LISTE
+             DROITE
         ================================================== -->
 
         <div class="card">
 
             <h2>
-                📋 Mes produits
+                📦 Catalogue des produits
             </h2>
 
             <p>
-                Tous les articles enregistrés dans ton stock.
+                Tous les produits enregistrés et leur stock actuel.
             </p>
-
-
-            <form
-                method="GET"
-                class="search"
-            >
-
-                <input
-                    type="text"
-                    name="recherche"
-                    value="<?= htmlspecialchars($recherche) ?>"
-                    placeholder="🔎 Rechercher un produit..."
-                >
-
-                <button
-                    type="submit"
-                    class="btn-search"
-                >
-                    Rechercher
-                </button>
-
-            </form>
 
 
             <div class="table-wrap">
@@ -1519,9 +1753,13 @@ td strong {
                             STOCK
                         </th>
 
-                        <th>
-                            ACTIONS
-                        </th>
+                        <?php if ($role === "admin"): ?>
+
+                            <th>
+                                ACTION
+                            </th>
+
+                        <?php endif; ?>
 
                     </tr>
 
@@ -1530,15 +1768,19 @@ td strong {
 
                     <tbody>
 
-                    <?php if (
-                        $produits &&
-                        $produits->num_rows > 0
-                    ): ?>
+                    <?php
+                    if (
+                        $produits
+                        && $produits->num_rows > 0
+                    ):
+                    ?>
 
-                        <?php while (
+                        <?php
+                        while (
                             $p =
                             $produits->fetch_assoc()
-                        ): ?>
+                        ):
+                        ?>
 
                             <tr>
 
@@ -1557,13 +1799,12 @@ td strong {
 
                                     <?= htmlspecialchars(
                                         $p["categorie"]
-                                        ?: "—"
                                     ) ?>
 
                                 </td>
 
 
-                                <td class="prix">
+                                <td class="price">
 
                                     <?= argent(
                                         $p["prix_achat"]
@@ -1572,7 +1813,7 @@ td strong {
                                 </td>
 
 
-                                <td class="prix">
+                                <td class="price">
 
                                     <?= argent(
                                         $p["prix_vente"]
@@ -1584,7 +1825,11 @@ td strong {
                                 <td>
 
                                     <span
-                                        class="stock <?= ((int)$p["stock"] <= 0 ? "zero" : "") ?>"
+                                        class="<?= (
+                                            (int)$p["stock"] <= 3
+                                            ? "low"
+                                            : "stock"
+                                        ) ?>"
                                     >
 
                                         <?= (int)$p["stock"] ?>
@@ -1594,54 +1839,43 @@ td strong {
                                 </td>
 
 
-                                <td>
+                                <?php if ($role === "admin"): ?>
 
-                                    <div class="actions">
+                                    <td>
 
-                                        <button
-                                            type="button"
-                                            class="btn-edit"
-                                            onclick='ouvrirModification(
-                                                <?= json_encode($p, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>
-                                            )'
+                                        <form
+                                            method="POST"
+                                            onsubmit="
+                                                return confirm(
+                                                    'Supprimer ce produit ?'
+                                                );
+                                            "
                                         >
-                                            ✏️
-                                        </button>
 
-
-                                        <?php if ($role === "admin"): ?>
-
-                                            <form
-                                                method="POST"
-                                                onsubmit="return confirm('Supprimer ce produit ?');"
+                                            <input
+                                                type="hidden"
+                                                name="supprimer_produit"
+                                                value="1"
                                             >
 
-                                                <input
-                                                    type="hidden"
-                                                    name="supprimer_produit"
-                                                    value="1"
-                                                >
+                                            <input
+                                                type="hidden"
+                                                name="produit_id"
+                                                value="<?= (int)$p["id"] ?>"
+                                            >
 
-                                                <input
-                                                    type="hidden"
-                                                    name="id"
-                                                    value="<?= (int)$p["id"] ?>"
-                                                >
+                                            <button
+                                                type="submit"
+                                                class="delete-btn"
+                                            >
+                                                🗑️
+                                            </button>
 
-                                                <button
-                                                    type="submit"
-                                                    class="btn-delete"
-                                                >
-                                                    🗑️
-                                                </button>
+                                        </form>
 
-                                            </form>
+                                    </td>
 
-                                        <?php endif; ?>
-
-                                    </div>
-
-                                </td>
+                                <?php endif; ?>
 
                             </tr>
 
@@ -1678,205 +1912,118 @@ td strong {
 
             </div>
 
+
+            <br>
+
+
+            <!-- =================================================
+                 MOUVEMENTS
+            ================================================== -->
+
+            <h2>
+                🔄 Derniers mouvements
+            </h2>
+
+            <p>
+                Les dernières entrées et sorties de stock.
+            </p>
+
+
+            <?php
+            if (
+                $mouvements
+                && $mouvements->num_rows > 0
+            ):
+            ?>
+
+                <?php
+                while (
+                    $m =
+                    $mouvements->fetch_assoc()
+                ):
+                ?>
+
+                    <div class="movement">
+
+                        <div class="movement-left">
+
+                            <strong>
+
+                                <?= htmlspecialchars(
+                                    $m["produit_nom"]
+                                ) ?>
+
+                            </strong>
+
+                            <span>
+
+                                <?= htmlspecialchars(
+                                    $m["description"]
+                                ) ?>
+
+                                •
+                                <?= date(
+                                    "d/m/Y H:i",
+                                    strtotime(
+                                        $m["date_mouvement"]
+                                    )
+                                ) ?>
+
+                            </span>
+
+                        </div>
+
+
+                        <div>
+
+                            <?php if (
+                                $m["type"] === "ENTREE"
+                            ): ?>
+
+                                <span class="entree">
+
+                                    +<?= (int)$m["quantite"] ?>
+
+                                </span>
+
+                            <?php else: ?>
+
+                                <span class="sortie">
+
+                                    -<?= (int)$m["quantite"] ?>
+
+                                </span>
+
+                            <?php endif; ?>
+
+                        </div>
+
+                    </div>
+
+                <?php endwhile; ?>
+
+            <?php else: ?>
+
+                <div
+                    style="
+                        text-align:center;
+                        padding:25px;
+                        color:#8998a5;
+                        font-size:11px;
+                    "
+                >
+
+                    🔄 Aucun mouvement enregistré.
+
+                </div>
+
+            <?php endif; ?>
+
         </div>
 
     </div>
 
 </main>
-
-
-<!-- =========================================================
-     MODIFICATION
-========================================================= -->
-
-<div
-    class="modal"
-    id="modalModification"
->
-
-    <div class="modal-box">
-
-        <h2>
-            ✏️ Modifier le produit
-        </h2>
-
-
-        <form method="POST">
-
-            <input
-                type="hidden"
-                name="modifier_produit"
-                value="1"
-            >
-
-            <input
-                type="hidden"
-                name="id"
-                id="edit_id"
-            >
-
-
-            <div class="group">
-
-                <label>
-                    NOM DU PRODUIT
-                </label>
-
-                <input
-                    type="text"
-                    name="nom"
-                    id="edit_nom"
-                    required
-                >
-
-            </div>
-
-
-            <div class="group">
-
-                <label>
-                    CATÉGORIE
-                </label>
-
-                <input
-                    type="text"
-                    name="categorie"
-                    id="edit_categorie"
-                >
-
-            </div>
-
-
-            <div class="group">
-
-                <label>
-                    PRIX D'ACHAT
-                </label>
-
-                <input
-                    type="number"
-                    name="prix_achat"
-                    id="edit_prix_achat"
-                    min="0"
-                    step="500"
-                >
-
-            </div>
-
-
-            <div class="group">
-
-                <label>
-                    PRIX DE VENTE
-                </label>
-
-                <input
-                    type="number"
-                    name="prix_vente"
-                    id="edit_prix_vente"
-                    min="0"
-                    step="500"
-                >
-
-            </div>
-
-
-            <div class="group">
-
-                <label>
-                    STOCK
-                </label>
-
-                <input
-                    type="number"
-                    name="stock"
-                    id="edit_stock"
-                    min="0"
-                >
-
-            </div>
-
-
-            <div class="modal-actions">
-
-                <button
-                    type="button"
-                    class="btn-cancel"
-                    onclick="fermerModification()"
-                >
-                    Annuler
-                </button>
-
-                <button
-                    type="submit"
-                    class="btn-save"
-                >
-                    💾 Enregistrer
-                </button>
-
-            </div>
-
-        </form>
-
-    </div>
-
-</div>
-
-
-<script>
-
-function ouvrirModification(produit) {
-
-    document.getElementById("edit_id").value =
-        produit.id;
-
-    document.getElementById("edit_nom").value =
-        produit.nom || "";
-
-    document.getElementById("edit_categorie").value =
-        produit.categorie || "";
-
-    document.getElementById("edit_prix_achat").value =
-        produit.prix_achat || 0;
-
-    document.getElementById("edit_prix_vente").value =
-        produit.prix_vente || 0;
-
-    document.getElementById("edit_stock").value =
-        produit.stock || 0;
-
-    document
-        .getElementById("modalModification")
-        .classList.add("show");
-}
-
-
-function fermerModification() {
-
-    document
-        .getElementById("modalModification")
-        .classList.remove("show");
-}
-
-
-document
-    .getElementById("modalModification")
-    .addEventListener(
-        "click",
-        function(event) {
-
-            if (
-                event.target === this
-            ) {
-
-                fermerModification();
-
-            }
-
-        }
-    );
-
-</script>
 
 </body>
 
