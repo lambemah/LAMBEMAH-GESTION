@@ -1,6 +1,11 @@
+```php
 <?php
 session_start();
 require_once "config.php";
+
+/* =========================================================
+   PROTECTION
+========================================================= */
 
 if (!isset($_SESSION["id"])) {
     header("Location: index.php");
@@ -14,196 +19,268 @@ $message = "";
 $type = "";
 
 /* =========================================================
-   AJOUT D'UNE VENTE
-   - vérifie le produit
-   - vérifie le stock
-   - enregistre la vente
-   - diminue le stock
-   - ajoute automatiquement la vente aux recettes
+   ARGENT
+========================================================= */
+
+function argent($montant)
+{
+    return number_format(
+        (float)$montant,
+        0,
+        ",",
+        " "
+    ) . " FG";
+}
+
+/* =========================================================
+   ENREGISTRER UNE VENTE
 ========================================================= */
 
 if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_vente"])) {
 
-    $produit_id = (int)($_POST["produit_id"] ?? 0);
-    $quantite = (int)($_POST["quantite"] ?? 0);
-    $prix_unitaire = (float)($_POST["prix_unitaire"] ?? 0);
+    $articles = $_POST["article"] ?? [];
+    $quantites = $_POST["quantite"] ?? [];
+    $prix = $_POST["prix"] ?? [];
     $description = trim($_POST["description"] ?? "");
 
-    if ($produit_id <= 0) {
+    if (empty($articles)) {
 
-        $message = "Veuillez sélectionner un produit.";
-        $type = "error";
-
-    } elseif ($quantite <= 0) {
-
-        $message = "La quantité doit être supérieure à zéro.";
-        $type = "error";
-
-    } elseif ($prix_unitaire <= 0) {
-
-        $message = "Le prix unitaire doit être supérieur à zéro.";
+        $message = "Ajoute au moins un produit.";
         $type = "error";
 
     } else {
 
-        /* Récupération du produit */
-        $stmt = $conn->prepare(
-            "SELECT id, nom, prix_vente, stock
-             FROM produits
-             WHERE id = ?
-             LIMIT 1"
-        );
+        $valide = true;
+        $total = 0;
+        $details = [];
 
-        $stmt->bind_param("i", $produit_id);
-        $stmt->execute();
+        /*
+        -----------------------------------------------------
+        Vérification des produits
+        -----------------------------------------------------
+        */
 
-        $result = $stmt->get_result();
-        $produit = $result->fetch_assoc();
+        foreach ($articles as $i => $produit_id) {
 
-        $stmt->close();
+            $produit_id = (int)$produit_id;
+            $qte = (int)($quantites[$i] ?? 0);
+            $prix_unitaire = (float)($prix[$i] ?? 0);
 
-        if (!$produit) {
+            if (
+                $produit_id <= 0 ||
+                $qte <= 0 ||
+                $prix_unitaire <= 0
+            ) {
+                $valide = false;
+                break;
+            }
 
-            $message = "Produit introuvable.";
-            $type = "error";
+            $stmt = $conn->prepare(
+                "SELECT id, nom, stock
+                 FROM produits
+                 WHERE id = ?
+                 LIMIT 1"
+            );
 
-        } elseif ((int)$produit["stock"] < $quantite) {
+            $stmt->bind_param(
+                "i",
+                $produit_id
+            );
 
-            $message =
-                "Stock insuffisant. Stock disponible : "
-                . (int)$produit["stock"]
-                . ".";
+            $stmt->execute();
 
-            $type = "error";
+            $result = $stmt->get_result();
 
-        } else {
+            $produit = $result->fetch_assoc();
 
-            $montant = $quantite * $prix_unitaire;
+            $stmt->close();
 
-            /*
-             * Transaction :
-             * 1. vente
-             * 2. diminution stock
-             * 3. recette
-             */
+            if (!$produit) {
+
+                $valide = false;
+                $message = "Produit introuvable.";
+                $type = "error";
+                break;
+            }
+
+            if ((int)$produit["stock"] < $qte) {
+
+                $valide = false;
+
+                $message =
+                    "Stock insuffisant pour " .
+                    $produit["nom"] .
+                    ". Stock disponible : " .
+                    $produit["stock"];
+
+                $type = "error";
+
+                break;
+            }
+
+            $montant_ligne =
+                $qte * $prix_unitaire;
+
+            $total += $montant_ligne;
+
+            $details[] =
+                $produit["nom"] .
+                " × " .
+                $qte .
+                " = " .
+                argent($montant_ligne);
+        }
+
+        if ($valide) {
 
             $conn->begin_transaction();
 
             try {
 
-                /* -----------------------------------------
-                   1. ENREGISTRER LA VENTE
-                ----------------------------------------- */
+                /*
+                -------------------------------------------------
+                ENREGISTRER CHAQUE ARTICLE DANS ventes
+                -------------------------------------------------
+                */
 
-                $stmt = $conn->prepare(
-                    "INSERT INTO ventes
-                    (produit_id, quantite, prix_unitaire, montant, description)
-                    VALUES (?, ?, ?, ?, ?)"
-                );
+                foreach ($articles as $i => $produit_id) {
 
-                if (!$stmt) {
-                    throw new Exception("Erreur préparation vente.");
+                    $produit_id = (int)$produit_id;
+                    $qte = (int)$quantites[$i];
+                    $prix_unitaire = (float)$prix[$i];
+
+                    $montant =
+                        $qte * $prix_unitaire;
+
+                    /*
+                    Vente
+                    */
+
+                    $stmt = $conn->prepare(
+                        "INSERT INTO ventes
+                        (
+                            produit_id,
+                            quantite,
+                            prix_unitaire,
+                            montant,
+                            description
+                        )
+                        VALUES (?, ?, ?, ?, ?)"
+                    );
+
+                    $stmt->bind_param(
+                        "iidds",
+                        $produit_id,
+                        $qte,
+                        $prix_unitaire,
+                        $montant,
+                        $description
+                    );
+
+                    if (!$stmt->execute()) {
+
+                        throw new Exception(
+                            "Erreur vente"
+                        );
+                    }
+
+                    $stmt->close();
+
+                    /*
+                    -------------------------------------------------
+                    DIMINUTION DU STOCK
+                    -------------------------------------------------
+                    */
+
+                    $stmt = $conn->prepare(
+                        "UPDATE produits
+                         SET stock = stock - ?
+                         WHERE id = ?
+                         AND stock >= ?"
+                    );
+
+                    $stmt->bind_param(
+                        "iii",
+                        $qte,
+                        $produit_id,
+                        $qte
+                    );
+
+                    if (
+                        !$stmt->execute() ||
+                        $stmt->affected_rows !== 1
+                    ) {
+
+                        throw new Exception(
+                            "Erreur stock"
+                        );
+                    }
+
+                    $stmt->close();
                 }
 
-                $stmt->bind_param(
-                    "iidds",
-                    $produit_id,
-                    $quantite,
-                    $prix_unitaire,
-                    $montant,
-                    $description
-                );
+                /*
+                -------------------------------------------------
+                RECETTE GLOBALE
+                -------------------------------------------------
+                
+                Cela permet à l'application de retrouver
+                le chiffre d'affaires.
+                -------------------------------------------------
+                */
 
-                if (!$stmt->execute()) {
-                    throw new Exception("Impossible d'enregistrer la vente.");
-                }
-
-                $stmt->close();
-
-
-                /* -----------------------------------------
-                   2. DIMINUER LE STOCK
-                ----------------------------------------- */
-
-                $stmt = $conn->prepare(
-                    "UPDATE produits
-                     SET stock = stock - ?
-                     WHERE id = ?
-                     AND stock >= ?"
-                );
-
-                if (!$stmt) {
-                    throw new Exception("Erreur préparation stock.");
-                }
-
-                $stmt->bind_param(
-                    "iii",
-                    $quantite,
-                    $produit_id,
-                    $quantite
-                );
-
-                if (!$stmt->execute() || $stmt->affected_rows !== 1) {
-                    throw new Exception("Impossible de mettre à jour le stock.");
-                }
-
-                $stmt->close();
-
-
-                /* -----------------------------------------
-                   3. AJOUTER AUTOMATIQUEMENT LA RECETTE
-                ----------------------------------------- */
-
-                $libelle_recette =
-                    "Vente - " . $produit["nom"];
+                $libelle =
+                    "Vente - " .
+                    implode(" | ", $details);
 
                 $description_recette =
-                    "Vente de "
-                    . $quantite
-                    . " unité(s) de "
-                    . $produit["nom"]
-                    . "."
-                    . ($description !== ""
-                        ? " Note : " . $description
-                        : "");
+                    "Vente de plusieurs articles : " .
+                    implode(" || ", $details);
+
+                if ($description !== "") {
+
+                    $description_recette .=
+                        " | Note : " .
+                        $description;
+                }
 
                 $stmt = $conn->prepare(
                     "INSERT INTO recettes
-                    (libelle, montant, description)
+                    (
+                        libelle,
+                        montant,
+                        description
+                    )
                     VALUES (?, ?, ?)"
                 );
 
-                if (!$stmt) {
-                    throw new Exception("Erreur préparation recette.");
-                }
-
                 $stmt->bind_param(
                     "sds",
-                    $libelle_recette,
-                    $montant,
+                    $libelle,
+                    $total,
                     $description_recette
                 );
 
                 if (!$stmt->execute()) {
-                    throw new Exception("Impossible d'enregistrer la recette.");
+
+                    throw new Exception(
+                        "Erreur recette"
+                    );
                 }
 
                 $stmt->close();
 
-
-                /* -----------------------------------------
-                   VALIDATION
-                ----------------------------------------- */
-
                 $conn->commit();
 
+                /*
+                -------------------------------------------------
+                SUCCÈS
+                -------------------------------------------------
+                */
+
                 $message =
-                    "✅ Vente enregistrée : "
-                    . $produit["nom"]
-                    . " × "
-                    . $quantite
-                    . " — "
-                    . argent($montant);
+                    "Vente enregistrée avec succès. Total : " .
+                    argent($total);
 
                 $type = "success";
 
@@ -212,7 +289,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_vente"])) {
                 $conn->rollback();
 
                 $message =
-                    "❌ La vente n'a pas pu être enregistrée.";
+                    "La vente n'a pas pu être enregistrée.";
 
                 $type = "error";
             }
@@ -220,9 +297,8 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_vente"])) {
     }
 }
 
-
 /* =========================================================
-   STATISTIQUES DES VENTES
+   STATISTIQUES
 ========================================================= */
 
 $total_ventes = 0;
@@ -230,7 +306,7 @@ $nombre_ventes = 0;
 
 $result = $conn->query(
     "SELECT
-        COALESCE(SUM(montant), 0) AS total,
+        COALESCE(SUM(montant),0) AS total,
         COUNT(*) AS nombre
      FROM ventes"
 );
@@ -239,10 +315,12 @@ if ($result) {
 
     $data = $result->fetch_assoc();
 
-    $total_ventes = (float)$data["total"];
-    $nombre_ventes = (int)$data["nombre"];
-}
+    $total_ventes =
+        (float)$data["total"];
 
+    $nombre_ventes =
+        (int)$data["nombre"];
+}
 
 /* =========================================================
    PRODUITS DISPONIBLES
@@ -260,7 +338,6 @@ $produits = $conn->query(
      ORDER BY nom ASC"
 );
 
-
 /* =========================================================
    HISTORIQUE
 ========================================================= */
@@ -268,7 +345,6 @@ $produits = $conn->query(
 $ventes = $conn->query(
     "SELECT
         v.id,
-        v.produit_id,
         v.quantite,
         v.prix_unitaire,
         v.montant,
@@ -282,21 +358,6 @@ $ventes = $conn->query(
      LIMIT 50"
 );
 
-
-/* =========================================================
-   FORMAT ARGENT
-========================================================= */
-
-function argent($montant)
-{
-    return number_format(
-        (float)$montant,
-        0,
-        ",",
-        " "
-    ) . " FG";
-}
-
 ?>
 
 <!DOCTYPE html>
@@ -308,9 +369,8 @@ function argent($montant)
 <meta charset="UTF-8">
 
 <meta
-name="viewport"
-content="width=device-width, initial-scale=1.0"
-
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
 >
 
 <title>Ventes - LAMBEMAH GESTION</title>
@@ -329,16 +389,17 @@ body {
     color: #172536;
 }
 
-
 /* =========================================================
    SIDEBAR
 ========================================================= */
 
 .sidebar {
     position: fixed;
+
     left: 0;
     top: 0;
     bottom: 0;
+
     width: 250px;
 
     background:
@@ -350,6 +411,7 @@ body {
         );
 
     color: white;
+
     padding: 24px 15px;
 
     z-index: 1000;
@@ -357,8 +419,11 @@ body {
 
 .brand {
     display: flex;
+
     align-items: center;
+
     gap: 11px;
+
     padding: 5px 10px 25px;
 }
 
@@ -369,6 +434,7 @@ body {
     border-radius: 14px;
 
     display: flex;
+
     align-items: center;
     justify-content: center;
 
@@ -388,6 +454,7 @@ body {
 
 .brand span {
     font-size: 9px;
+
     color: #86a9c0;
 }
 
@@ -401,7 +468,9 @@ body {
 
 .nav a {
     display: flex;
+
     align-items: center;
+
     gap: 12px;
 
     padding: 12px 14px;
@@ -409,21 +478,22 @@ body {
     border-radius: 12px;
 
     color: #c5d5e1;
+
     text-decoration: none;
 
     font-size: 13px;
-
-    transition: .2s;
 }
 
 .nav a:hover,
 .nav a.active {
     background: rgba(32,184,255,.16);
+
     color: white;
 }
 
 .nav a.active {
-    border-left: 3px solid #20b8ff;
+    border-left:
+        3px solid #20b8ff;
 }
 
 .sidebar-bottom {
@@ -431,6 +501,7 @@ body {
 
     left: 15px;
     right: 15px;
+
     bottom: 20px;
 }
 
@@ -439,18 +510,21 @@ body {
 
     border-radius: 12px;
 
-    background: rgba(255,255,255,.06);
+    background:
+        rgba(255,255,255,.06);
 
     margin-bottom: 10px;
 }
 
 .profile strong {
     display: block;
+
     font-size: 12px;
 }
 
 .profile span {
     color: #8ca8bb;
+
     font-size: 10px;
 }
 
@@ -463,7 +537,8 @@ body {
 
     color: #ffbaba;
 
-    background: rgba(255,70,70,.08);
+    background:
+        rgba(255,70,70,.08);
 
     padding: 10px;
 
@@ -472,19 +547,21 @@ body {
     font-size: 11px;
 }
 
-
 /* =========================================================
    MAIN
 ========================================================= */
 
 .main {
     margin-left: 250px;
+
     padding: 28px;
 }
 
 .header {
     display: flex;
+
     justify-content: space-between;
+
     align-items: center;
 
     margin-bottom: 22px;
@@ -496,7 +573,9 @@ body {
 
 .header p {
     color: #8998a5;
+
     font-size: 12px;
+
     margin-top: 5px;
 }
 
@@ -507,6 +586,7 @@ body {
     border-radius: 13px;
 
     display: flex;
+
     align-items: center;
     justify-content: center;
 
@@ -518,12 +598,12 @@ body {
         );
 
     color: white;
+
     font-weight: bold;
 }
 
-
 /* =========================================================
-   STATISTIQUES
+   STATS
 ========================================================= */
 
 .cards {
@@ -551,6 +631,7 @@ body {
 
 .stat small {
     color: #8c9aa6;
+
     font-size: 10px;
 }
 
@@ -562,7 +643,6 @@ body {
     color: #0c79b5;
 }
 
-
 /* =========================================================
    CONTENU
 ========================================================= */
@@ -571,7 +651,7 @@ body {
     display: grid;
 
     grid-template-columns:
-        360px 1fr;
+        400px 1fr;
 
     gap: 20px;
 }
@@ -590,6 +670,7 @@ body {
 
 .card h2 {
     font-size: 17px;
+
     margin-bottom: 6px;
 }
 
@@ -600,7 +681,6 @@ body {
 
     margin-bottom: 18px;
 }
-
 
 /* =========================================================
    MESSAGE
@@ -618,14 +698,15 @@ body {
 
 .success {
     background: #eafaf2;
+
     color: #168653;
 }
 
 .error {
     background: #fff0f0;
+
     color: #d33;
 }
-
 
 /* =========================================================
    FORMULAIRE
@@ -652,7 +733,7 @@ select,
 textarea {
     width: 100%;
 
-    padding: 12px;
+    padding: 11px;
 
     border:
         1px solid #dfe8ee;
@@ -673,28 +754,100 @@ textarea:focus {
 }
 
 textarea {
-    min-height: 80px;
+    min-height: 70px;
+
     resize: vertical;
 }
 
-.product-info {
-    margin-top: 8px;
+/* =========================================================
+   ARTICLE
+========================================================= */
 
-    padding: 9px;
+.article-box {
+    border:
+        1px solid #e2e9ee;
 
-    border-radius: 9px;
+    background: #fbfdff;
+
+    padding: 12px;
+
+    border-radius: 12px;
+
+    margin-bottom: 10px;
+}
+
+.article-head {
+    display: flex;
+
+    justify-content: space-between;
+
+    align-items: center;
+
+    margin-bottom: 9px;
+}
+
+.article-head strong {
+    font-size: 10px;
+
+    color: #526a7a;
+}
+
+.remove {
+    width: auto;
+
+    padding: 5px 8px;
+
+    border: none;
+
+    border-radius: 7px;
+
+    background: #fff0f0;
+
+    color: #d33;
+
+    cursor: pointer;
+}
+
+.article-row {
+    display: grid;
+
+    grid-template-columns:
+        1.4fr .6fr .8fr;
+
+    gap: 7px;
+}
+
+.add-btn {
+    width: 100%;
+
+    padding: 10px;
+
+    border:
+        1px dashed #20b8ff;
+
+    border-radius: 10px;
 
     background: #eef9ff;
 
-    color: #1679ad;
+    color: #0878b7;
 
-    font-size: 10px;
+    cursor: pointer;
 
-    display: none;
+    font-weight: bold;
+
+    margin-bottom: 15px;
 }
 
-.montant {
+/* =========================================================
+   TOTAL
+========================================================= */
+
+.total-box {
     padding: 14px;
+
+    margin: 15px 0;
+
+    text-align: center;
 
     border-radius: 12px;
 
@@ -704,28 +857,36 @@ textarea {
             #eef9ff,
             #f7fcff
         );
+}
 
+.total-box small {
+    display: block;
+
+    color: #8b9da9;
+
+    font-size: 9px;
+
+    margin-bottom: 5px;
+}
+
+.total-box strong {
     color: #0878b7;
 
     font-size: 20px;
-
-    font-weight: bold;
-
-    text-align: center;
 }
+
+/* =========================================================
+   BOUTON
+========================================================= */
 
 .btn-primary {
     width: 100%;
 
-    border: 0;
-
-    border-radius: 11px;
-
     padding: 13px;
 
-    cursor: pointer;
+    border: none;
 
-    color: white;
+    border-radius: 11px;
 
     background:
         linear-gradient(
@@ -734,22 +895,19 @@ textarea {
             #1264c7
         );
 
+    color: white;
+
     font-weight: bold;
 
-    font-size: 13px;
+    cursor: pointer;
 }
-
-.btn-primary:hover {
-    opacity: .9;
-}
-
 
 /* =========================================================
    HISTORIQUE
 ========================================================= */
 
 .sale {
-    padding: 15px 0;
+    padding: 14px 0;
 
     border-bottom:
         1px solid #edf1f4;
@@ -764,23 +922,23 @@ textarea {
 
     justify-content: space-between;
 
-    gap: 15px;
+    gap: 10px;
 }
 
 .sale-product {
-    font-weight: bold;
+    font-size: 12px;
 
-    font-size: 13px;
+    font-weight: bold;
 
     color: #20394c;
 }
 
 .sale-amount {
-    color: #0878b7;
+    font-size: 12px;
 
     font-weight: bold;
 
-    font-size: 13px;
+    color: #0878b7;
 
     white-space: nowrap;
 }
@@ -790,19 +948,19 @@ textarea {
 
     flex-wrap: wrap;
 
-    gap: 7px;
+    gap: 6px;
 
-    margin-top: 8px;
+    margin-top: 7px;
 }
 
 .badge {
-    background: #f0f7fb;
-
-    color: #607482;
-
     padding: 5px 8px;
 
     border-radius: 7px;
+
+    background: #f0f7fb;
+
+    color: #607482;
 
     font-size: 9px;
 }
@@ -816,19 +974,18 @@ textarea {
 
     background: #f8fafc;
 
-    color: #647481;
+    color: #637581;
 
     font-size: 10px;
 }
 
 .sale-date {
-    margin-top: 8px;
+    margin-top: 7px;
 
     color: #9aa6ae;
 
     font-size: 9px;
 }
-
 
 /* =========================================================
    MOBILE
@@ -915,12 +1072,9 @@ textarea {
         font-size: 20px;
     }
 
-    .header p {
-        font-size: 10px;
-    }
-
     .cards {
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns:
+            1fr 1fr;
 
         gap: 9px;
     }
@@ -930,7 +1084,7 @@ textarea {
     }
 
     .stat h2 {
-        font-size: 17px;
+        font-size: 16px;
     }
 
     .card {
@@ -939,16 +1093,20 @@ textarea {
         border-radius: 16px;
     }
 
-    .sale-top {
-        align-items: flex-start;
+    .article-row {
+        grid-template-columns:
+            1fr 1fr;
     }
 
-    .sale-product {
-        font-size: 12px;
+    .article-row > div:first-child {
+        grid-column: 1 / -1;
     }
+}
 
-    .sale-amount {
-        font-size: 12px;
+@media(max-width:390px) {
+
+    .nav a {
+        font-size: 7px;
     }
 
 }
@@ -959,267 +1117,627 @@ textarea {
 
 <body>
 
+<!-- =========================================================
+     MENU
+========================================================= -->
+
 <aside class="sidebar">
 
-```
-<div class="brand">
+    <div class="brand">
 
-    <div class="brand-icon">
-        💼
-    </div>
+        <div class="brand-icon">
+            💼
+        </div>
 
-    <div>
+        <div>
 
-        <h2>LAMBEMAH</h2>
+            <h2>
+                LAMBEMAH
+            </h2>
 
-        <span>
-            GESTION • PRESTATION
-        </span>
+            <span>
+                GESTION • PRESTATION
+            </span>
 
-    </div>
-
-</div>
-
-
-<ul class="nav">
-
-    <li>
-        <a href="index.php">
-            🏠 <span>Accueil</span>
-        </a>
-    </li>
-
-    <li>
-        <a href="produits.php">
-            📦 <span>Produits</span>
-        </a>
-    </li>
-
-    <li>
-        <a href="ventes.php" class="active">
-            💰 <span>Ventes</span>
-        </a>
-    </li>
-
-    <li>
-        <a href="prestations.php">
-            🖨️ <span>Prestations</span>
-        </a>
-    </li>
-
-    <li>
-        <a href="recettes.php">
-            💵 <span>Recettes</span>
-        </a>
-    </li>
-
-    <li>
-        <a href="depenses.php">
-            💸 <span>Dépenses</span>
-        </a>
-    </li>
-
-    <li>
-        <a href="statistiques.php">
-            📊 <span>Statistiques</span>
-        </a>
-    </li>
-
-    <?php if ($role === "admin"): ?>
-
-    <li>
-        <a href="utilisateurs.php">
-            👥 <span>Équipe</span>
-        </a>
-    </li>
-
-    <?php endif; ?>
-
-</ul>
-
-
-<div class="sidebar-bottom">
-
-    <div class="profile">
-
-        <strong>
-            <?= htmlspecialchars($nom) ?>
-        </strong>
-
-        <span>
-            <?= htmlspecialchars($role) ?>
-        </span>
+        </div>
 
     </div>
 
+    <ul class="nav">
 
-    <a
-        class="logout"
-        href="index.php?logout=1"
-    >
-        🚪 Déconnexion
-    </a>
+        <li>
+            <a href="index.php">
+                🏠 <span>Accueil</span>
+            </a>
+        </li>
 
-</div>
-```
+        <li>
+            <a href="produits.php">
+                📦 <span>Produits</span>
+            </a>
+        </li>
+
+        <li>
+            <a
+                href="ventes.php"
+                class="active"
+            >
+                💰 <span>Ventes</span>
+            </a>
+        </li>
+
+        <li>
+            <a href="prestations.php">
+                🖨️ <span>Prestations</span>
+            </a>
+        </li>
+
+        <li>
+            <a href="recettes.php">
+                💵 <span>Recettes</span>
+            </a>
+        </li>
+
+        <li>
+            <a href="depenses.php">
+                💸 <span>Dépenses</span>
+            </a>
+        </li>
+
+        <li>
+            <a href="statistiques.php">
+                📊 <span>Statistiques</span>
+            </a>
+        </li>
+
+        <?php if ($role === "admin"): ?>
+
+        <li>
+            <a href="utilisateurs.php">
+                👥 <span>Équipe</span>
+            </a>
+        </li>
+
+        <?php endif; ?>
+
+    </ul>
+
+    <div class="sidebar-bottom">
+
+        <div class="profile">
+
+            <strong>
+                <?= htmlspecialchars($nom) ?>
+            </strong>
+
+            <span>
+                <?= htmlspecialchars($role) ?>
+            </span>
+
+        </div>
+
+        <a
+            class="logout"
+            href="index.php?logout=1"
+        >
+            🚪 Déconnexion
+        </a>
+
+    </div>
 
 </aside>
 
+<!-- =========================================================
+     MAIN
+========================================================= -->
+
 <main class="main">
 
-```
-<div class="header">
+    <div class="header">
 
-    <div>
+        <div>
 
-        <h1>
-            💰 Ventes
-        </h1>
+            <h1>
+                💰 Ventes
+            </h1>
 
-        <p>
-            Enregistre tes ventes et suis ton chiffre d'affaires.
-        </p>
+            <p>
+                Enregistre une ou plusieurs ventes.
+            </p>
 
-    </div>
+        </div>
 
-    <div class="avatar">
+        <div class="avatar">
 
-        <?= strtoupper(
-            substr($nom, 0, 1)
-        ) ?>
+            <?= strtoupper(
+                substr($nom, 0, 1)
+            ) ?>
 
-    </div>
-
-</div>
-
-
-<?php if ($message !== ""): ?>
-
-    <div class="message <?= htmlspecialchars($type) ?>">
-
-        <?= htmlspecialchars($message) ?>
+        </div>
 
     </div>
 
-<?php endif; ?>
+    <?php if ($message !== ""): ?>
 
+        <div class="message <?= htmlspecialchars($type) ?>">
 
-<div class="cards">
+            <?= $message ?>
 
-    <div class="stat">
+        </div>
 
-        <small>
-            TOTAL DES VENTES
-        </small>
+    <?php endif; ?>
 
-        <h2>
-            <?= argent($total_ventes) ?>
-        </h2>
+    <!-- =====================================================
+         STATS
+    ====================================================== -->
+
+    <div class="cards">
+
+        <div class="stat">
+
+            <small>
+                TOTAL DES VENTES
+            </small>
+
+            <h2>
+                <?= argent($total_ventes) ?>
+            </h2>
+
+        </div>
+
+        <div class="stat">
+
+            <small>
+                NOMBRE DE VENTES
+            </small>
+
+            <h2>
+                <?= $nombre_ventes ?>
+            </h2>
+
+        </div>
 
     </div>
 
+    <div class="content">
 
-    <div class="stat">
+        <!-- =================================================
+             NOUVELLE VENTE
+        ================================================== -->
 
-        <small>
-            NOMBRE DE VENTES
-        </small>
+        <div class="card">
 
-        <h2>
-            <?= $nombre_ventes ?>
-        </h2>
+            <h2>
+                ➕ Nouvelle vente
+            </h2>
+
+            <p>
+                Tu peux vendre plusieurs produits sur une même vente.
+            </p>
+
+            <form method="POST">
+
+                <input
+                    type="hidden"
+                    name="ajouter_vente"
+                    value="1"
+                >
+
+                <div id="articles">
+
+                    <div class="article-box">
+
+                        <div class="article-head">
+
+                            <strong>
+                                ARTICLE 1
+                            </strong>
+
+                        </div>
+
+                        <div class="article-row">
+
+                            <div>
+
+                                <label>
+                                    PRODUIT
+                                </label>
+
+                                <select
+                                    name="article[]"
+                                    class="produit-select"
+                                    required
+                                    onchange="prixProduit(this)"
+                                >
+
+                                    <option value="">
+                                        -- Choisir --
+                                    </option>
+
+                                    <?php
+                                    if (
+                                        $produits &&
+                                        $produits->num_rows > 0
+                                    ):
+                                    ?>
+
+                                        <?php while (
+                                            $p =
+                                            $produits->fetch_assoc()
+                                        ): ?>
+
+                                            <option
+                                                value="<?= (int)$p["id"] ?>"
+                                                data-prix="<?= htmlspecialchars($p["prix_vente"]) ?>"
+                                                data-stock="<?= (int)$p["stock"] ?>"
+                                            >
+
+                                                <?= htmlspecialchars($p["nom"]) ?>
+
+                                                <?php if (
+                                                    !empty($p["categorie"])
+                                                ): ?>
+
+                                                    —
+                                                    <?= htmlspecialchars(
+                                                        $p["categorie"]
+                                                    ) ?>
+
+                                                <?php endif; ?>
+
+                                                —
+                                                Stock :
+                                                <?= (int)$p["stock"] ?>
+
+                                            </option>
+
+                                        <?php endwhile; ?>
+
+                                    <?php else: ?>
+
+                                        <option
+                                            value=""
+                                            disabled
+                                        >
+                                            Aucun produit disponible
+                                        </option>
+
+                                    <?php endif; ?>
+
+                                </select>
+
+                            </div>
+
+                            <div>
+
+                                <label>
+                                    QUANTITÉ
+                                </label>
+
+                                <input
+                                    type="number"
+                                    name="quantite[]"
+                                    value="1"
+                                    min="1"
+                                    required
+                                >
+
+                            </div>
+
+                            <div>
+
+                                <label>
+                                    PRIX UNITAIRE
+                                </label>
+
+                                <input
+                                    type="number"
+                                    name="prix[]"
+                                    class="prix-input"
+                                    min="1"
+                                    step="500"
+                                    required
+                                >
+
+                            </div>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+                <button
+                    type="button"
+                    class="add-btn"
+                    onclick="ajouterArticle()"
+                >
+                    ➕ Ajouter un autre produit
+                </button>
+
+                <div class="group">
+
+                    <label>
+                        DESCRIPTION
+                    </label>
+
+                    <textarea
+                        name="description"
+                        placeholder="Ex : Vente à Fanta..."
+                    ></textarea>
+
+                </div>
+
+                <div class="total-box">
+
+                    <small>
+                        TOTAL DE LA VENTE
+                    </small>
+
+                    <strong id="totalAffiche">
+                        0 FG
+                    </strong>
+
+                </div>
+
+                <button
+                    type="submit"
+                    class="btn-primary"
+                >
+                    💾 ENREGISTRER LA VENTE
+                </button>
+
+            </form>
+
+        </div>
+
+        <!-- =================================================
+             HISTORIQUE
+        ================================================== -->
+
+        <div class="card">
+
+            <h2>
+                📋 Historique des ventes
+            </h2>
+
+            <p>
+                Les 50 dernières lignes de vente.
+            </p>
+
+            <?php if (
+                $ventes &&
+                $ventes->num_rows > 0
+            ): ?>
+
+                <?php while (
+                    $v =
+                    $ventes->fetch_assoc()
+                ): ?>
+
+                    <div class="sale">
+
+                        <div class="sale-top">
+
+                            <div class="sale-product">
+
+                                👕
+                                <?= htmlspecialchars(
+                                    $v["produit_nom"]
+                                    ?? "Produit supprimé"
+                                ) ?>
+
+                            </div>
+
+                            <div class="sale-amount">
+
+                                <?= argent(
+                                    $v["montant"]
+                                ) ?>
+
+                            </div>
+
+                        </div>
+
+                        <div class="sale-info">
+
+                            <span class="badge">
+
+                                Quantité :
+                                <?= (int)$v["quantite"] ?>
+
+                            </span>
+
+                            <span class="badge">
+
+                                Prix :
+                                <?= argent(
+                                    $v["prix_unitaire"]
+                                ) ?>
+
+                            </span>
+
+                        </div>
+
+                        <?php if (
+                            !empty($v["description"])
+                        ): ?>
+
+                            <div class="sale-description">
+
+                                <?= htmlspecialchars(
+                                    $v["description"]
+                                ) ?>
+
+                            </div>
+
+                        <?php endif; ?>
+
+                        <div class="sale-date">
+
+                            📅
+                            <?= htmlspecialchars(
+                                $v["date_vente"]
+                            ) ?>
+
+                        </div>
+
+                    </div>
+
+                <?php endwhile; ?>
+
+            <?php else: ?>
+
+                <div
+                    style="
+                    text-align:center;
+                    padding:35px 10px;
+                    color:#8998a5;
+                    font-size:12px;
+                    "
+                >
+
+                    🛒
+
+                    <br><br>
+
+                    Aucune vente enregistrée.
+
+                </div>
+
+            <?php endif; ?>
+
+        </div>
 
     </div>
 
-</div>
+</main>
+
+<script>
+
+/* =========================================================
+   NUMÉRO ARTICLE
+========================================================= */
+
+let numeroArticle = 1;
 
 
-<div class="content">
+/* =========================================================
+   PRIX AUTOMATIQUE
+========================================================= */
+
+function prixProduit(select) {
+
+    const option =
+        select.options[
+            select.selectedIndex
+        ];
+
+    const prix =
+        option.getAttribute(
+            "data-prix"
+        );
+
+    const box =
+        select.closest(
+            ".article-box"
+        );
+
+    const prixInput =
+        box.querySelector(
+            ".prix-input"
+        );
+
+    if (prix) {
+
+        prixInput.value =
+            parseFloat(prix);
+
+    } else {
+
+        prixInput.value = "";
+
+    }
+
+    calculerTotal();
+}
 
 
-    <div class="card">
+/* =========================================================
+   AJOUTER PRODUIT
+========================================================= */
 
-        <h2>
-            ➕ Nouvelle vente
-        </h2>
+function ajouterArticle() {
 
-        <p>
-            Choisis un produit disponible dans ton stock.
-        </p>
+    numeroArticle++;
 
+    const container =
+        document.getElementById(
+            "articles"
+        );
 
-        <form method="POST">
+    const premierSelect =
+        document.querySelector(
+            ".produit-select"
+        );
 
-            <input
-                type="hidden"
-                name="ajouter_vente"
-                value="1"
+    let options = "";
+
+    if (premierSelect) {
+
+        options =
+            premierSelect.innerHTML;
+
+    }
+
+    const div =
+        document.createElement(
+            "div"
+        );
+
+    div.className =
+        "article-box";
+
+    div.innerHTML = `
+
+        <div class="article-head">
+
+            <strong>
+                ARTICLE ${numeroArticle}
+            </strong>
+
+            <button
+                type="button"
+                class="remove"
+                onclick="supprimerArticle(this)"
             >
+                ✕
+            </button>
 
+        </div>
 
-            <div class="group">
+        <div class="article-row">
+
+            <div>
 
                 <label>
                     PRODUIT
                 </label>
 
                 <select
-                    name="produit_id"
-                    id="produit_id"
+                    name="article[]"
+                    class="produit-select"
                     required
-                    onchange="produitSelectionne()"
+                    onchange="prixProduit(this)"
                 >
 
-                    <option value="">
-                        -- Sélectionner un produit --
-                    </option>
-
-
-                    <?php if ($produits && $produits->num_rows > 0): ?>
-
-                        <?php while ($p = $produits->fetch_assoc()): ?>
-
-                            <option
-                                value="<?= (int)$p["id"] ?>"
-                                data-prix="<?= htmlspecialchars($p["prix_vente"]) ?>"
-                                data-stock="<?= (int)$p["stock"] ?>"
-                            >
-
-                                <?= htmlspecialchars($p["nom"]) ?>
-
-                                <?php if (!empty($p["categorie"])): ?>
-
-                                    — <?= htmlspecialchars($p["categorie"]) ?>
-
-                                <?php endif; ?>
-
-                                — Stock :
-                                <?= (int)$p["stock"] ?>
-
-                            </option>
-
-                        <?php endwhile; ?>
-
-                    <?php else: ?>
-
-                        <option value="" disabled>
-                            Aucun produit disponible
-                        </option>
-
-                    <?php endif; ?>
+                    ${options}
 
                 </select>
 
-
-                <div
-                    class="product-info"
-                    id="productInfo"
-                ></div>
-
             </div>
 
-
-            <div class="group">
+            <div>
 
                 <label>
                     QUANTITÉ
@@ -1227,18 +1745,16 @@ textarea {
 
                 <input
                     type="number"
-                    name="quantite"
-                    id="quantite"
+                    name="quantite[]"
                     value="1"
                     min="1"
                     required
-                    oninput="calculer()"
+                    oninput="calculerTotal()"
                 >
 
             </div>
 
-
-            <div class="group">
+            <div>
 
                 <label>
                     PRIX UNITAIRE
@@ -1246,244 +1762,110 @@ textarea {
 
                 <input
                     type="number"
-                    name="prix_unitaire"
-                    id="prix_unitaire"
+                    name="prix[]"
+                    class="prix-input"
                     min="1"
                     step="500"
                     required
-                    oninput="calculer()"
+                    oninput="calculerTotal()"
                 >
 
             </div>
 
+        </div>
+    `;
 
-            <div class="group">
+    container.appendChild(div);
+}
 
-                <label>
-                    MONTANT TOTAL
-                </label>
 
-                <div
-                    class="montant"
-                    id="montant"
-                >
-                    0 FG
-                </div>
+/* =========================================================
+   SUPPRIMER ARTICLE
+========================================================= */
 
-            </div>
+function supprimerArticle(button) {
 
+    const box =
+        button.closest(
+            ".article-box"
+        );
 
-            <div class="group">
+    if (box) {
 
-                <label>
-                    DESCRIPTION
-                </label>
+        box.remove();
 
-                <textarea
-                    name="description"
-                    placeholder="Ex : T-shirts vendus au client..."
-                ></textarea>
-
-            </div>
-
-
-            <button
-                type="submit"
-                class="btn-primary"
-            >
-                💾 Enregistrer la vente
-            </button>
-
-        </form>
-
-    </div>
-
-
-    <div class="card">
-
-        <h2>
-            📋 Historique des ventes
-        </h2>
-
-        <p>
-            Les 50 dernières ventes enregistrées.
-        </p>
-
-
-        <?php if ($ventes && $ventes->num_rows > 0): ?>
-
-            <?php while ($v = $ventes->fetch_assoc()): ?>
-
-                <div class="sale">
-
-                    <div class="sale-top">
-
-                        <div class="sale-product">
-
-                            👕
-                            <?= htmlspecialchars(
-                                $v["produit_nom"]
-                                ?? "Produit supprimé"
-                            ) ?>
-
-                        </div>
-
-                        <div class="sale-amount">
-
-                            <?= argent(
-                                $v["montant"]
-                            ) ?>
-
-                        </div>
-
-                    </div>
-
-
-                    <div class="sale-info">
-
-                        <span class="badge">
-
-                            Quantité :
-                            <?= (int)$v["quantite"] ?>
-
-                        </span>
-
-
-                        <span class="badge">
-
-                            Prix unitaire :
-                            <?= argent(
-                                $v["prix_unitaire"]
-                            ) ?>
-
-                        </span>
-
-                    </div>
-
-
-                    <?php if (!empty($v["description"])): ?>
-
-                        <div class="sale-description">
-
-                            <?= htmlspecialchars(
-                                $v["description"]
-                            ) ?>
-
-                        </div>
-
-                    <?php endif; ?>
-
-
-                    <div class="sale-date">
-
-                        📅
-                        <?= htmlspecialchars(
-                            $v["date_vente"]
-                        ) ?>
-
-                    </div>
-
-                </div>
-
-            <?php endwhile; ?>
-
-        <?php else: ?>
-
-            <div
-                style="
-                text-align:center;
-                padding:35px 10px;
-                color:#8998a5;
-                font-size:12px;
-                "
-            >
-
-                🛒
-
-                <br><br>
-
-                Aucune vente enregistrée pour le moment.
-
-            </div>
-
-        <?php endif; ?>
-
-    </div>
-
-</div>
-```
-
-</main>
-
-<script>
-
-function produitSelectionne() {
-
-    const select =
-        document.getElementById("produit_id");
-
-    const option =
-        select.options[select.selectedIndex];
-
-    const prix =
-        option.getAttribute("data-prix");
-
-    const stock =
-        option.getAttribute("data-stock");
-
-    const prixInput =
-        document.getElementById("prix_unitaire");
-
-    const info =
-        document.getElementById("productInfo");
-
-    if (prix) {
-
-        prixInput.value =
-            parseFloat(prix);
-
-        info.style.display = "block";
-
-        info.innerHTML =
-            "📦 Stock disponible : <strong>"
-            + stock
-            + "</strong>";
-
-        calculer();
-
-    } else {
-
-        prixInput.value = "";
-
-        info.style.display = "none";
-
-        document.getElementById("montant").innerText =
-            "0 FG";
+        calculerTotal();
     }
 }
 
 
-function calculer() {
+/* =========================================================
+   CALCUL TOTAL
+========================================================= */
 
-    const quantite =
-        parseFloat(
-            document.getElementById("quantite").value
-        ) || 0;
+function calculerTotal() {
 
-    const prix =
-        parseFloat(
-            document.getElementById("prix_unitaire").value
-        ) || 0;
+    const boxes =
+        document.querySelectorAll(
+            ".article-box"
+        );
 
-    const total =
-        quantite * prix;
+    let total = 0;
 
-    document.getElementById("montant").innerText =
-        new Intl.NumberFormat("fr-FR").format(total)
-        + " FG";
+    boxes.forEach(function(box) {
+
+        const quantite =
+            parseFloat(
+                box.querySelector(
+                    'input[name="quantite[]"]'
+                ).value
+            ) || 0;
+
+        const prix =
+            parseFloat(
+                box.querySelector(
+                    'input[name="prix[]"]'
+                ).value
+            ) || 0;
+
+        total +=
+            quantite * prix;
+    });
+
+    document.getElementById(
+        "totalAffiche"
+    ).innerText =
+        new Intl.NumberFormat(
+            "fr-FR"
+        ).format(total) +
+        " FG";
 }
+
+
+/* =========================================================
+   ÉCOUTER LES QUANTITÉS
+========================================================= */
+
+document.addEventListener(
+    "input",
+    function(e) {
+
+        if (
+            e.target.name ===
+                "quantite[]" ||
+            e.target.name ===
+                "prix[]"
+        ) {
+
+            calculerTotal();
+        }
+
+    }
+);
 
 </script>
 
 </body>
+
 </html>
+```
