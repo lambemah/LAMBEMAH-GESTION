@@ -2,417 +2,207 @@
 session_start();
 require_once "config.php";
 
-/* =========================
-   DÉCONNEXION
-========================= */
-if (isset($_GET["logout"])) {
-    session_unset();
-    session_destroy();
+/* =========================================================
+   PROTECTION
+========================================================= */
 
-    header("Location: index.php");
+if (!isset($_SESSION["id"])) {
+    header("Location: connexion.php");
     exit;
 }
 
-/* =========================
-   CONNEXION
-========================= */
-$message = "";
+$nom  = $_SESSION["nom"] ?? "Utilisateur";
+$role = $_SESSION["role"] ?? "lecture";
 
-if (!isset($_SESSION["id"]) && $_SERVER["REQUEST_METHOD"] === "POST") {
 
-    $username = trim($_POST["username"] ?? "");
-    $password = trim($_POST["password"] ?? "");
+/* =========================================================
+   DÉCONNEXION
+========================================================= */
 
-    if ($username === "" || $password === "") {
-        $message = "Veuillez remplir tous les champs.";
-    } else {
-
-        $stmt = $conn->prepare("
-            SELECT id, nom, username, mot_de_passe, role
-            FROM utilisateurs
-            WHERE username = ?
-            LIMIT 1
-        ");
-
-        if ($stmt) {
-
-            $stmt->bind_param("s", $username);
-            $stmt->execute();
-
-            $result = $stmt->get_result();
-
-            if ($result && $result->num_rows === 1) {
-
-                $user = $result->fetch_assoc();
-
-                if ($password === $user["mot_de_passe"]) {
-
-                    $_SESSION["id"] = $user["id"];
-                    $_SESSION["nom"] = $user["nom"];
-                    $_SESSION["username"] = $user["username"];
-                    $_SESSION["role"] = $user["role"];
-
-                    header("Location: index.php");
-                    exit;
-
-                } else {
-                    $message = "Nom d'utilisateur ou mot de passe incorrect.";
-                }
-
-            } else {
-                $message = "Nom d'utilisateur ou mot de passe incorrect.";
-            }
-
-            $stmt->close();
-
-        } else {
-            $message = "Erreur lors de la connexion.";
-        }
-    }
-}
-
-/* =========================
-   PAGE DE CONNEXION
-========================= */
-
-if (!isset($_SESSION["id"])) {
-?>
-
-<!DOCTYPE html>
-
-<html lang="fr">
-<head>
-
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-<title>LAMBEMAH GESTION</title>
-
-<style>
-
-* {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
-}
-
-body {
-    font-family: Arial, Helvetica, sans-serif;
-    min-height: 100vh;
-    background: linear-gradient(145deg, #061a35, #0b5ed7);
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    padding: 20px;
-}
-
-.login-container {
-    width: 100%;
-    max-width: 430px;
-}
-
-.logo {
-    text-align: center;
-    color: white;
-    margin-bottom: 25px;
-}
-
-.logo .logo-icon {
-    width: 75px;
-    height: 75px;
-    margin: auto;
-    border-radius: 22px;
-    background: rgba(255,255,255,.15);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 38px;
-    margin-bottom: 15px;
-}
-
-.logo h1 {
-    font-size: 28px;
-    margin-bottom: 7px;
-}
-
-.logo p {
-    opacity: .85;
-    font-size: 14px;
-}
-
-.login-card {
-    background: white;
-    border-radius: 25px;
-    padding: 28px 22px;
-    box-shadow: 0 20px 50px rgba(0,0,0,.22);
-}
-
-.login-card h2 {
-    color: #061a35;
-    text-align: center;
-    margin-bottom: 23px;
-}
-
-.form-group {
-    margin-bottom: 17px;
-}
-
-label {
-    display: block;
-    color: #334155;
-    font-size: 14px;
-    font-weight: bold;
-    margin-bottom: 7px;
-}
-
-input {
-    width: 100%;
-    padding: 15px;
-    border: 1px solid #dbe4ee;
-    border-radius: 13px;
-    outline: none;
-    font-size: 16px;
-}
-
-input:focus {
-    border-color: #0b7cff;
-    box-shadow: 0 0 0 3px rgba(11,124,255,.10);
-}
-
-.login-button {
-    width: 100%;
-    border: none;
-    padding: 15px;
-    border-radius: 13px;
-    background: linear-gradient(135deg, #0b7cff, #0755c9);
-    color: white;
-    font-size: 16px;
-    font-weight: bold;
-    cursor: pointer;
-}
-
-.message {
-    background: #fff0f0;
-    color: #c62828;
-    padding: 12px;
-    border-radius: 11px;
-    margin-bottom: 17px;
-    text-align: center;
-    font-size: 14px;
-}
-
-.footer-login {
-    text-align: center;
-    margin-top: 18px;
-    color: #64748b;
-    font-size: 12px;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="login-container">
-
-```
-<div class="logo">
-
-    <div class="logo-icon">
-        💼
-    </div>
-
-    <h1>LAMBEMAH GESTION</h1>
-
-    <p>
-        Gestion simple et intelligente de votre activité
-    </p>
-
-</div>
-
-<div class="login-card">
-
-    <h2>Bienvenue 👋</h2>
-
-    <?php if ($message !== ""): ?>
-
-        <div class="message">
-            <?= htmlspecialchars($message) ?>
-        </div>
-
-    <?php endif; ?>
-
-    <form method="POST">
-
-        <div class="form-group">
-
-            <label>Nom d'utilisateur</label>
-
-            <input
-                type="text"
-                name="username"
-                placeholder="Votre nom d'utilisateur"
-                autocomplete="username"
-                required
-            >
-
-        </div>
-
-        <div class="form-group">
-
-            <label>Mot de passe</label>
-
-            <input
-                type="password"
-                name="password"
-                placeholder="Votre mot de passe"
-                autocomplete="current-password"
-                required
-            >
-
-        </div>
-
-        <button class="login-button" type="submit">
-            Se connecter
-        </button>
-
-    </form>
-
-    <div class="footer-login">
-        LAMBEMAH GESTION • Votre activité, mieux organisée
-    </div>
-
-</div>
-```
-
-</div>
-
-</body>
-</html>
-
-<?php
-exit;
+if (isset($_GET["logout"])) {
+    session_destroy();
+    header("Location: connexion.php");
+    exit;
 }
 
 
-/* =========================
-   TABLEAU DE BORD
-========================= */
+/* =========================================================
+   FONCTION ARGENT
+========================================================= */
 
-$nom = $_SESSION["nom"] ?? "Utilisateur";
-$role = $_SESSION["role"] ?? "utilisateur";
-
-
-/* PRODUITS */
-
-$total_produits = 0;
-$stock_total = 0;
-
-$result = $conn->query("
-    SELECT
-        COUNT(*) AS total_produits,
-        COALESCE(SUM(stock),0) AS stock_total
-    FROM produits
-");
-
-if ($result) {
-
-    $data = $result->fetch_assoc();
-
-    $total_produits = (int)$data["total_produits"];
-    $stock_total = (int)$data["stock_total"];
+function argent($montant)
+{
+    return number_format(
+        (float)$montant,
+        0,
+        ",",
+        " "
+    ) . " FG";
 }
 
 
-/* VENTES */
+/* =========================================================
+   CHIFFRE D'AFFAIRES — VENTES
+========================================================= */
 
-$montant_ventes = 0;
 $total_ventes = 0;
 
-$result = $conn->query("
-    SELECT
-        COUNT(*) AS total_ventes,
-        COALESCE(SUM(montant),0) AS montant_ventes
-    FROM ventes
-");
+$result = $conn->query(
+    "SELECT COALESCE(SUM(montant),0) AS total
+     FROM ventes"
+);
 
 if ($result) {
-
     $data = $result->fetch_assoc();
-
-    $total_ventes = (int)$data["total_ventes"];
-    $montant_ventes = (float)$data["montant_ventes"];
+    $total_ventes = (float)$data["total"];
 }
 
 
-/* RECETTES */
+/* =========================================================
+   RECETTES
+========================================================= */
 
-$montant_recettes = 0;
+$total_recettes = 0;
 
-$result = $conn->query("
-    SELECT COALESCE(SUM(montant),0) AS montant_recettes
-    FROM recettes
-");
+$result = $conn->query(
+    "SELECT COALESCE(SUM(montant),0) AS total
+     FROM recettes"
+);
 
 if ($result) {
-
     $data = $result->fetch_assoc();
-
-    $montant_recettes = (float)$data["montant_recettes"];
+    $total_recettes = (float)$data["total"];
 }
 
 
-/* DEPENSES */
+/* =========================================================
+   DÉPENSES
+========================================================= */
 
-$montant_depenses = 0;
+$total_depenses = 0;
 
-$result = $conn->query("
-    SELECT COALESCE(SUM(montant),0) AS montant_depenses
-    FROM depenses
-");
+$result = $conn->query(
+    "SELECT COALESCE(SUM(montant),0) AS total
+     FROM depenses"
+);
 
 if ($result) {
-
     $data = $result->fetch_assoc();
-
-    $montant_depenses = (float)$data["montant_depenses"];
+    $total_depenses = (float)$data["total"];
 }
 
 
-/* RESULTAT */
+/* =========================================================
+   BÉNÉFICE GLOBAL
+========================================================= */
 
-$total_entrees = $montant_ventes + $montant_recettes;
-$resultat = $total_entrees - $montant_depenses;
+$benefice = $total_ventes + $total_recettes - $total_depenses;
 
 
-/* FORMATAGE */
+/* =========================================================
+   NOMBRE DE PRODUITS
+========================================================= */
 
-function afficherMontant($montant)
-{
-    return number_format((float)$montant, 0, ',', ' ') . " FG";
+$nombre_produits = 0;
+
+$result = $conn->query(
+    "SELECT COUNT(*) AS total
+     FROM produits"
+);
+
+if ($result) {
+    $data = $result->fetch_assoc();
+    $nombre_produits = (int)$data["total"];
 }
+
+
+/* =========================================================
+   STOCK TOTAL
+========================================================= */
+
+$stock_total = 0;
+
+$result = $conn->query(
+    "SELECT COALESCE(SUM(stock),0) AS total
+     FROM produits"
+);
+
+if ($result) {
+    $data = $result->fetch_assoc();
+    $stock_total = (int)$data["total"];
+}
+
+
+/* =========================================================
+   NOMBRE DE VENTES
+========================================================= */
+
+$nombre_ventes = 0;
+
+$result = $conn->query(
+    "SELECT COUNT(*) AS total
+     FROM ventes"
+);
+
+if ($result) {
+    $data = $result->fetch_assoc();
+    $nombre_ventes = (int)$data["total"];
+}
+
+
+/* =========================================================
+   DERNIÈRES VENTES
+========================================================= */
+
+$dernieres_ventes = $conn->query(
+    "SELECT
+        v.montant,
+        v.quantite,
+        v.date_vente,
+        p.nom AS produit_nom
+     FROM ventes v
+     LEFT JOIN produits p
+        ON p.id = v.produit_id
+     ORDER BY v.id DESC
+     LIMIT 5"
+);
+
+
+/* =========================================================
+   PRODUITS AVEC STOCK FAIBLE
+========================================================= */
+
+$stock_faible = $conn->query(
+    "SELECT
+        nom,
+        stock
+     FROM produits
+     WHERE stock <= 5
+     ORDER BY stock ASC
+     LIMIT 5"
+);
 
 ?>
 
 <!DOCTYPE html>
-
 <html lang="fr">
 
 <head>
 
 <meta charset="UTF-8">
 
-<meta name="viewport"
-content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
 
 <title>LAMBEMAH GESTION</title>
 
 <style>
 
-/* =========================
+/* =========================================================
    GLOBAL
-========================= */
+========================================================= */
 
 * {
     box-sizing: border-box;
@@ -421,326 +211,696 @@ content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 }
 
 body {
-    font-family: Arial, Helvetica, sans-serif;
-    background: #f3f7fc;
-    color: #12233f;
-    min-height: 100vh;
-}
-
-a {
-    text-decoration: none;
+    font-family: Arial, sans-serif;
+    background: #f3f7fb;
+    color: #172536;
 }
 
 
-/* =========================
-   HEADER
-========================= */
+/* =========================================================
+   SIDEBAR
+========================================================= */
 
-.header {
-    background: linear-gradient(135deg, #061a35, #075dcc);
+.sidebar {
+
+    position: fixed;
+
+    left: 0;
+    top: 0;
+    bottom: 0;
+
+    width: 250px;
+
+    background:
+        linear-gradient(
+            180deg,
+            #061a2d,
+            #092d4b,
+            #07527c
+        );
+
     color: white;
-    padding: 22px 18px 28px;
-    border-radius: 0 0 28px 28px;
-    box-shadow: 0 8px 25px rgba(6,26,53,.18);
-}
 
-.header-content {
-    max-width: 1150px;
-    margin: auto;
-}
+    padding: 24px 15px;
 
-.top-line {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 15px;
+    z-index: 1000;
 }
 
 .brand {
-    font-size: 21px;
-    font-weight: bold;
+
+    display: flex;
+
+    align-items: center;
+
+    gap: 11px;
+
+    padding: 5px 10px 25px;
 }
 
-.role {
-    background: rgba(255,255,255,.14);
-    padding: 7px 10px;
-    border-radius: 20px;
-    font-size: 11px;
+.brand-icon {
+
+    width: 45px;
+    height: 45px;
+
+    border-radius: 14px;
+
+    display: flex;
+
+    align-items: center;
+    justify-content: center;
+
+    background:
+        linear-gradient(
+            135deg,
+            #20b8ff,
+            #1264c7
+        );
+
+    font-size: 22px;
 }
 
-.welcome {
-    margin-top: 23px;
-}
-
-.welcome small {
-    opacity: .8;
-    font-size: 13px;
-}
-
-.welcome h1 {
-    margin-top: 5px;
-    font-size: 25px;
-}
-
-
-/* =========================
-   CONTAINER
-========================= */
-
-.container {
-    max-width: 1150px;
-    margin: auto;
-    padding: 20px 15px 100px;
-}
-
-
-/* =========================
-   RESULTAT
-========================= */
-
-.main-result {
-    background: white;
-    border-radius: 22px;
-    padding: 22px;
-    margin-top: -5px;
-    box-shadow: 0 8px 25px rgba(15,40,75,.08);
-    border: 1px solid #e8eef6;
-}
-
-.result-title {
-    color: #718096;
-    font-size: 13px;
-    margin-bottom: 7px;
-}
-
-.result-value {
-    font-size: 30px;
-    font-weight: bold;
-    color: #061a35;
-}
-
-.result-description {
-    margin-top: 8px;
-    color: #64748b;
-    font-size: 12px;
-}
-
-
-/* =========================
-   STATISTIQUES RAPIDES
-========================= */
-
-.cards {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 14px;
-    margin-top: 17px;
-}
-
-.card {
-    background: white;
-    border-radius: 18px;
-    padding: 18px;
-    border: 1px solid #e7edf5;
-    box-shadow: 0 5px 18px rgba(15,40,75,.06);
-}
-
-.card-icon {
-    font-size: 25px;
-    margin-bottom: 10px;
-}
-
-.card-label {
-    color: #718096;
-    font-size: 12px;
-}
-
-.card-value {
-    color: #061a35;
-    font-size: 20px;
-    font-weight: bold;
-    margin-top: 5px;
-}
-
-
-/* =========================
-   ACTIONS
-========================= */
-
-.section-title {
-    margin: 25px 0 13px;
+.brand h2 {
     font-size: 18px;
-    color: #061a35;
 }
 
-.actions {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 13px;
+.brand span {
+
+    font-size: 9px;
+
+    color: #86a9c0;
 }
 
-.action {
-    background: white;
-    border: 1px solid #e7edf5;
-    border-radius: 18px;
-    padding: 18px;
-    color: #12233f;
-    box-shadow: 0 5px 18px rgba(15,40,75,.05);
+.nav {
+    list-style: none;
+}
+
+.nav li {
+    margin: 4px 0;
+}
+
+.nav a {
+
+    display: flex;
+
+    align-items: center;
+
+    gap: 12px;
+
+    padding: 12px 14px;
+
+    border-radius: 12px;
+
+    color: #c5d5e1;
+
+    text-decoration: none;
+
+    font-size: 13px;
+
     transition: .2s;
 }
 
-.action:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 9px 25px rgba(15,40,75,.10);
+.nav a:hover,
+.nav a.active {
+
+    background: rgba(32,184,255,.16);
+
+    color: white;
 }
 
-.action-icon {
-    font-size: 28px;
+.nav a.active {
+
+    border-left: 3px solid #20b8ff;
+}
+
+
+/* =========================================================
+   BAS SIDEBAR
+========================================================= */
+
+.sidebar-bottom {
+
+    position: absolute;
+
+    left: 15px;
+    right: 15px;
+
+    bottom: 20px;
+}
+
+.profile {
+
+    padding: 12px;
+
+    border-radius: 12px;
+
+    background: rgba(255,255,255,.06);
+
     margin-bottom: 10px;
 }
 
-.action-name {
-    font-weight: bold;
-    font-size: 14px;
+.profile strong {
+
+    display: block;
+
+    font-size: 12px;
 }
 
-.action-description {
-    margin-top: 5px;
-    font-size: 11px;
-    color: #718096;
+.profile span {
+
+    color: #8ca8bb;
+
+    font-size: 10px;
 }
-
-
-/* =========================
-   MENU COMPLEMENTAIRE
-========================= */
-
-.menu-list {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 12px;
-}
-
-.menu-item {
-    background: #eaf4ff;
-    color: #075dcc;
-    padding: 15px;
-    border-radius: 15px;
-    font-weight: bold;
-    font-size: 13px;
-}
-
-.menu-item:hover {
-    background: #dceeff;
-}
-
-
-/* =========================
-   DECONNEXION
-========================= */
 
 .logout {
+
     display: block;
+
     text-align: center;
-    margin-top: 25px;
-    padding: 14px;
-    border-radius: 14px;
-    background: #fff0f0;
-    color: #c62828;
-    font-weight: bold;
-    font-size: 14px;
+
+    text-decoration: none;
+
+    color: #ffbaba;
+
+    background: rgba(255,70,70,.08);
+
+    padding: 10px;
+
+    border-radius: 10px;
+
+    font-size: 11px;
 }
 
 
-/* =========================
-   MOBILE
-========================= */
+/* =========================================================
+   CONTENU
+========================================================= */
 
-@media (max-width: 800px) {
+.main {
+
+    margin-left: 250px;
+
+    padding: 28px;
+}
+
+
+/* =========================================================
+   HEADER
+========================================================= */
+
+.header {
+
+    display: flex;
+
+    justify-content: space-between;
+
+    align-items: center;
+
+    margin-bottom: 25px;
+}
+
+.header h1 {
+
+    font-size: 25px;
+}
+
+.header p {
+
+    color: #8998a5;
+
+    font-size: 12px;
+
+    margin-top: 5px;
+}
+
+.avatar {
+
+    width: 44px;
+    height: 44px;
+
+    border-radius: 13px;
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: center;
+
+    background:
+        linear-gradient(
+            135deg,
+            #20b8ff,
+            #1264c7
+        );
+
+    color: white;
+
+    font-weight: bold;
+}
+
+
+/* =========================================================
+   MESSAGE BIENVENUE
+========================================================= */
+
+.welcome {
+
+    background: white;
+
+    border-radius: 18px;
+
+    padding: 20px;
+
+    margin-bottom: 20px;
+
+    box-shadow:
+        0 6px 25px rgba(25,55,80,.06);
+}
+
+.welcome h2 {
+
+    font-size: 18px;
+
+    margin-bottom: 5px;
+}
+
+.welcome p {
+
+    color: #8998a5;
+
+    font-size: 11px;
+}
+
+
+/* =========================================================
+   STATISTIQUES
+========================================================= */
+
+.cards {
+
+    display: grid;
+
+    grid-template-columns:
+        repeat(4, 1fr);
+
+    gap: 15px;
+
+    margin-bottom: 20px;
+}
+
+.stat {
+
+    background: white;
+
+    border-radius: 17px;
+
+    padding: 18px;
+
+    box-shadow:
+        0 6px 25px rgba(25,55,80,.06);
+}
+
+.stat-icon {
+
+    font-size: 20px;
+
+    margin-bottom: 10px;
+}
+
+.stat small {
+
+    color: #8c9aa6;
+
+    font-size: 9px;
+}
+
+.stat h2 {
+
+    margin-top: 8px;
+
+    font-size: 20px;
+
+    color: #0878b7;
+}
+
+.stat.profit h2 {
+
+    color: #159765;
+}
+
+.stat.expense h2 {
+
+    color: #d25b5b;
+}
+
+
+/* =========================================================
+   CONTENU
+========================================================= */
+
+.content {
+
+    display: grid;
+
+    grid-template-columns:
+        1.5fr 1fr;
+
+    gap: 20px;
+}
+
+.card {
+
+    background: white;
+
+    border-radius: 20px;
+
+    padding: 22px;
+
+    box-shadow:
+        0 6px 25px rgba(25,55,80,.06);
+}
+
+.card h2 {
+
+    font-size: 17px;
+
+    margin-bottom: 6px;
+}
+
+.card > p {
+
+    color: #8998a5;
+
+    font-size: 11px;
+
+    margin-bottom: 18px;
+}
+
+
+/* =========================================================
+   VENTES RÉCENTES
+========================================================= */
+
+.sale {
+
+    display: flex;
+
+    justify-content: space-between;
+
+    align-items: center;
+
+    padding: 13px 0;
+
+    border-bottom:
+        1px solid #edf1f4;
+}
+
+.sale:last-child {
+
+    border-bottom: none;
+}
+
+.sale-name {
+
+    font-size: 12px;
+
+    font-weight: bold;
+
+    color: #20394c;
+}
+
+.sale-info {
+
+    color: #9aa6ae;
+
+    font-size: 9px;
+
+    margin-top: 4px;
+}
+
+.sale-amount {
+
+    color: #0878b7;
+
+    font-weight: bold;
+
+    font-size: 12px;
+
+    white-space: nowrap;
+}
+
+
+/* =========================================================
+   STOCK
+========================================================= */
+
+.stock-item {
+
+    display: flex;
+
+    justify-content: space-between;
+
+    align-items: center;
+
+    padding: 13px 0;
+
+    border-bottom:
+        1px solid #edf1f4;
+}
+
+.stock-item:last-child {
+
+    border-bottom: none;
+}
+
+.stock-name {
+
+    font-size: 12px;
+
+    font-weight: bold;
+}
+
+.stock-number {
+
+    padding: 5px 9px;
+
+    border-radius: 8px;
+
+    background: #fff1f1;
+
+    color: #d45454;
+
+    font-size: 10px;
+
+    font-weight: bold;
+}
+
+.stock-ok {
+
+    background: #eafaf2;
+
+    color: #168653;
+}
+
+
+/* =========================================================
+   RACCOURCIS
+========================================================= */
+
+.quick {
+
+    display: grid;
+
+    grid-template-columns:
+        repeat(3, 1fr);
+
+    gap: 10px;
+
+    margin-top: 20px;
+}
+
+.quick a {
+
+    text-decoration: none;
+
+    background: #f5faff;
+
+    border: 1px solid #e2edf4;
+
+    border-radius: 12px;
+
+    padding: 14px 10px;
+
+    text-align: center;
+
+    color: #26769d;
+
+    font-size: 10px;
+}
+
+.quick a:hover {
+
+    background: #eef8ff;
+}
+
+
+/* =========================================================
+   MOBILE
+========================================================= */
+
+@media(max-width:900px) {
 
     .cards {
-        grid-template-columns: repeat(2, 1fr);
+
+        grid-template-columns:
+            repeat(2, 1fr);
     }
 
-    .actions {
-        grid-template-columns: repeat(2, 1fr);
-    }
+    .content {
 
-    .menu-list {
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: 1fr;
     }
 
 }
 
-@media (max-width: 480px) {
 
-    .header {
-        padding: 19px 15px 24px;
-        border-radius: 0 0 23px 23px;
+@media(max-width:700px) {
+
+    .sidebar {
+
+        position: relative;
+
+        width: 100%;
+
+        height: auto;
+
+        padding: 10px;
     }
 
     .brand {
-        font-size: 18px;
+
+        padding: 4px 7px 10px;
     }
 
-    .welcome h1 {
-        font-size: 21px;
+    .brand-icon {
+
+        width: 39px;
+        height: 39px;
     }
 
-    .container {
-        padding: 16px 12px 90px;
+    .brand h2 {
+
+        font-size: 15px;
     }
 
-    .main-result {
-        padding: 19px;
-        border-radius: 19px;
+    .nav {
+
+        display: grid;
+
+        grid-template-columns:
+            repeat(4, 1fr);
+
+        gap: 4px;
     }
 
-    .result-value {
-        font-size: 26px;
+    .nav a {
+
+        flex-direction: column;
+
+        gap: 4px;
+
+        padding: 8px 3px;
+
+        text-align: center;
+
+        font-size: 8px;
+    }
+
+    .nav a.active {
+
+        border-left: 0;
+
+        border-bottom:
+            2px solid #20b8ff;
+    }
+
+    .sidebar-bottom {
+
+        position: static;
+
+        margin-top: 8px;
+    }
+
+    .profile {
+
+        display: none;
+    }
+
+    .main {
+
+        margin-left: 0;
+
+        padding: 14px;
+    }
+
+    .header h1 {
+
+        font-size: 20px;
+    }
+
+    .header p {
+
+        font-size: 10px;
+    }
+
+    .welcome {
+
+        padding: 15px;
+    }
+
+    .welcome h2 {
+
+        font-size: 16px;
     }
 
     .cards {
-        gap: 10px;
-    }
 
-    .card {
-        padding: 15px 13px;
-        border-radius: 16px;
-    }
+        grid-template-columns:
+            1fr 1fr;
 
-    .card-icon {
-        font-size: 22px;
-    }
-
-    .card-value {
-        font-size: 17px;
-    }
-
-    .actions {
-        gap: 10px;
-    }
-
-    .action {
-        padding: 16px 13px;
-        border-radius: 16px;
-    }
-
-    .action-icon {
-        font-size: 25px;
-    }
-
-    .action-name {
-        font-size: 13px;
-    }
-
-    .menu-list {
         gap: 9px;
     }
 
-    .menu-item {
-        padding: 13px 11px;
-        font-size: 12px;
+    .stat {
+
+        padding: 14px;
+    }
+
+    .stat h2 {
+
+        font-size: 16px;
+    }
+
+    .card {
+
+        padding: 15px;
+
+        border-radius: 16px;
+    }
+
+}
+
+
+@media(max-width:390px) {
+
+    .nav a {
+
+        font-size: 7px;
+    }
+
+    .stat h2 {
+
+        font-size: 14px;
     }
 
 }
@@ -749,299 +909,455 @@ a {
 
 </head>
 
+
 <body>
 
-<header class="header">
 
-```
-<div class="header-content">
+<!-- =========================================================
+     SIDEBAR
+========================================================= -->
 
-    <div class="top-line">
+<aside class="sidebar">
 
-        <div class="brand">
-            💼 LAMBEMAH GESTION
+    <div class="brand">
+
+        <div class="brand-icon">
+            💼
         </div>
 
-        <div class="role">
-            <?= htmlspecialchars($role) ?>
+        <div>
+
+            <h2>LAMBEMAH</h2>
+
+            <span>
+                GESTION • PRESTATION
+            </span>
+
         </div>
 
     </div>
+
+
+    <ul class="nav">
+
+        <li>
+            <a href="index.php" class="active">
+                🏠
+                <span>Accueil</span>
+            </a>
+        </li>
+
+        <li>
+            <a href="produits.php">
+                📦
+                <span>Produits</span>
+            </a>
+        </li>
+
+        <li>
+            <a href="ventes.php">
+                💰
+                <span>Ventes</span>
+            </a>
+        </li>
+
+        <li>
+            <a href="prestations.php">
+                🖨️
+                <span>Prestations</span>
+            </a>
+        </li>
+
+        <li>
+            <a href="recettes.php">
+                💵
+                <span>Recettes</span>
+            </a>
+        </li>
+
+        <li>
+            <a href="depenses.php">
+                💸
+                <span>Dépenses</span>
+            </a>
+        </li>
+
+        <li>
+            <a href="statistiques.php">
+                📊
+                <span>Statistiques</span>
+            </a>
+        </li>
+
+        <?php if ($role === "admin"): ?>
+
+        <li>
+            <a href="utilisateurs.php">
+                👥
+                <span>Équipe</span>
+            </a>
+        </li>
+
+        <?php endif; ?>
+
+    </ul>
+
+
+    <div class="sidebar-bottom">
+
+        <div class="profile">
+
+            <strong>
+                <?= htmlspecialchars($nom) ?>
+            </strong>
+
+            <span>
+                <?= htmlspecialchars($role) ?>
+            </span>
+
+        </div>
+
+
+        <a
+            class="logout"
+            href="index.php?logout=1"
+        >
+            🚪 Déconnexion
+        </a>
+
+    </div>
+
+</aside>
+
+
+<!-- =========================================================
+     MAIN
+========================================================= -->
+
+<main class="main">
+
+
+    <!-- HEADER -->
+
+    <div class="header">
+
+        <div>
+
+            <h1>
+                🏠 Accueil
+            </h1>
+
+            <p>
+                Vue générale de ton activité.
+            </p>
+
+        </div>
+
+
+        <div class="avatar">
+
+            <?= strtoupper(
+                substr($nom, 0, 1)
+            ) ?>
+
+        </div>
+
+    </div>
+
+
+    <!-- BIENVENUE -->
 
     <div class="welcome">
 
-        <small>Bonjour 👋</small>
+        <h2>
+            Bienvenue, <?= htmlspecialchars($nom) ?> 👋
+        </h2>
 
-        <h1>
-            <?= htmlspecialchars($nom) ?>
-        </h1>
-
-    </div>
-
-</div>
-```
-
-</header>
-
-<main class="container">
-
-```
-<!-- RESULTAT -->
-
-<div class="main-result">
-
-    <div class="result-title">
-        💎 Résultat actuel
-    </div>
-
-    <div class="result-value">
-        <?= afficherMontant($resultat) ?>
-    </div>
-
-    <div class="result-description">
-        Entrées : <?= afficherMontant($total_entrees) ?>
-        · Dépenses : <?= afficherMontant($montant_depenses) ?>
-    </div>
-
-</div>
-
-
-<!-- CARTES -->
-
-<div class="cards">
-
-    <div class="card">
-
-        <div class="card-icon">
-            🛍️
-        </div>
-
-        <div class="card-label">
-            Ventes
-        </div>
-
-        <div class="card-value">
-            <?= afficherMontant($montant_ventes) ?>
-        </div>
+        <p>
+            Voici un aperçu de LAMBEMAH GESTION.
+        </p>
 
     </div>
 
 
-    <div class="card">
+    <!-- =====================================================
+         STATISTIQUES
+    ====================================================== -->
 
-        <div class="card-icon">
-            💰
+    <div class="cards">
+
+
+        <div class="stat">
+
+            <div class="stat-icon">
+                💰
+            </div>
+
+            <small>
+                TOTAL VENTES
+            </small>
+
+            <h2>
+                <?= argent($total_ventes) ?>
+            </h2>
+
         </div>
 
-        <div class="card-label">
-            Recettes
+
+        <div class="stat">
+
+            <div class="stat-icon">
+                💵
+            </div>
+
+            <small>
+                RECETTES
+            </small>
+
+            <h2>
+                <?= argent($total_recettes) ?>
+            </h2>
+
         </div>
 
-        <div class="card-value">
-            <?= afficherMontant($montant_recettes) ?>
+
+        <div class="stat expense">
+
+            <div class="stat-icon">
+                💸
+            </div>
+
+            <small>
+                DÉPENSES
+            </small>
+
+            <h2>
+                <?= argent($total_depenses) ?>
+            </h2>
+
         </div>
 
-    </div>
 
+        <div class="stat profit">
 
-    <div class="card">
+            <div class="stat-icon">
+                📈
+            </div>
 
-        <div class="card-icon">
-            💸
-        </div>
+            <small>
+                BÉNÉFICE
+            </small>
 
-        <div class="card-label">
-            Dépenses
-        </div>
+            <h2>
+                <?= argent($benefice) ?>
+            </h2>
 
-        <div class="card-value">
-            <?= afficherMontant($montant_depenses) ?>
         </div>
 
     </div>
 
 
-    <div class="card">
+    <!-- =====================================================
+         CONTENU
+    ====================================================== -->
 
-        <div class="card-icon">
-            📦
+    <div class="content">
+
+
+        <!-- VENTES -->
+
+        <div class="card">
+
+            <h2>
+                💰 Dernières ventes
+            </h2>
+
+            <p>
+                Les dernières opérations enregistrées.
+            </p>
+
+
+            <?php if (
+                $dernieres_ventes &&
+                $dernieres_ventes->num_rows > 0
+            ): ?>
+
+
+                <?php while (
+                    $vente =
+                    $dernieres_ventes->fetch_assoc()
+                ): ?>
+
+                    <div class="sale">
+
+                        <div>
+
+                            <div class="sale-name">
+
+                                👕
+                                <?= htmlspecialchars(
+                                    $vente["produit_nom"]
+                                    ?? "Produit supprimé"
+                                ) ?>
+
+                            </div>
+
+                            <div class="sale-info">
+
+                                Quantité :
+                                <?= (int)$vente["quantite"] ?>
+
+                                •
+                                <?= date(
+                                    "d/m/Y",
+                                    strtotime(
+                                        $vente["date_vente"]
+                                    )
+                                ) ?>
+
+                            </div>
+
+                        </div>
+
+
+                        <div class="sale-amount">
+
+                            <?= argent(
+                                $vente["montant"]
+                            ) ?>
+
+                        </div>
+
+                    </div>
+
+                <?php endwhile; ?>
+
+
+            <?php else: ?>
+
+                <div
+                    style="
+                    text-align:center;
+                    padding:30px;
+                    color:#8998a5;
+                    font-size:11px;
+                    "
+                >
+
+                    🛒
+
+                    <br><br>
+
+                    Aucune vente enregistrée.
+
+                </div>
+
+            <?php endif; ?>
+
         </div>
 
-        <div class="card-label">
-            Stock
-        </div>
 
-        <div class="card-value">
-            <?= $stock_total ?>
+        <!-- STOCK -->
+
+        <div class="card">
+
+            <h2>
+                📦 Stock
+            </h2>
+
+            <p>
+                <?= $nombre_produits ?>
+                produit(s)
+                •
+                <?= $stock_total ?>
+                article(s) en stock.
+            </p>
+
+
+            <?php if (
+                $stock_faible &&
+                $stock_faible->num_rows > 0
+            ): ?>
+
+
+                <?php while (
+                    $stock =
+                    $stock_faible->fetch_assoc()
+                ): ?>
+
+                    <div class="stock-item">
+
+                        <div class="stock-name">
+
+                            📦
+                            <?= htmlspecialchars(
+                                $stock["nom"]
+                            ) ?>
+
+                        </div>
+
+
+                        <div class="stock-number">
+
+                            <?= (int)$stock["stock"] ?>
+
+                        </div>
+
+                    </div>
+
+                <?php endwhile; ?>
+
+
+            <?php else: ?>
+
+                <div
+                    style="
+                    text-align:center;
+                    padding:30px;
+                    color:#168653;
+                    font-size:11px;
+                    "
+                >
+
+                    ✅
+
+                    <br><br>
+
+                    Aucun stock faible.
+
+                </div>
+
+            <?php endif; ?>
+
+
+            <!-- RACCOURCIS -->
+
+            <div class="quick">
+
+                <a href="produits.php">
+                    📦<br>
+                    Produits
+                </a>
+
+                <a href="ventes.php">
+                    💰<br>
+                    Nouvelle vente
+                </a>
+
+                <a href="prestations.php">
+                    🖨️<br>
+                    Prestation
+                </a>
+
+            </div>
+
         </div>
 
     </div>
-
-</div>
-
-
-<!-- ACTIONS -->
-
-<h2 class="section-title">
-    ⚡ Actions rapides
-</h2>
-
-
-<div class="actions">
-
-
-    <a href="produits.php" class="action">
-
-        <div class="action-icon">
-            👕
-        </div>
-
-        <div class="action-name">
-            Produits
-        </div>
-
-        <div class="action-description">
-            Gérer les T-shirts et articles
-        </div>
-
-    </a>
-
-
-    <a href="ventes.php" class="action">
-
-        <div class="action-icon">
-            🛒
-        </div>
-
-        <div class="action-name">
-            Ventes
-        </div>
-
-        <div class="action-description">
-            Enregistrer une vente
-        </div>
-
-    </a>
-
-
-    <a href="prestations.php" class="action">
-
-        <div class="action-icon">
-            🖨️
-        </div>
-
-        <div class="action-name">
-            Prestations
-        </div>
-
-        <div class="action-description">
-            DTF, impression et presse
-        </div>
-
-    </a>
-
-
-    <a href="recettes.php" class="action">
-
-        <div class="action-icon">
-            💰
-        </div>
-
-        <div class="action-name">
-            Recettes
-        </div>
-
-        <div class="action-description">
-            Enregistrer une entrée
-        </div>
-
-    </a>
-
-
-    <a href="depenses.php" class="action">
-
-        <div class="action-icon">
-            💸
-        </div>
-
-        <div class="action-name">
-            Dépenses
-        </div>
-
-        <div class="action-description">
-            Suivre les sorties
-        </div>
-
-    </a>
-
-
-    <a href="statistiques.php" class="action">
-
-        <div class="action-icon">
-            📊
-        </div>
-
-        <div class="action-name">
-            Statistiques
-        </div>
-
-        <div class="action-description">
-            Voir les performances
-        </div>
-
-    </a>
-
-
-    <a href="utilisateurs.php" class="action">
-
-        <div class="action-icon">
-            👥
-        </div>
-
-        <div class="action-name">
-            Utilisateurs
-        </div>
-
-        <div class="action-description">
-            Gérer les accès
-        </div>
-
-    </a>
-
-</div>
-
-
-<!-- INFORMATIONS -->
-
-<h2 class="section-title">
-    📋 Gestion
-</h2>
-
-<div class="menu-list">
-
-    <a href="produits.php" class="menu-item">
-        📦 <?= $total_produits ?> produit(s)
-    </a>
-
-    <a href="ventes.php" class="menu-item">
-        🛍️ <?= $total_ventes ?> vente(s)
-    </a>
-
-    <a href="statistiques.php" class="menu-item">
-        📈 Voir les statistiques
-    </a>
-
-</div>
-
-
-<!-- DECONNEXION -->
-
-<a href="index.php?logout=1" class="logout">
-    🚪 Se déconnecter
-</a>
-```
 
 </main>
 
+
 </body>
+
 </html>
