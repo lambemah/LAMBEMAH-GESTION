@@ -3,6 +3,36 @@ session_start();
 require_once "config.php";
 
 /* =========================================================
+   DÉCONNEXION
+========================================================= */
+
+if (isset($_GET["logout"])) {
+
+    $_SESSION = [];
+
+    if (ini_get("session.use_cookies")) {
+
+        $params = session_get_cookie_params();
+
+        setcookie(
+            session_name(),
+            "",
+            time() - 42000,
+            $params["path"],
+            $params["domain"],
+            $params["secure"],
+            $params["httponly"]
+        );
+    }
+
+    session_destroy();
+
+    header("Location: connexion.php");
+    exit;
+}
+
+
+/* =========================================================
    PROTECTION
 ========================================================= */
 
@@ -13,17 +43,6 @@ if (!isset($_SESSION["id"])) {
 
 $nom  = $_SESSION["nom"] ?? "Utilisateur";
 $role = $_SESSION["role"] ?? "lecture";
-
-
-/* =========================================================
-   DÉCONNEXION
-========================================================= */
-
-if (isset($_GET["logout"])) {
-    session_destroy();
-    header("Location: connexion.php");
-    exit;
-}
 
 
 /* =========================================================
@@ -42,7 +61,7 @@ function argent($montant)
 
 
 /* =========================================================
-   CHIFFRE D'AFFAIRES — VENTES
+   TOTAL VENTES
 ========================================================= */
 
 $total_ventes = 0;
@@ -53,13 +72,15 @@ $result = $conn->query(
 );
 
 if ($result) {
+
     $data = $result->fetch_assoc();
+
     $total_ventes = (float)$data["total"];
 }
 
 
 /* =========================================================
-   RECETTES
+   TOTAL RECETTES
 ========================================================= */
 
 $total_recettes = 0;
@@ -70,13 +91,15 @@ $result = $conn->query(
 );
 
 if ($result) {
+
     $data = $result->fetch_assoc();
+
     $total_recettes = (float)$data["total"];
 }
 
 
 /* =========================================================
-   DÉPENSES
+   TOTAL DÉPENSES
 ========================================================= */
 
 $total_depenses = 0;
@@ -87,20 +110,25 @@ $result = $conn->query(
 );
 
 if ($result) {
+
     $data = $result->fetch_assoc();
+
     $total_depenses = (float)$data["total"];
 }
 
 
 /* =========================================================
-   BÉNÉFICE GLOBAL
+   BÉNÉFICE
 ========================================================= */
 
-$benefice = $total_ventes + $total_recettes - $total_depenses;
+$benefice =
+    $total_ventes
+    + $total_recettes
+    - $total_depenses;
 
 
 /* =========================================================
-   NOMBRE DE PRODUITS
+   PRODUITS
 ========================================================= */
 
 $nombre_produits = 0;
@@ -111,7 +139,9 @@ $result = $conn->query(
 );
 
 if ($result) {
+
     $data = $result->fetch_assoc();
+
     $nombre_produits = (int)$data["total"];
 }
 
@@ -128,7 +158,9 @@ $result = $conn->query(
 );
 
 if ($result) {
+
     $data = $result->fetch_assoc();
+
     $stock_total = (int)$data["total"];
 }
 
@@ -145,7 +177,9 @@ $result = $conn->query(
 );
 
 if ($result) {
+
     $data = $result->fetch_assoc();
+
     $nombre_ventes = (int)$data["total"];
 }
 
@@ -169,7 +203,7 @@ $dernieres_ventes = $conn->query(
 
 
 /* =========================================================
-   PRODUITS AVEC STOCK FAIBLE
+   STOCK FAIBLE
 ========================================================= */
 
 $stock_faible = $conn->query(
@@ -185,6 +219,7 @@ $stock_faible = $conn->query(
 ?>
 
 <!DOCTYPE html>
+
 <html lang="fr">
 
 <head>
@@ -196,7 +231,7 @@ $stock_faible = $conn->query(
     content="width=device-width, initial-scale=1.0"
 >
 
-<title>LAMBEMAH GESTION</title>
+<title>Accueil - LAMBEMAH GESTION</title>
 
 <style>
 
@@ -211,8 +246,11 @@ $stock_faible = $conn->query(
 }
 
 body {
+
     font-family: Arial, sans-serif;
+
     background: #f3f7fb;
+
     color: #172536;
 }
 
@@ -393,7 +431,7 @@ body {
 
 
 /* =========================================================
-   CONTENU
+   MAIN
 ========================================================= */
 
 .main {
@@ -416,7 +454,7 @@ body {
 
     align-items: center;
 
-    margin-bottom: 25px;
+    margin-bottom: 22px;
 }
 
 .header h1 {
@@ -443,7 +481,6 @@ body {
     display: flex;
 
     align-items: center;
-
     justify-content: center;
 
     background:
@@ -460,7 +497,7 @@ body {
 
 
 /* =========================================================
-   MESSAGE BIENVENUE
+   BIENVENUE
 ========================================================= */
 
 .welcome {
@@ -474,7 +511,8 @@ body {
     margin-bottom: 20px;
 
     box-shadow:
-        0 6px 25px rgba(25,55,80,.06);
+        0 6px 25px
+        rgba(25,55,80,.06);
 }
 
 .welcome h2 {
@@ -493,7 +531,7 @@ body {
 
 
 /* =========================================================
-   STATISTIQUES
+   CARDS
 ========================================================= */
 
 .cards {
@@ -517,7 +555,8 @@ body {
     padding: 18px;
 
     box-shadow:
-        0 6px 25px rgba(25,55,80,.06);
+        0 6px 25px
+        rgba(25,55,80,.06);
 }
 
 .stat-icon {
@@ -555,7 +594,7 @@ body {
 
 
 /* =========================================================
-   CONTENU
+   CONTENT
 ========================================================= */
 
 .content {
@@ -577,7 +616,8 @@ body {
     padding: 22px;
 
     box-shadow:
-        0 6px 25px rgba(25,55,80,.06);
+        0 6px 25px
+        rgba(25,55,80,.06);
 }
 
 .card h2 {
@@ -598,7 +638,7 @@ body {
 
 
 /* =========================================================
-   VENTES RÉCENTES
+   VENTES
 ========================================================= */
 
 .sale {
@@ -695,13 +735,6 @@ body {
     font-weight: bold;
 }
 
-.stock-ok {
-
-    background: #eafaf2;
-
-    color: #168653;
-}
-
 
 /* =========================================================
    RACCOURCIS
@@ -760,7 +793,6 @@ body {
 
         grid-template-columns: 1fr;
     }
-
 }
 
 
@@ -941,11 +973,15 @@ body {
     <ul class="nav">
 
         <li>
-            <a href="index.php" class="active">
+            <a
+                href="index.php"
+                class="active"
+            >
                 🏠
                 <span>Accueil</span>
             </a>
         </li>
+
 
         <li>
             <a href="produits.php">
@@ -954,12 +990,14 @@ body {
             </a>
         </li>
 
+
         <li>
             <a href="ventes.php">
                 💰
                 <span>Ventes</span>
             </a>
         </li>
+
 
         <li>
             <a href="prestations.php">
@@ -968,12 +1006,14 @@ body {
             </a>
         </li>
 
+
         <li>
             <a href="recettes.php">
                 💵
                 <span>Recettes</span>
             </a>
         </li>
+
 
         <li>
             <a href="depenses.php">
@@ -982,12 +1022,14 @@ body {
             </a>
         </li>
 
+
         <li>
             <a href="statistiques.php">
                 📊
                 <span>Statistiques</span>
             </a>
         </li>
+
 
         <?php if ($role === "admin"): ?>
 
@@ -1037,8 +1079,6 @@ body {
 <main class="main">
 
 
-    <!-- HEADER -->
-
     <div class="header">
 
         <div>
@@ -1065,16 +1105,18 @@ body {
     </div>
 
 
-    <!-- BIENVENUE -->
-
     <div class="welcome">
 
         <h2>
-            Bienvenue, <?= htmlspecialchars($nom) ?> 👋
+
+            Bienvenue,
+            <?= htmlspecialchars($nom) ?>
+            👋
+
         </h2>
 
         <p>
-            Voici un aperçu de LAMBEMAH GESTION.
+            Voici un aperçu de ton activité LAMBEMAH GESTION.
         </p>
 
     </div>
@@ -1164,7 +1206,7 @@ body {
     <div class="content">
 
 
-        <!-- VENTES -->
+        <!-- DERNIÈRES VENTES -->
 
         <div class="card">
 
@@ -1188,6 +1230,7 @@ body {
                     $dernieres_ventes->fetch_assoc()
                 ): ?>
 
+
                     <div class="sale">
 
                         <div>
@@ -1202,12 +1245,14 @@ body {
 
                             </div>
 
+
                             <div class="sale-info">
 
                                 Quantité :
                                 <?= (int)$vente["quantite"] ?>
 
                                 •
+
                                 <?= date(
                                     "d/m/Y",
                                     strtotime(
@@ -1230,10 +1275,12 @@ body {
 
                     </div>
 
+
                 <?php endwhile; ?>
 
 
             <?php else: ?>
+
 
                 <div
                     style="
@@ -1252,6 +1299,7 @@ body {
 
                 </div>
 
+
             <?php endif; ?>
 
         </div>
@@ -1266,11 +1314,15 @@ body {
             </h2>
 
             <p>
+
                 <?= $nombre_produits ?>
                 produit(s)
+
                 •
+
                 <?= $stock_total ?>
                 article(s) en stock.
+
             </p>
 
 
@@ -1284,6 +1336,7 @@ body {
                     $stock =
                     $stock_faible->fetch_assoc()
                 ): ?>
+
 
                     <div class="stock-item">
 
@@ -1305,10 +1358,12 @@ body {
 
                     </div>
 
+
                 <?php endwhile; ?>
 
 
             <?php else: ?>
+
 
                 <div
                     style="
@@ -1327,26 +1382,39 @@ body {
 
                 </div>
 
+
             <?php endif; ?>
 
-
-            <!-- RACCOURCIS -->
 
             <div class="quick">
 
                 <a href="produits.php">
-                    📦<br>
+
+                    📦
+                    <br>
+
                     Produits
+
                 </a>
+
 
                 <a href="ventes.php">
-                    💰<br>
+
+                    💰
+                    <br>
+
                     Nouvelle vente
+
                 </a>
 
+
                 <a href="prestations.php">
-                    🖨️<br>
+
+                    🖨️
+                    <br>
+
                     Prestation
+
                 </a>
 
             </div>
