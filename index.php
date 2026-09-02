@@ -27,21 +27,394 @@ if (isset($_GET["logout"])) {
 
     session_destroy();
 
-    header("Location: connexion.php");
+    header("Location: index.php");
     exit;
 }
 
 
 /* =========================================================
-   PROTECTION
+   CONNEXION
+========================================================= */
+
+$login_error = "";
+
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["connexion"])) {
+
+    $username = trim($_POST["username"] ?? "");
+    $mot_de_passe = $_POST["mot_de_passe"] ?? "";
+
+    if ($username === "" || $mot_de_passe === "") {
+
+        $login_error = "Veuillez remplir tous les champs.";
+
+    } else {
+
+        $stmt = $conn->prepare(
+            "SELECT id, nom, username, mot_de_passe, role
+             FROM utilisateurs
+             WHERE username = ?
+             LIMIT 1"
+        );
+
+        if ($stmt) {
+
+            $stmt->bind_param("s", $username);
+            $stmt->execute();
+
+            $result = $stmt->get_result();
+            $user = $result->fetch_assoc();
+
+            $stmt->close();
+
+            if ($user) {
+
+                /*
+                 * Compatible avec :
+                 * - mot de passe enregistré avec password_hash()
+                 * - ancien mot de passe enregistré en texte simple
+                 */
+
+                $mot_de_passe_valide = false;
+
+                if (
+                    password_verify(
+                        $mot_de_passe,
+                        $user["mot_de_passe"]
+                    )
+                ) {
+                    $mot_de_passe_valide = true;
+                }
+
+                if (
+                    !$mot_de_passe_valide &&
+                    $mot_de_passe === $user["mot_de_passe"]
+                ) {
+                    $mot_de_passe_valide = true;
+                }
+
+                if ($mot_de_passe_valide) {
+
+                    session_regenerate_id(true);
+
+                    $_SESSION["id"] = $user["id"];
+                    $_SESSION["nom"] = $user["nom"];
+                    $_SESSION["username"] = $user["username"];
+                    $_SESSION["role"] = $user["role"];
+
+                    header("Location: index.php");
+                    exit;
+
+                } else {
+
+                    $login_error = "Nom d'utilisateur ou mot de passe incorrect.";
+                }
+
+            } else {
+
+                $login_error = "Nom d'utilisateur ou mot de passe incorrect.";
+            }
+
+        } else {
+
+            $login_error = "Erreur de connexion à la base de données.";
+        }
+    }
+}
+
+
+/* =========================================================
+   SI PAS CONNECTÉ → PAGE DE CONNEXION
 ========================================================= */
 
 if (!isset($_SESSION["id"])) {
-    header("Location: connexion.php");
-    exit;
+?>
+
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
+
+<title>Connexion - LAMBEMAH GESTION</title>
+
+<style>
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
 }
 
-$nom  = $_SESSION["nom"] ?? "Utilisateur";
+body {
+
+    min-height: 100vh;
+
+    font-family: Arial, sans-serif;
+
+    background:
+        linear-gradient(
+            135deg,
+            #061a2d,
+            #07527c
+        );
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: center;
+
+    padding: 20px;
+}
+
+.login-box {
+
+    width: 100%;
+    max-width: 400px;
+
+    background: white;
+
+    border-radius: 22px;
+
+    padding: 30px;
+
+    box-shadow:
+        0 20px 60px
+        rgba(0,0,0,.25);
+}
+
+.logo {
+
+    width: 65px;
+    height: 65px;
+
+    margin: 0 auto 15px;
+
+    border-radius: 18px;
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: center;
+
+    background:
+        linear-gradient(
+            135deg,
+            #20b8ff,
+            #1264c7
+        );
+
+    color: white;
+
+    font-size: 30px;
+}
+
+h1 {
+
+    text-align: center;
+
+    color: #092d4b;
+
+    font-size: 23px;
+
+    margin-bottom: 5px;
+}
+
+.subtitle {
+
+    text-align: center;
+
+    color: #8998a5;
+
+    font-size: 12px;
+
+    margin-bottom: 25px;
+}
+
+.error {
+
+    background: #fff1f1;
+
+    border: 1px solid #ffd2d2;
+
+    color: #c64646;
+
+    padding: 12px;
+
+    border-radius: 10px;
+
+    font-size: 12px;
+
+    margin-bottom: 15px;
+
+    text-align: center;
+}
+
+label {
+
+    display: block;
+
+    color: #20394c;
+
+    font-size: 12px;
+
+    font-weight: bold;
+
+    margin-bottom: 7px;
+}
+
+input {
+
+    width: 100%;
+
+    padding: 13px;
+
+    border: 1px solid #dbe6ed;
+
+    border-radius: 11px;
+
+    outline: none;
+
+    font-size: 14px;
+
+    margin-bottom: 16px;
+}
+
+input:focus {
+
+    border-color: #20aef0;
+
+    box-shadow:
+        0 0 0 3px
+        rgba(32,174,240,.10);
+}
+
+button {
+
+    width: 100%;
+
+    border: none;
+
+    padding: 14px;
+
+    border-radius: 11px;
+
+    background:
+        linear-gradient(
+            135deg,
+            #20b8ff,
+            #1264c7
+        );
+
+    color: white;
+
+    font-weight: bold;
+
+    cursor: pointer;
+
+    font-size: 14px;
+}
+
+button:hover {
+
+    opacity: .92;
+}
+
+.footer {
+
+    text-align: center;
+
+    margin-top: 20px;
+
+    color: #9aa6ae;
+
+    font-size: 10px;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="login-box">
+
+    <div class="logo">
+        💼
+    </div>
+
+    <h1>LAMBEMAH GESTION</h1>
+
+    <div class="subtitle">
+        Gestion • Vente • Prestation
+    </div>
+
+    <?php if ($login_error !== ""): ?>
+
+        <div class="error">
+            <?= htmlspecialchars($login_error) ?>
+        </div>
+
+    <?php endif; ?>
+
+    <form method="POST">
+
+        <label>Nom d'utilisateur</label>
+
+        <input
+            type="text"
+            name="username"
+            placeholder="Votre nom d'utilisateur"
+            autocomplete="username"
+            required
+        >
+
+        <label>Mot de passe</label>
+
+        <input
+            type="password"
+            name="mot_de_passe"
+            placeholder="Votre mot de passe"
+            autocomplete="current-password"
+            required
+        >
+
+        <button
+            type="submit"
+            name="connexion"
+        >
+            🔐 Se connecter
+        </button>
+
+    </form>
+
+    <div class="footer">
+        LAMBEMAH GESTION © 2026
+    </div>
+
+</div>
+
+</body>
+
+</html>
+
+<?php
+exit;
+}
+
+
+/* =========================================================
+   UTILISATEUR CONNECTÉ
+========================================================= */
+
+$nom = $_SESSION["nom"] ?? "Utilisateur";
 $role = $_SESSION["role"] ?? "lecture";
 
 
@@ -235,10 +608,6 @@ $stock_faible = $conn->query(
 
 <style>
 
-/* =========================================================
-   GLOBAL
-========================================================= */
-
 * {
     box-sizing: border-box;
     margin: 0;
@@ -255,9 +624,7 @@ body {
 }
 
 
-/* =========================================================
-   SIDEBAR
-========================================================= */
+/* SIDEBAR */
 
 .sidebar {
 
@@ -305,6 +672,7 @@ body {
     display: flex;
 
     align-items: center;
+
     justify-content: center;
 
     background:
@@ -318,6 +686,7 @@ body {
 }
 
 .brand h2 {
+
     font-size: 18px;
 }
 
@@ -329,10 +698,12 @@ body {
 }
 
 .nav {
+
     list-style: none;
 }
 
 .nav li {
+
     margin: 4px 0;
 }
 
@@ -371,9 +742,7 @@ body {
 }
 
 
-/* =========================================================
-   BAS SIDEBAR
-========================================================= */
+/* BAS */
 
 .sidebar-bottom {
 
@@ -430,9 +799,7 @@ body {
 }
 
 
-/* =========================================================
-   MAIN
-========================================================= */
+/* MAIN */
 
 .main {
 
@@ -442,9 +809,7 @@ body {
 }
 
 
-/* =========================================================
-   HEADER
-========================================================= */
+/* HEADER */
 
 .header {
 
@@ -481,6 +846,7 @@ body {
     display: flex;
 
     align-items: center;
+
     justify-content: center;
 
     background:
@@ -496,9 +862,7 @@ body {
 }
 
 
-/* =========================================================
-   BIENVENUE
-========================================================= */
+/* BIENVENUE */
 
 .welcome {
 
@@ -530,9 +894,7 @@ body {
 }
 
 
-/* =========================================================
-   CARDS
-========================================================= */
+/* CARDS */
 
 .cards {
 
@@ -593,9 +955,7 @@ body {
 }
 
 
-/* =========================================================
-   CONTENT
-========================================================= */
+/* CONTENT */
 
 .content {
 
@@ -637,9 +997,7 @@ body {
 }
 
 
-/* =========================================================
-   VENTES
-========================================================= */
+/* VENTES */
 
 .sale {
 
@@ -690,9 +1048,7 @@ body {
 }
 
 
-/* =========================================================
-   STOCK
-========================================================= */
+/* STOCK */
 
 .stock-item {
 
@@ -736,9 +1092,7 @@ body {
 }
 
 
-/* =========================================================
-   RACCOURCIS
-========================================================= */
+/* RACCOURCIS */
 
 .quick {
 
@@ -777,9 +1131,7 @@ body {
 }
 
 
-/* =========================================================
-   MOBILE
-========================================================= */
+/* TABLETTE */
 
 @media(max-width:900px) {
 
@@ -795,6 +1147,8 @@ body {
     }
 }
 
+
+/* MOBILE */
 
 @media(max-width:700px) {
 
@@ -919,7 +1273,6 @@ body {
 
         border-radius: 16px;
     }
-
 }
 
 
@@ -934,7 +1287,6 @@ body {
 
         font-size: 14px;
     }
-
 }
 
 </style>
@@ -945,9 +1297,7 @@ body {
 <body>
 
 
-<!-- =========================================================
-     SIDEBAR
-========================================================= -->
+<!-- SIDEBAR -->
 
 <aside class="sidebar">
 
@@ -1072,9 +1422,7 @@ body {
 </aside>
 
 
-<!-- =========================================================
-     MAIN
-========================================================= -->
+<!-- MAIN -->
 
 <main class="main">
 
@@ -1111,6 +1459,7 @@ body {
 
             Bienvenue,
             <?= htmlspecialchars($nom) ?>
+
             👋
 
         </h2>
@@ -1122,9 +1471,7 @@ body {
     </div>
 
 
-    <!-- =====================================================
-         STATISTIQUES
-    ====================================================== -->
+    <!-- STATISTIQUES -->
 
     <div class="cards">
 
@@ -1199,9 +1546,7 @@ body {
     </div>
 
 
-    <!-- =====================================================
-         CONTENU
-    ====================================================== -->
+    <!-- CONTENU -->
 
     <div class="content">
 
@@ -1316,11 +1661,13 @@ body {
             <p>
 
                 <?= $nombre_produits ?>
+
                 produit(s)
 
                 •
 
                 <?= $stock_total ?>
+
                 article(s) en stock.
 
             </p>
@@ -1343,6 +1690,7 @@ body {
                         <div class="stock-name">
 
                             📦
+
                             <?= htmlspecialchars(
                                 $stock["nom"]
                             ) ?>
@@ -1422,6 +1770,7 @@ body {
         </div>
 
     </div>
+
 
 </main>
 
