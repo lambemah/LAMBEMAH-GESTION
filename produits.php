@@ -11,102 +11,68 @@ $nom  = $_SESSION["nom"] ?? "Utilisateur";
 $role = $_SESSION["role"] ?? "lecture";
 
 $message = "";
-$type_message = "";
+$type = "";
+
 
 /* =========================================================
-   AJOUT D'UN ACHAT
+   AJOUTER UN NOUVEL ARTICLE
    ========================================================= */
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_achat"])) {
 
-    $designation = trim($_POST["designation"] ?? "");
-    $prix_achat  = (float)($_POST["prix_achat"] ?? 0);
-    $quantite    = (int)($_POST["quantite"] ?? 0);
-    $description = trim($_POST["description"] ?? "");
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_produit"])) {
+
+    $designation = trim($_POST["nom"] ?? "");
+    $categorie = trim($_POST["categorie"] ?? "");
+    $prix_achat = (float)($_POST["prix_achat"] ?? 0);
+    $stock_initial = (int)($_POST["stock_initial"] ?? 0);
+    $fournisseur = trim($_POST["fournisseur"] ?? "");
 
     if ($designation === "") {
-        $message = "Veuillez saisir la désignation du produit.";
-        $type_message = "error";
 
-    } elseif ($prix_achat <= 0) {
-        $message = "Le prix d'achat doit être supérieur à zéro.";
-        $type_message = "error";
+        $message = "La désignation est obligatoire.";
+        $type = "error";
 
-    } elseif ($quantite <= 0) {
-        $message = "La quantité doit être supérieure à zéro.";
-        $type_message = "error";
+    } elseif ($prix_achat < 0 || $stock_initial < 0) {
+
+        $message = "Le prix et la quantité ne peuvent pas être négatifs.";
+        $type = "error";
 
     } else {
 
-        $montant = $prix_achat * $quantite;
+        /* Vérifier si l'article existe déjà */
 
-        $conn->begin_transaction();
+        $stmt = $conn->prepare(
+            "SELECT id
+             FROM produits
+             WHERE nom = ?
+             LIMIT 1"
+        );
 
-        try {
+        $stmt->bind_param("s", $designation);
+        $stmt->execute();
 
-            /* Chercher si le produit existe déjà */
-            $stmt = $conn->prepare(
-                "SELECT id, nom, stock
-                 FROM produits
-                 WHERE LOWER(nom) = LOWER(?)
-                 LIMIT 1"
-            );
+        $existe = $stmt->get_result()->num_rows > 0;
 
-            if (!$stmt) {
-                throw new Exception("Erreur préparation produit.");
-            }
+        $stmt->close();
 
-            $stmt->bind_param("s", $designation);
-            $stmt->execute();
 
-            $result = $stmt->get_result();
-            $produit = $result->fetch_assoc();
+        if ($existe) {
 
-            $stmt->close();
+            $message =
+                "Cet article existe déjà. Utilise plutôt « Enregistrer un achat ».";
 
-            /* =================================================
-               PRODUIT EXISTANT
-               ================================================= */
-            if ($produit) {
+            $type = "error";
 
-                $produit_id = (int)$produit["id"];
+        } else {
 
-                /* Augmenter le stock + mettre à jour le prix d'achat */
-                $stmt = $conn->prepare(
-                    "UPDATE produits
-                     SET stock = stock + ?,
-                         prix_achat = ?
-                     WHERE id = ?"
-                );
+            $conn->begin_transaction();
 
-                if (!$stmt) {
-                    throw new Exception("Erreur mise à jour produit.");
-                }
-
-                $stmt->bind_param(
-                    "idi",
-                    $quantite,
-                    $prix_achat,
-                    $produit_id
-                );
-
-                if (!$stmt->execute()) {
-                    throw new Exception("Impossible de mettre à jour le produit.");
-                }
-
-                $stmt->close();
-
-            } else {
-
-                /* =================================================
-                   NOUVEAU PRODUIT
-                   ================================================= */
-
-                $categorie = "Achat";
+            try {
 
                 /*
-                 * prix_vente existe encore dans la base actuelle,
-                 * mais on ne l'utilise plus dans l'application.
+                 * prix_vente reste à 0 dans la base
+                 * car cette page concerne uniquement les achats.
                  */
+
                 $prix_vente = 0;
 
                 $stmt = $conn->prepare(
@@ -115,43 +81,154 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_achat"])) {
                     VALUES (?, ?, ?, ?, ?)"
                 );
 
-                if (!$stmt) {
-                    throw new Exception("Erreur création produit.");
-                }
-
                 $stmt->bind_param(
                     "ssddi",
                     $designation,
                     $categorie,
                     $prix_achat,
                     $prix_vente,
-                    $quantite
+                    $stock_initial
                 );
 
                 if (!$stmt->execute()) {
-                    throw new Exception("Impossible de créer le produit.");
+                    throw new Exception();
                 }
 
                 $produit_id = $stmt->insert_id;
 
                 $stmt->close();
+
+
+                /* Enregistrer l'entrée initiale dans mouvements */
+
+                if ($stock_initial > 0) {
+
+                    $description =
+                        "ACHAT | Fournisseur : " .
+                        ($fournisseur !== ""
+                            ? $fournisseur
+                            : "Non renseigné") .
+                        " | Désignation : " .
+                        $designation;
+
+
+                    $stmt = $conn->prepare(
+                        "INSERT INTO mouvements
+                        (produit_id, type, quantite, prix, description)
+                        VALUES (?, 'ENTREE', ?, ?, ?)"
+                    );
+
+                    $stmt->bind_param(
+                        "iids",
+                        $produit_id,
+                        $stock_initial,
+                        $prix_achat,
+                        $description
+                    );
+
+                    if (!$stmt->execute()) {
+                        throw new Exception();
+                    }
+
+                    $stmt->close();
+                }
+
+
+                $conn->commit();
+
+                $message = "Article ajouté avec succès.";
+                $type = "success";
+
+            } catch (Exception $e) {
+
+                $conn->rollback();
+
+                $message =
+                    "Impossible d'ajouter l'article.";
+
+                $type = "error";
+            }
+        }
+    }
+}
+
+
+/* =========================================================
+   ENREGISTRER UN ACHAT / ENTRÉE DE STOCK
+   ========================================================= */
+
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_entree"])) {
+
+    $produit_id = (int)($_POST["produit_id"] ?? 0);
+    $quantite = (int)($_POST["quantite"] ?? 0);
+    $prix = (float)($_POST["prix"] ?? 0);
+    $fournisseur = trim($_POST["fournisseur"] ?? "");
+    $description_note = trim($_POST["description"] ?? "");
+
+
+    if ($produit_id <= 0) {
+
+        $message = "Choisis un article.";
+        $type = "error";
+
+    } elseif ($quantite <= 0) {
+
+        $message = "La quantité doit être supérieure à zéro.";
+        $type = "error";
+
+    } elseif ($prix < 0) {
+
+        $message = "Le prix d'achat est incorrect.";
+        $type = "error";
+
+    } else {
+
+        $conn->begin_transaction();
+
+        try {
+
+            /* Vérifier le produit */
+
+            $stmt = $conn->prepare(
+                "SELECT id, nom
+                 FROM produits
+                 WHERE id = ?
+                 LIMIT 1"
+            );
+
+            $stmt->bind_param("i", $produit_id);
+            $stmt->execute();
+
+            $produit = $stmt->get_result()->fetch_assoc();
+
+            $stmt->close();
+
+
+            if (!$produit) {
+                throw new Exception();
             }
 
-            /* =================================================
-               ENREGISTRER L'ACHAT DANS MOUVEMENTS
-               ================================================= */
 
-            $description_mouvement =
-                "Achat : " . $designation .
-                " | Prix unitaire : " .
-                number_format($prix_achat, 0, ",", " ") .
-                " FG | Montant : " .
-                number_format($montant, 0, ",", " ") .
-                " FG";
+            /* Description */
 
-            if ($description !== "") {
-                $description_mouvement .= " | " . $description;
+            $description =
+                "ACHAT | Fournisseur : " .
+                ($fournisseur !== ""
+                    ? $fournisseur
+                    : "Non renseigné") .
+                " | Désignation : " .
+                $produit["nom"];
+
+
+            if ($description_note !== "") {
+
+                $description .=
+                    " | Note : " .
+                    $description_note;
             }
+
+
+            /* Enregistrer le mouvement */
 
             $stmt = $conn->prepare(
                 "INSERT INTO mouvements
@@ -159,89 +236,76 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_achat"])) {
                 VALUES (?, 'ENTREE', ?, ?, ?)"
             );
 
-            if (!$stmt) {
-                throw new Exception("Erreur préparation mouvement.");
-            }
-
             $stmt->bind_param(
                 "iids",
                 $produit_id,
                 $quantite,
-                $prix_achat,
-                $description_mouvement
+                $prix,
+                $description
             );
 
             if (!$stmt->execute()) {
-                throw new Exception("Impossible d'enregistrer l'achat.");
+                throw new Exception();
             }
 
             $stmt->close();
 
+
+            /* Augmenter le stock */
+
+            $stmt = $conn->prepare(
+                "UPDATE produits
+                 SET stock = stock + ?,
+                     prix_achat = ?
+                 WHERE id = ?"
+            );
+
+            $stmt->bind_param(
+                "idi",
+                $quantite,
+                $prix,
+                $produit_id
+            );
+
+            if (!$stmt->execute()) {
+                throw new Exception();
+            }
+
+            $stmt->close();
+
+
             $conn->commit();
+
+
+            $montant_achat = $quantite * $prix;
 
             $message =
                 "Achat enregistré : " .
-                htmlspecialchars($designation) .
-                " × " . $quantite .
-                " = " .
-                number_format($montant, 0, ",", " ") .
-                " FG";
+                number_format(
+                    $montant_achat,
+                    0,
+                    ",",
+                    " "
+                ) .
+                " FG.";
 
-            $type_message = "success";
+            $type = "success";
 
         } catch (Exception $e) {
 
             $conn->rollback();
 
-            $message = "L'achat n'a pas pu être enregistré.";
-            $type_message = "error";
+            $message =
+                "L'achat n'a pas pu être enregistré.";
+
+            $type = "error";
         }
     }
 }
 
 
 /* =========================================================
-   STATISTIQUES ACHATS
-   ========================================================= */
-
-$total_achats = 0;
-$nombre_achats = 0;
-
-$result = $conn->query(
-    "SELECT
-        COUNT(*) AS nombre,
-        COALESCE(SUM(quantite * prix), 0) AS total
-     FROM mouvements
-     WHERE type = 'ENTREE'"
-);
-
-if ($result) {
-    $data = $result->fetch_assoc();
-
-    $nombre_achats = (int)$data["nombre"];
-    $total_achats = (float)$data["total"];
-}
-
-
-/* =========================================================
-   STOCK TOTAL
-   ========================================================= */
-
-$stock_total = 0;
-
-$result = $conn->query(
-    "SELECT COALESCE(SUM(stock), 0) AS total
-     FROM produits"
-);
-
-if ($result) {
-    $data = $result->fetch_assoc();
-    $stock_total = (int)$data["total"];
-}
-
-
-/* =========================================================
-   PRODUITS
+   LISTE DES PRODUITS
    ========================================================= */
 
 $produits = $conn->query(
@@ -260,7 +324,7 @@ $produits = $conn->query(
    HISTORIQUE DES ACHATS
    ========================================================= */
 
-$achats = $conn->query(
+$mouvements = $conn->query(
     "SELECT
         m.id,
         m.quantite,
@@ -273,11 +337,37 @@ $achats = $conn->query(
         ON p.id = m.produit_id
      WHERE m.type = 'ENTREE'
      ORDER BY m.id DESC
-     LIMIT 100"
+     LIMIT 50"
 );
 
 
-function argent($montant) {
+/* =========================================================
+   TOTAL DES ACHATS
+   ========================================================= */
+
+$total_achat = 0;
+
+$result = $conn->query(
+    "SELECT
+        COALESCE(SUM(quantite * prix), 0) AS total
+     FROM mouvements
+     WHERE type = 'ENTREE'"
+);
+
+if ($result) {
+
+    $data = $result->fetch_assoc();
+
+    $total_achat = (float)$data["total"];
+}
+
+
+/* =========================================================
+   FORMAT ARGENT
+   ========================================================= */
+
+function argent($montant)
+{
     return number_format(
         (float)$montant,
         0,
@@ -287,15 +377,18 @@ function argent($montant) {
 }
 
 ?>
+
 <!DOCTYPE html>
 <html lang="fr">
+
 <head>
 
 <meta charset="UTF-8">
+
 <meta name="viewport"
       content="width=device-width, initial-scale=1.0">
 
-<title>LAMBEMAH GESTION - Achats</title>
+<title>Achats - LAMBEMAH GESTION</title>
 
 <link
 href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
@@ -304,6 +397,7 @@ rel="stylesheet">
 <link
 href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css"
 rel="stylesheet">
+
 
 <style>
 
@@ -318,56 +412,60 @@ body {
     color: #172033;
 }
 
+
+/* SIDEBAR */
+
 .sidebar {
     position: fixed;
     left: 0;
     top: 0;
-    width: 250px;
+    width: 245px;
     height: 100vh;
-    background: #102a56;
+    background: #102a43;
     color: white;
-    padding: 25px 15px;
-    overflow-y: auto;
+    padding: 22px 15px;
 }
 
 .logo {
-    font-size: 23px;
+    font-size: 22px;
     font-weight: bold;
-    text-align: center;
-    margin-bottom: 30px;
+    padding: 5px 12px 25px;
 }
 
 .logo small {
     display: block;
     font-size: 11px;
-    opacity: .7;
-    margin-top: 5px;
+    color: #9cc8ff;
+    margin-top: 4px;
 }
 
-.nav-link {
-    color: #dce8f8;
-    padding: 12px 14px;
+.menu a {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #dbeafe;
+    text-decoration: none;
+    padding: 12px;
     border-radius: 10px;
     margin-bottom: 5px;
-    text-decoration: none;
-    display: block;
+    font-size: 14px;
 }
 
-.nav-link:hover,
-.nav-link.active {
-    background: #1d4d8f;
+.menu a:hover,
+.menu a.active {
+    background: #1d4ed8;
     color: white;
 }
 
+
+/* CONTENU */
+
 .main {
-    margin-left: 250px;
-    padding: 30px;
+    margin-left: 245px;
+    padding: 25px;
 }
 
 .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
     margin-bottom: 25px;
 }
 
@@ -377,153 +475,155 @@ body {
 }
 
 .header p {
-    margin: 5px 0 0;
-    color: #6c757d;
+    margin-top: 5px;
+    color: #667085;
 }
 
-.cards {
+
+/* STATISTIQUES */
+
+.stats {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 18px;
-    margin-bottom: 25px;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 15px;
+    margin-bottom: 20px;
 }
 
 .card-stat {
     background: white;
     border-radius: 15px;
     padding: 20px;
-    box-shadow: 0 3px 15px rgba(0,0,0,.06);
+    box-shadow: 0 3px 15px rgba(0,0,0,.05);
 }
 
-.card-stat .label {
-    color: #6c757d;
-    font-size: 14px;
+.label {
+    color: #667085;
+    font-size: 13px;
 }
 
-.card-stat .value {
-    font-size: 25px;
+.value {
+    font-size: 24px;
     font-weight: bold;
-    margin-top: 8px;
+    margin-top: 6px;
 }
+
+
+/* BLOCS */
 
 .box {
     background: white;
     border-radius: 15px;
-    padding: 22px;
-    margin-bottom: 25px;
-    box-shadow: 0 3px 15px rgba(0,0,0,.06);
+    padding: 20px;
+    margin-bottom: 20px;
+    box-shadow: 0 3px 15px rgba(0,0,0,.05);
 }
 
-.box h2 {
-    font-size: 20px;
-    margin-bottom: 20px;
+.box-title {
+    font-size: 19px;
+    font-weight: bold;
+    margin-bottom: 18px;
 }
+
+
+/* FORMULAIRES */
 
 .form-control,
 .form-select {
-    min-height: 46px;
-}
-
-.btn-main {
-    background: #174b8f;
-    color: white;
-    border: 0;
-    min-height: 46px;
+    min-height: 45px;
     border-radius: 9px;
-    padding: 0 20px;
 }
 
-.btn-main:hover {
-    background: #123d75;
-    color: white;
+.help {
+    color: #667085;
+    font-size: 12px;
 }
 
-.alert {
+
+/* MONTANT */
+
+.amount {
+    background: #eef5ff;
     border-radius: 10px;
+    padding: 14px;
+    margin-top: 15px;
+    font-weight: bold;
 }
+
+
+/* TABLE */
 
 .table-responsive {
-    border-radius: 10px;
+    overflow-x: auto;
 }
 
-.table {
-    margin-bottom: 0;
+table {
+    width: 100%;
 }
 
-.badge-stock {
-    background: #e8f1ff;
-    color: #174b8f;
-    padding: 7px 10px;
-    border-radius: 20px;
+th {
+    background: #f5f7fa;
+    padding: 12px;
+    font-size: 12px;
+    white-space: nowrap;
 }
 
-.mobile-nav {
-    display: none;
+td {
+    padding: 12px;
+    border-top: 1px solid #edf0f4;
+    font-size: 13px;
+    white-space: nowrap;
 }
 
 
 /* MOBILE */
 
-@media(max-width: 800px) {
+@media(max-width: 768px) {
 
     .sidebar {
-        display: none;
+        position: static;
+        width: 100%;
+        height: auto;
+        padding: 10px;
+    }
+
+    .logo {
+        padding: 5px 8px 10px;
+    }
+
+    .menu {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 4px;
+    }
+
+    .menu a {
+        justify-content: center;
+        flex-direction: column;
+        gap: 3px;
+        text-align: center;
+        font-size: 10px;
+        padding: 7px 3px;
+    }
+
+    .menu a i {
+        font-size: 17px;
     }
 
     .main {
         margin-left: 0;
-        padding: 15px;
-        padding-bottom: 90px;
-    }
-
-    .header {
-        display: block;
+        padding: 14px;
     }
 
     .header h1 {
         font-size: 23px;
     }
 
-    .cards {
+    .stats {
         grid-template-columns: 1fr;
-        gap: 10px;
-    }
-
-    .card-stat {
-        padding: 16px;
     }
 
     .box {
-        padding: 16px;
-    }
-
-    .mobile-nav {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        position: fixed;
-        bottom: 0;
-        left: 0;
-        right: 0;
-        background: #102a56;
-        z-index: 999;
-        padding: 8px 4px;
-    }
-
-    .mobile-nav a {
-        text-align: center;
-        color: white;
-        text-decoration: none;
-        font-size: 11px;
-    }
-
-    .mobile-nav i {
-        display: block;
-        font-size: 20px;
-        margin-bottom: 2px;
-    }
-
-    .table {
-        font-size: 13px;
+        padding: 15px;
     }
 
 }
@@ -532,80 +632,135 @@ body {
 
 </head>
 
+
 <body>
 
 
-<!-- =====================================================
-     MENU PC
-     ===================================================== -->
+<!-- MENU -->
 
-<div class="sidebar">
+<aside class="sidebar">
 
     <div class="logo">
+
         LAMBEMAH
-        <small>GESTION</small>
+
+        <small>
+            GESTION • PRESTATION
+        </small>
+
     </div>
 
-    <a class="nav-link" href="index.php">
-        <i class="bi bi-house"></i> Accueil
-    </a>
 
-    <a class="nav-link active" href="produits.php">
-        <i class="bi bi-cart"></i> Achats / Produits
-    </a>
+    <nav class="menu">
 
-    <a class="nav-link" href="ventes.php">
-        <i class="bi bi-cash-stack"></i> Ventes
-    </a>
+        <a href="index.php">
 
-    <a class="nav-link" href="prestations.php">
-        <i class="bi bi-printer"></i> Prestations
-    </a>
+            <i class="bi bi-house"></i>
 
-    <a class="nav-link" href="recettes.php">
-        <i class="bi bi-wallet2"></i> Recettes
-    </a>
+            Accueil
 
-    <a class="nav-link" href="depenses.php">
-        <i class="bi bi-arrow-down-circle"></i> Dépenses
-    </a>
-
-    <a class="nav-link" href="statistiques.php">
-        <i class="bi bi-bar-chart"></i> Statistiques
-    </a>
-
-    <?php if ($role === "admin"): ?>
-
-    <a class="nav-link" href="utilisateurs.php">
-        <i class="bi bi-people"></i> Équipe
-    </a>
-
-    <?php endif; ?>
-
-    <a class="nav-link" href="index.php?logout=1">
-        <i class="bi bi-box-arrow-right"></i> Déconnexion
-    </a>
-
-</div>
+        </a>
 
 
-<!-- =====================================================
-     CONTENU
-     ===================================================== -->
+        <a href="produits.php"
+           class="active">
 
-<div class="main">
+            <i class="bi bi-box"></i>
+
+            Achats / Stock
+
+        </a>
+
+
+        <a href="ventes.php">
+
+            <i class="bi bi-cart-check"></i>
+
+            Ventes
+
+        </a>
+
+
+        <a href="prestations.php">
+
+            <i class="bi bi-printer"></i>
+
+            Prestations
+
+        </a>
+
+
+        <a href="recettes.php">
+
+            <i class="bi bi-cash-coin"></i>
+
+            Recettes
+
+        </a>
+
+
+        <a href="depenses.php">
+
+            <i class="bi bi-wallet2"></i>
+
+            Dépenses
+
+        </a>
+
+
+        <a href="statistiques.php">
+
+            <i class="bi bi-bar-chart"></i>
+
+            Statistiques
+
+        </a>
+
+
+        <?php if ($role === "admin"): ?>
+
+            <a href="utilisateurs.php">
+
+                <i class="bi bi-people"></i>
+
+                Équipe
+
+            </a>
+
+        <?php endif; ?>
+
+
+        <a href="index.php?logout=1">
+
+            <i class="bi bi-box-arrow-right"></i>
+
+            Déconnexion
+
+        </a>
+
+    </nav>
+
+</aside>
+
+
+
+<!-- CONTENU -->
+
+<main class="main">
+
 
     <div class="header">
 
-        <div>
-            <h1>🛒 Achats / Stock</h1>
+        <h1>
+            📦 Achats / Stock
+        </h1>
 
-            <p>
-                Enregistrer les achats effectués pour LAMBEMAH GESTION
-            </p>
-        </div>
+        <p>
+            Enregistre ici les marchandises achetées et leur stock.
+        </p>
 
     </div>
+
 
 
     <!-- MESSAGE -->
@@ -613,31 +768,32 @@ body {
     <?php if ($message !== ""): ?>
 
         <div class="alert
-            <?php echo $type_message === "success"
-                ? "alert-success"
-                : "alert-danger"; ?>">
+        <?= $type === "success"
+            ? "alert-success"
+            : "alert-danger" ?>">
 
-            <?php echo $message; ?>
+            <?= htmlspecialchars($message) ?>
 
         </div>
 
     <?php endif; ?>
 
 
-    <!-- =================================================
-         STATISTIQUES
-         ================================================= -->
 
-    <div class="cards">
+    <!-- STATISTIQUES -->
+
+    <div class="stats">
 
         <div class="card-stat">
 
             <div class="label">
-                Total des achats
+                Total des achats enregistrés
             </div>
 
             <div class="value">
-                <?php echo argent($total_achats); ?>
+
+                <?= argent($total_achat) ?>
+
             </div>
 
         </div>
@@ -646,24 +802,11 @@ body {
         <div class="card-stat">
 
             <div class="label">
-                Nombre d'achats
+                Fonctionnement
             </div>
 
             <div class="value">
-                <?php echo $nombre_achats; ?>
-            </div>
-
-        </div>
-
-
-        <div class="card-stat">
-
-            <div class="label">
-                Stock total
-            </div>
-
-            <div class="value">
-                <?php echo $stock_total; ?> articles
+                Prix × Quantité
             </div>
 
         </div>
@@ -671,34 +814,66 @@ body {
     </div>
 
 
-    <!-- =================================================
-         FORMULAIRE ACHAT
-         ================================================= -->
+
+    <!-- NOUVEL ARTICLE -->
 
     <div class="box">
 
-        <h2>
+        <div class="box-title">
+
             <i class="bi bi-plus-circle"></i>
-            Enregistrer un achat
-        </h2>
+
+            Ajouter un nouvel article
+
+        </div>
+
+
+        <p class="help">
+
+            À utiliser uniquement si l'article
+            n'existe pas encore dans le stock.
+
+        </p>
+
 
         <form method="POST">
 
+            <input
+                type="hidden"
+                name="ajouter_produit"
+                value="1">
+
+
             <div class="row g-3">
+
 
                 <div class="col-md-4">
 
                     <label class="form-label">
-                        Désignation du produit
+                        Désignation
                     </label>
 
                     <input
                         type="text"
-                        name="designation"
-                        id="designation"
+                        name="nom"
                         class="form-control"
-                        placeholder="Ex : T-shirt"
+                        placeholder="Ex : T-shirt grand"
                         required>
+
+                </div>
+
+
+                <div class="col-md-3">
+
+                    <label class="form-label">
+                        Catégorie
+                    </label>
+
+                    <input
+                        type="text"
+                        name="categorie"
+                        class="form-control"
+                        placeholder="Ex : Vêtement">
 
                 </div>
 
@@ -712,12 +887,10 @@ body {
                     <input
                         type="number"
                         name="prix_achat"
-                        id="prix_achat"
                         class="form-control"
-                        min="1"
+                        min="0"
                         step="1"
-                        placeholder="Ex : 15000"
-                        oninput="calculerMontant()"
+                        placeholder="Ex : 30000"
                         required>
 
                 </div>
@@ -726,7 +899,160 @@ body {
                 <div class="col-md-2">
 
                     <label class="form-label">
-                        Quantité achetée
+                        Quantité
+                    </label>
+
+                    <input
+                        type="number"
+                        name="stock_initial"
+                        class="form-control"
+                        min="0"
+                        value="0"
+                        required>
+
+                </div>
+
+
+                <div class="col-md-6">
+
+                    <label class="form-label">
+                        Fournisseur
+                    </label>
+
+                    <input
+                        type="text"
+                        name="fournisseur"
+                        class="form-control"
+                        placeholder="Nom du fournisseur">
+
+                </div>
+
+            </div>
+
+
+            <button
+                type="submit"
+                class="btn btn-primary mt-3">
+
+                <i class="bi bi-save"></i>
+
+                Ajouter l'article
+
+            </button>
+
+        </form>
+
+    </div>
+
+
+
+    <!-- ENREGISTRER ACHAT -->
+
+    <div class="box">
+
+        <div class="box-title">
+
+            <i class="bi bi-cart-plus"></i>
+
+            Enregistrer un achat
+
+        </div>
+
+
+        <form
+            method="POST"
+            id="achatForm">
+
+
+            <input
+                type="hidden"
+                name="ajouter_entree"
+                value="1">
+
+
+            <div class="row g-3">
+
+
+                <div class="col-md-5">
+
+                    <label class="form-label">
+                        Désignation
+                    </label>
+
+                    <select
+                        name="produit_id"
+                        id="produit"
+                        class="form-select"
+                        required>
+
+                        <option value="">
+                            Choisir un article
+                        </option>
+
+
+                        <?php if ($produits): ?>
+
+                            <?php while ($p = $produits->fetch_assoc()): ?>
+
+                                <option
+                                    value="<?= (int)$p["id"] ?>">
+
+                                    <?= htmlspecialchars($p["nom"]) ?>
+
+                                    — Stock :
+                                    <?= (int)$p["stock"] ?>
+
+                                </option>
+
+                            <?php endwhile; ?>
+
+                        <?php endif; ?>
+
+                    </select>
+
+                </div>
+
+
+                <div class="col-md-3">
+
+                    <label class="form-label">
+                        Fournisseur
+                    </label>
+
+                    <input
+                        type="text"
+                        name="fournisseur"
+                        class="form-control"
+                        placeholder="Nom fournisseur"
+                        required>
+
+                </div>
+
+
+                <div class="col-md-2">
+
+                    <label class="form-label">
+                        Prix d'achat
+                    </label>
+
+                    <input
+                        type="number"
+                        name="prix"
+                        id="prix"
+                        class="form-control"
+                        min="0"
+                        step="1"
+                        placeholder="5000"
+                        oninput="calculerAchat()"
+                        required>
+
+                </div>
+
+
+                <div class="col-md-2">
+
+                    <label class="form-label">
+                        Quantité
                     </label>
 
                     <input
@@ -736,122 +1062,154 @@ body {
                         class="form-control"
                         min="1"
                         value="1"
-                        oninput="calculerMontant()"
+                        oninput="calculerAchat()"
                         required>
 
                 </div>
 
-
-                <div class="col-md-3">
-
-                    <label class="form-label">
-                        Montant total
-                    </label>
-
-                    <input
-                        type="text"
-                        id="montant_affiche"
-                        class="form-control"
-                        value="0 FG"
-                        readonly>
-
-                </div>
+            </div>
 
 
-                <div class="col-12">
+            <!-- MONTANT -->
 
-                    <label class="form-label">
-                        Note / détail
-                    </label>
+            <div class="amount">
 
-                    <input
-                        type="text"
-                        name="description"
-                        class="form-control"
-                        placeholder="Ex : Achat effectué aujourd'hui">
+                MONTANT DE L'ACHAT :
 
-                </div>
-
-
-                <div class="col-12">
-
-                    <button
-                        type="submit"
-                        name="ajouter_achat"
-                        class="btn-main">
-
-                        <i class="bi bi-check-circle"></i>
-                        Enregistrer l'achat
-
-                    </button>
-
-                </div>
+                <span id="montant">
+                    0 FG
+                </span>
 
             </div>
+
+
+            <!-- NOTE -->
+
+            <div class="mt-3">
+
+                <label class="form-label">
+                    Note (facultatif)
+                </label>
+
+                <input
+                    type="text"
+                    name="description"
+                    class="form-control"
+                    placeholder="Ex : achat livré">
+
+            </div>
+
+
+            <button
+                type="submit"
+                class="btn btn-primary mt-3">
+
+                <i class="bi bi-check-circle"></i>
+
+                Enregistrer l'achat
+
+            </button>
 
         </form>
 
     </div>
 
 
-    <!-- =================================================
-         STOCK ACTUEL
-         ================================================= -->
+
+    <!-- STOCK ACTUEL -->
 
     <div class="box">
 
-        <h2>
+        <div class="box-title">
+
             <i class="bi bi-box-seam"></i>
-            Produits en stock
-        </h2>
+
+            Stock actuel
+
+        </div>
+
 
         <div class="table-responsive">
 
-            <table class="table table-hover align-middle">
+            <table>
 
                 <thead>
 
                     <tr>
-                        <th>Désignation</th>
-                        <th>Prix d'achat</th>
-                        <th>Stock</th>
+
+                        <th>
+                            Désignation
+                        </th>
+
+                        <th>
+                            Catégorie
+                        </th>
+
+                        <th>
+                            Prix d'achat
+                        </th>
+
+                        <th>
+                            Stock
+                        </th>
+
                     </tr>
 
                 </thead>
 
+
                 <tbody>
 
-                <?php if ($produits && $produits->num_rows > 0): ?>
+                <?php
 
-                    <?php while ($p = $produits->fetch_assoc()): ?>
+                /*
+                 * Recharger les produits pour
+                 * afficher le stock actuel.
+                 */
+
+                $liste_stock = $conn->query(
+                    "SELECT
+                        nom,
+                        categorie,
+                        prix_achat,
+                        stock
+                     FROM produits
+                     ORDER BY nom ASC"
+                );
+
+                ?>
+
+
+                <?php if ($liste_stock && $liste_stock->num_rows > 0): ?>
+
+
+                    <?php while ($p = $liste_stock->fetch_assoc()): ?>
 
                         <tr>
 
                             <td>
                                 <strong>
-                                    <?php
-                                    echo htmlspecialchars($p["nom"]);
-                                    ?>
+                                    <?= htmlspecialchars($p["nom"]) ?>
                                 </strong>
                             </td>
 
                             <td>
-                                <?php
-                                echo argent($p["prix_achat"]);
-                                ?>
+                                <?= htmlspecialchars(
+                                    $p["categorie"] ?? ""
+                                ) ?>
+                            </td>
+
+                            <td>
+                                <?= argent(
+                                    $p["prix_achat"]
+                                ) ?>
                             </td>
 
                             <td>
 
-                                <span class="badge-stock">
-
-                                    <?php
-                                    echo (int)$p["stock"];
-                                    ?>
-
-                                    article(s)
-
-                                </span>
+                                <strong>
+                                    <?= (int)$p["stock"] ?>
+                                </strong>
 
                             </td>
 
@@ -859,12 +1217,18 @@ body {
 
                     <?php endwhile; ?>
 
+
                 <?php else: ?>
 
                     <tr>
-                        <td colspan="3" class="text-center text-muted">
-                            Aucun produit enregistré.
+
+                        <td colspan="4"
+                            class="text-center">
+
+                            Aucun article enregistré.
+
                         </td>
+
                     </tr>
 
                 <?php endif; ?>
@@ -878,94 +1242,192 @@ body {
     </div>
 
 
-    <!-- =================================================
-         HISTORIQUE ACHATS
-         ================================================= -->
+
+    <!-- HISTORIQUE ACHATS -->
 
     <div class="box">
 
-        <h2>
+        <div class="box-title">
+
             <i class="bi bi-clock-history"></i>
-            Historique des achats
-        </h2>
+
+            Derniers achats
+
+        </div>
+
 
         <div class="table-responsive">
 
-            <table class="table table-hover align-middle">
+            <table>
 
                 <thead>
 
                     <tr>
-                        <th>Désignation</th>
-                        <th>Prix achat</th>
-                        <th>Quantité</th>
-                        <th>Montant</th>
-                        <th>Date</th>
+
+                        <th>
+                            Désignation
+                        </th>
+
+                        <th>
+                            Fournisseur
+                        </th>
+
+                        <th>
+                            Prix unitaire
+                        </th>
+
+                        <th>
+                            Quantité
+                        </th>
+
+                        <th>
+                            Montant
+                        </th>
+
+                        <th>
+                            Date
+                        </th>
+
                     </tr>
 
                 </thead>
 
+
                 <tbody>
 
-                <?php if ($achats && $achats->num_rows > 0): ?>
 
-                    <?php while ($a = $achats->fetch_assoc()): ?>
+                <?php if ($mouvements && $mouvements->num_rows > 0): ?>
+
+
+                    <?php while ($m = $mouvements->fetch_assoc()): ?>
+
 
                         <?php
-                        $montant_achat =
-                            (float)$a["prix"] *
-                            (int)$a["quantite"];
+
+                        $description =
+                            $m["description"] ?? "";
+
+                        $fournisseur =
+                            "Non renseigné";
+
+
+                        /*
+                         * Récupérer le fournisseur
+                         * depuis la description.
+                         */
+
+                        if (
+                            strpos(
+                                $description,
+                                "Fournisseur : "
+                            ) !== false
+                        ) {
+
+                            $parties =
+                                explode(
+                                    " | ",
+                                    $description
+                                );
+
+
+                            foreach ($parties as $partie) {
+
+                                if (
+                                    strpos(
+                                        $partie,
+                                        "Fournisseur : "
+                                    ) === 0
+                                ) {
+
+                                    $fournisseur =
+                                        str_replace(
+                                            "Fournisseur : ",
+                                            "",
+                                            $partie
+                                        );
+
+                                }
+
+                            }
+
+                        }
+
                         ?>
+
 
                         <tr>
 
                             <td>
-                                <?php
-                                echo htmlspecialchars(
-                                    $a["produit_nom"] ?? "Produit"
-                                );
-                                ?>
+
+                                <?= htmlspecialchars(
+                                    $m["produit_nom"]
+                                    ?? "Article supprimé"
+                                ) ?>
+
                             </td>
 
-                            <td>
-                                <?php
-                                echo argent($a["prix"]);
-                                ?>
-                            </td>
 
                             <td>
-                                <?php
-                                echo (int)$a["quantite"];
-                                ?>
+
+                                <?= htmlspecialchars(
+                                    $fournisseur
+                                ) ?>
+
                             </td>
 
+
                             <td>
+
+                                <?= argent(
+                                    $m["prix"]
+                                ) ?>
+
+                            </td>
+
+
+                            <td>
+
+                                <?= (int)$m["quantite"] ?>
+
+                            </td>
+
+
+                            <td>
+
                                 <strong>
-                                    <?php
-                                    echo argent($montant_achat);
-                                    ?>
+
+                                    <?= argent(
+                                        $m["prix"]
+                                        * $m["quantite"]
+                                    ) ?>
+
                                 </strong>
+
                             </td>
 
+
                             <td>
-                                <?php
-                                echo htmlspecialchars(
-                                    $a["date_mouvement"]
-                                );
-                                ?>
+
+                                <?= htmlspecialchars(
+                                    $m["date_mouvement"]
+                                ) ?>
+
                             </td>
 
                         </tr>
 
+
                     <?php endwhile; ?>
 
+
                 <?php else: ?>
+
 
                     <tr>
 
                         <td
-                            colspan="5"
-                            class="text-center text-muted">
+                            colspan="6"
+                            class="text-center">
 
                             Aucun achat enregistré.
 
@@ -973,7 +1435,9 @@ body {
 
                     </tr>
 
+
                 <?php endif; ?>
+
 
                 </tbody>
 
@@ -983,59 +1447,43 @@ body {
 
     </div>
 
-</div>
 
+</main>
 
-<!-- =====================================================
-     MENU MOBILE
-     ===================================================== -->
-
-<div class="mobile-nav">
-
-    <a href="index.php">
-        <i class="bi bi-house"></i>
-        Accueil
-    </a>
-
-    <a href="produits.php">
-        <i class="bi bi-cart"></i>
-        Achats
-    </a>
-
-    <a href="ventes.php">
-        <i class="bi bi-cash-stack"></i>
-        Ventes
-    </a>
-
-    <a href="prestations.php">
-        <i class="bi bi-printer"></i>
-        DTF
-    </a>
-
-</div>
 
 
 <script>
 
-function calculerMontant() {
+/* =========================================================
+   CALCUL AUTOMATIQUE ACHAT
+   ========================================================= */
 
-    const prix =
+function calculerAchat() {
+
+    let prix =
         parseFloat(
-            document.getElementById("prix_achat").value
+            document.getElementById("prix").value
         ) || 0;
 
-    const quantite =
+
+    let quantite =
         parseInt(
             document.getElementById("quantite").value
         ) || 0;
 
-    const montant = prix * quantite;
 
-    document.getElementById("montant_affiche").value =
-        montant.toLocaleString("fr-FR") + " FG";
+    let montant =
+        prix * quantite;
+
+
+    document.getElementById("montant").textContent =
+        new Intl.NumberFormat("fr-FR")
+        .format(montant) + " FG";
 }
 
 </script>
 
+
 </body>
+
 </html>
