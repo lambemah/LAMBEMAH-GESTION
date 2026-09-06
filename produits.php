@@ -6,24 +6,34 @@ require_once "config.php";
 
 
 /* =========================================================
-   VÉRIFICATION CONNEXION
+   CONNEXION
    ========================================================= */
 
 if (!isset($_SESSION["id"])) {
-
     header("Location: index.php");
-
     exit;
 }
-
 
 $nom  = $_SESSION["nom"] ?? "Utilisateur";
 $role = $_SESSION["role"] ?? "lecture";
 
-
 $message = "";
 $type = "";
 
+
+/* =========================================================
+   FONCTION ARGENT
+   ========================================================= */
+
+function argent($montant)
+{
+    return number_format(
+        (float)$montant,
+        0,
+        ",",
+        " "
+    ) . " FG";
+}
 
 
 /* =========================================================
@@ -35,49 +45,38 @@ if (
     && isset($_POST["ajouter_produit"])
 ) {
 
-    $designation =
-        trim($_POST["nom"] ?? "");
-
-    $categorie =
-        trim($_POST["categorie"] ?? "");
-
-    $prix_achat =
-        (float)($_POST["prix_achat"] ?? 0);
-
-    $stock_initial =
-        (int)($_POST["stock_initial"] ?? 0);
-
-    $fournisseur =
-        trim($_POST["fournisseur"] ?? "");
+    $designation = trim($_POST["nom"] ?? "");
+    $categorie = trim($_POST["categorie"] ?? "");
+    $prix_achat = (float)($_POST["prix_achat"] ?? 0);
+    $stock_initial = (int)($_POST["stock_initial"] ?? 0);
+    $fournisseur = trim($_POST["fournisseur"] ?? "");
 
 
-    /* Vérifications */
+    /* -------------------------
+       VÉRIFICATIONS
+       ------------------------- */
 
     if ($designation === "") {
 
-        $message =
-            "La désignation est obligatoire.";
-
+        $message = "La désignation est obligatoire.";
         $type = "error";
 
     } elseif ($prix_achat < 0) {
 
-        $message =
-            "Le prix d'achat est incorrect.";
-
+        $message = "Le prix d'achat est incorrect.";
         $type = "error";
 
     } elseif ($stock_initial < 0) {
 
-        $message =
-            "La quantité ne peut pas être négative.";
-
+        $message = "La quantité ne peut pas être négative.";
         $type = "error";
 
     } else {
 
 
-        /* Vérifier si l'article existe déjà */
+        /* -------------------------
+           VÉRIFIER SI EXISTE
+           ------------------------- */
 
         $stmt = $conn->prepare(
             "SELECT id
@@ -86,12 +85,9 @@ if (
              LIMIT 1"
         );
 
-
         if (!$stmt) {
 
-            $message =
-                "Erreur lors de la vérification de l'article.";
-
+            $message = "Erreur : " . $conn->error;
             $type = "error";
 
         } else {
@@ -103,10 +99,9 @@ if (
 
             $stmt->execute();
 
-            $existe =
-                $stmt
-                ->get_result()
-                ->num_rows > 0;
+            $result = $stmt->get_result();
+
+            $existe = $result->num_rows > 0;
 
             $stmt->close();
 
@@ -114,16 +109,16 @@ if (
             if ($existe) {
 
                 $message =
-                    "Cet article existe déjà. Utilise plutôt « Enregistrer un achat ».";
+                    "Cet article existe déjà. Utilise « Enregistrer un achat ».";
 
                 $type = "error";
 
             } else {
 
 
-                /* =========================================
+                /* -------------------------
                    TRANSACTION
-                   ========================================= */
+                   ------------------------- */
 
                 $conn->begin_transaction();
 
@@ -131,12 +126,28 @@ if (
                 try {
 
 
-                    /*
-                     * prix_vente reste à 0.
-                     *
-                     * Cette page sert uniquement
-                     * aux ACHATS et au STOCK.
-                     */
+                    /* =====================================
+                       PROCHAIN ID PRODUIT
+                       ===================================== */
+
+                    $result_id = $conn->query(
+                        "SELECT COALESCE(MAX(id), 0) + 1 AS prochain_id
+                         FROM produits"
+                    );
+
+                    if (!$result_id) {
+                        throw new Exception($conn->error);
+                    }
+
+                    $row_id = $result_id->fetch_assoc();
+
+                    $produit_id =
+                        (int)$row_id["prochain_id"];
+
+
+                    /* =====================================
+                       PRIX DE VENTE
+                       ===================================== */
 
                     $prix_vente = 0;
 
@@ -148,26 +159,24 @@ if (
                     $stmt = $conn->prepare(
                         "INSERT INTO produits
                         (
+                            id,
                             nom,
                             categorie,
                             prix_achat,
                             prix_vente,
                             stock
                         )
-                        VALUES (?, ?, ?, ?, ?)"
+                        VALUES (?, ?, ?, ?, ?, ?)"
                     );
 
-
                     if (!$stmt) {
-
-                        throw new Exception(
-                            $conn->error
-                        );
+                        throw new Exception($conn->error);
                     }
 
 
                     $stmt->bind_param(
-                        "ssddi",
+                        "issddi",
+                        $produit_id,
                         $designation,
                         $categorie,
                         $prix_achat,
@@ -177,19 +186,11 @@ if (
 
 
                     if (!$stmt->execute()) {
-
-                        throw new Exception(
-                            $stmt->error
-                        );
+                        throw new Exception($stmt->error);
                     }
 
 
-                    $produit_id =
-                        $stmt->insert_id;
-
-
                     $stmt->close();
-
 
 
                     /* =====================================
@@ -214,9 +215,34 @@ if (
                             $designation;
 
 
+                        /* -------------------------
+                           PROCHAIN ID MOUVEMENT
+                           ------------------------- */
+
+                        $result_mvt_id = $conn->query(
+                            "SELECT COALESCE(MAX(id), 0) + 1 AS prochain_id
+                             FROM mouvements"
+                        );
+
+                        if (!$result_mvt_id) {
+                            throw new Exception($conn->error);
+                        }
+
+                        $row_mvt_id =
+                            $result_mvt_id->fetch_assoc();
+
+                        $mouvement_id =
+                            (int)$row_mvt_id["prochain_id"];
+
+
+                        /* -------------------------
+                           INSERTION MOUVEMENT
+                           ------------------------- */
+
                         $stmt = $conn->prepare(
                             "INSERT INTO mouvements
                             (
+                                id,
                                 produit_id,
                                 type,
                                 quantite,
@@ -225,28 +251,18 @@ if (
                                 date_mouvement
                             )
                             VALUES
-                            (?, 'ENTREE', ?, ?, ?, ?)"
+                            (?, ?, 'ENTREE', ?, ?, ?, ?)"
                         );
 
 
                         if (!$stmt) {
-
-                            throw new Exception(
-                                $conn->error
-                            );
+                            throw new Exception($conn->error);
                         }
 
 
-                        /*
-                         * i = produit_id
-                         * i = quantite
-                         * d = prix
-                         * s = description
-                         * s = date
-                         */
-
                         $stmt->bind_param(
-                            "iidss",
+                            "iiidss",
+                            $mouvement_id,
                             $produit_id,
                             $stock_initial,
                             $prix_achat,
@@ -256,16 +272,12 @@ if (
 
 
                         if (!$stmt->execute()) {
-
-                            throw new Exception(
-                                $stmt->error
-                            );
+                            throw new Exception($stmt->error);
                         }
 
 
                         $stmt->close();
                     }
-
 
 
                     /* =====================================
@@ -278,19 +290,16 @@ if (
                     $message =
                         "Article ajouté avec succès.";
 
+
                     if ($stock_initial > 0) {
 
                         $message .=
                             " Achat enregistré : " .
                             $stock_initial .
                             " article(s) × " .
-                            number_format(
-                                $prix_achat,
-                                0,
-                                ",",
-                                " "
-                            ) .
-                            " FG.";
+                            argent($prix_achat) .
+                            ".";
+
                     }
 
 
@@ -303,11 +312,6 @@ if (
                     $conn->rollback();
 
 
-                    /*
-                     * Afficher l'erreur réelle afin
-                     * de faciliter le dépannage.
-                     */
-
                     $message =
                         "Impossible d'ajouter l'article : " .
                         $e->getMessage();
@@ -318,7 +322,6 @@ if (
         }
     }
 }
-
 
 
 /* =========================================================
@@ -346,11 +349,13 @@ if (
         trim($_POST["description"] ?? "");
 
 
+    /* -------------------------
+       VÉRIFICATIONS
+       ------------------------- */
+
     if ($produit_id <= 0) {
 
-        $message =
-            "Choisis un article.";
-
+        $message = "Choisis un article.";
         $type = "error";
 
     } elseif ($quantite <= 0) {
@@ -376,14 +381,12 @@ if (
         try {
 
 
-            /* =========================================
-               VÉRIFIER LE PRODUIT
-               ========================================= */
+            /* =====================================
+               VÉRIFIER PRODUIT
+               ===================================== */
 
             $stmt = $conn->prepare(
-                "SELECT
-                    id,
-                    nom
+                "SELECT id, nom
                  FROM produits
                  WHERE id = ?
                  LIMIT 1"
@@ -391,10 +394,7 @@ if (
 
 
             if (!$stmt) {
-
-                throw new Exception(
-                    $conn->error
-                );
+                throw new Exception($conn->error);
             }
 
 
@@ -424,19 +424,17 @@ if (
             }
 
 
-
-            /* =========================================
+            /* =====================================
                DATE
-               ========================================= */
+               ===================================== */
 
             $date_achat =
                 date("Y-m-d H:i:s");
 
 
-
-            /* =========================================
+            /* =====================================
                DESCRIPTION
-               ========================================= */
+               ===================================== */
 
             $description =
                 "ACHAT | Fournisseur : " .
@@ -457,14 +455,37 @@ if (
             }
 
 
+            /* =====================================
+               PROCHAIN ID MOUVEMENT
+               ===================================== */
 
-            /* =========================================
+            $result_mvt_id = $conn->query(
+                "SELECT COALESCE(MAX(id), 0) + 1 AS prochain_id
+                 FROM mouvements"
+            );
+
+
+            if (!$result_mvt_id) {
+                throw new Exception($conn->error);
+            }
+
+
+            $row_mvt_id =
+                $result_mvt_id->fetch_assoc();
+
+
+            $mouvement_id =
+                (int)$row_mvt_id["prochain_id"];
+
+
+            /* =====================================
                ENREGISTRER LE MOUVEMENT
-               ========================================= */
+               ===================================== */
 
             $stmt = $conn->prepare(
                 "INSERT INTO mouvements
                 (
+                    id,
                     produit_id,
                     type,
                     quantite,
@@ -473,20 +494,18 @@ if (
                     date_mouvement
                 )
                 VALUES
-                (?, 'ENTREE', ?, ?, ?, ?)"
+                (?, ?, 'ENTREE', ?, ?, ?, ?)"
             );
 
 
             if (!$stmt) {
-
-                throw new Exception(
-                    $conn->error
-                );
+                throw new Exception($conn->error);
             }
 
 
             $stmt->bind_param(
-                "iidss",
+                "iiidss",
+                $mouvement_id,
                 $produit_id,
                 $quantite,
                 $prix,
@@ -496,20 +515,16 @@ if (
 
 
             if (!$stmt->execute()) {
-
-                throw new Exception(
-                    $stmt->error
-                );
+                throw new Exception($stmt->error);
             }
 
 
             $stmt->close();
 
 
-
-            /* =========================================
+            /* =====================================
                AUGMENTER LE STOCK
-               ========================================= */
+               ===================================== */
 
             $stmt = $conn->prepare(
                 "UPDATE produits
@@ -521,10 +536,7 @@ if (
 
 
             if (!$stmt) {
-
-                throw new Exception(
-                    $conn->error
-                );
+                throw new Exception($conn->error);
             }
 
 
@@ -537,20 +549,16 @@ if (
 
 
             if (!$stmt->execute()) {
-
-                throw new Exception(
-                    $stmt->error
-                );
+                throw new Exception($stmt->error);
             }
 
 
             $stmt->close();
 
 
-
-            /* =========================================
+            /* =====================================
                VALIDER
-               ========================================= */
+               ===================================== */
 
             $conn->commit();
 
@@ -560,16 +568,9 @@ if (
 
 
             $message =
-                "Achat enregistré le " .
-                date("d/m/Y à H:i") .
-                " : " .
-                number_format(
-                    $montant_achat,
-                    0,
-                    ",",
-                    " "
-                ) .
-                " FG.";
+                "Achat enregistré : " .
+                argent($montant_achat) .
+                ".";
 
 
             $type = "success";
@@ -591,7 +592,6 @@ if (
 }
 
 
-
 /* =========================================================
    PRODUITS POUR LE FORMULAIRE
    ========================================================= */
@@ -605,7 +605,6 @@ $produits =
          FROM produits
          ORDER BY nom ASC"
     );
-
 
 
 /* =========================================================
@@ -628,7 +627,6 @@ $mouvements =
          ORDER BY m.id DESC
          LIMIT 50"
     );
-
 
 
 /* =========================================================
@@ -659,23 +657,6 @@ if ($result) {
         (float)$data["total"];
 }
 
-
-
-/* =========================================================
-   FORMAT ARGENT
-   ========================================================= */
-
-function argent($montant)
-{
-
-    return number_format(
-        (float)$montant,
-        0,
-        ",",
-        " "
-    ) . " FG";
-}
-
 ?>
 
 <!DOCTYPE html>
@@ -698,21 +679,21 @@ function argent($montant)
 
 <link
 href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
-rel="stylesheet">
+rel="stylesheet"
+>
 
 
 <link
 href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css"
-rel="stylesheet">
+rel="stylesheet"
+>
 
 
 <style>
 
-
 * {
     box-sizing: border-box;
 }
-
 
 body {
 
@@ -724,7 +705,6 @@ body {
 
     color: #172033;
 }
-
 
 
 /* =========================================================
@@ -748,7 +728,6 @@ body {
     color: white;
 
     padding: 22px 15px;
-
 }
 
 
@@ -759,7 +738,6 @@ body {
     font-weight: bold;
 
     padding: 5px 12px 25px;
-
 }
 
 
@@ -772,7 +750,6 @@ body {
     color: #9cc8ff;
 
     margin-top: 4px;
-
 }
 
 
@@ -795,7 +772,6 @@ body {
     margin-bottom: 5px;
 
     font-size: 14px;
-
 }
 
 
@@ -805,9 +781,7 @@ body {
     background: #1d4ed8;
 
     color: white;
-
 }
-
 
 
 /* =========================================================
@@ -819,14 +793,12 @@ body {
     margin-left: 245px;
 
     padding: 25px;
-
 }
 
 
 .header {
 
     margin-bottom: 25px;
-
 }
 
 
@@ -835,7 +807,6 @@ body {
     margin: 0;
 
     font-size: 28px;
-
 }
 
 
@@ -844,9 +815,7 @@ body {
     margin-top: 5px;
 
     color: #667085;
-
 }
-
 
 
 /* =========================================================
@@ -857,13 +826,11 @@ body {
 
     display: grid;
 
-    grid-template-columns:
-        repeat(2, 1fr);
+    grid-template-columns: repeat(2, 1fr);
 
     gap: 15px;
 
     margin-bottom: 20px;
-
 }
 
 
@@ -876,9 +843,7 @@ body {
     padding: 20px;
 
     box-shadow:
-        0 3px 15px
-        rgba(0,0,0,.05);
-
+        0 3px 15px rgba(0,0,0,.05);
 }
 
 
@@ -887,7 +852,6 @@ body {
     color: #667085;
 
     font-size: 13px;
-
 }
 
 
@@ -898,9 +862,7 @@ body {
     font-weight: bold;
 
     margin-top: 6px;
-
 }
-
 
 
 /* =========================================================
@@ -918,9 +880,7 @@ body {
     margin-bottom: 20px;
 
     box-shadow:
-        0 3px 15px
-        rgba(0,0,0,.05);
-
+        0 3px 15px rgba(0,0,0,.05);
 }
 
 
@@ -931,9 +891,15 @@ body {
     font-weight: bold;
 
     margin-bottom: 18px;
-
 }
 
+
+.help {
+
+    color: #667085;
+
+    font-size: 12px;
+}
 
 
 /* =========================================================
@@ -946,18 +912,7 @@ body {
     min-height: 45px;
 
     border-radius: 9px;
-
 }
-
-
-.help {
-
-    color: #667085;
-
-    font-size: 12px;
-
-}
-
 
 
 /* =========================================================
@@ -975,9 +930,7 @@ body {
     margin-top: 15px;
 
     font-weight: bold;
-
 }
-
 
 
 /* =========================================================
@@ -987,14 +940,12 @@ body {
 .table-responsive {
 
     overflow-x: auto;
-
 }
 
 
 table {
 
     width: 100%;
-
 }
 
 
@@ -1007,7 +958,6 @@ th {
     font-size: 12px;
 
     white-space: nowrap;
-
 }
 
 
@@ -1015,15 +965,12 @@ td {
 
     padding: 12px;
 
-    border-top:
-        1px solid #edf0f4;
+    border-top: 1px solid #edf0f4;
 
     font-size: 13px;
 
     white-space: nowrap;
-
 }
-
 
 
 /* =========================================================
@@ -1031,7 +978,6 @@ td {
    ========================================================= */
 
 @media(max-width: 768px) {
-
 
     .sidebar {
 
@@ -1042,15 +988,12 @@ td {
         height: auto;
 
         padding: 10px;
-
     }
 
 
     .logo {
 
-        padding:
-            5px 8px 10px;
-
+        padding: 5px 8px 10px;
     }
 
 
@@ -1058,11 +1001,9 @@ td {
 
         display: grid;
 
-        grid-template-columns:
-            repeat(4, 1fr);
+        grid-template-columns: repeat(4, 1fr);
 
         gap: 4px;
-
     }
 
 
@@ -1079,14 +1020,12 @@ td {
         font-size: 10px;
 
         padding: 7px 3px;
-
     }
 
 
     .menu a i {
 
         font-size: 17px;
-
     }
 
 
@@ -1095,28 +1034,24 @@ td {
         margin-left: 0;
 
         padding: 14px;
-
     }
 
 
     .header h1 {
 
         font-size: 23px;
-
     }
 
 
     .stats {
 
         grid-template-columns: 1fr;
-
     }
 
 
     .box {
 
         padding: 15px;
-
     }
 
 }
@@ -1129,13 +1064,11 @@ td {
 <body>
 
 
-
 <!-- =======================================================
      MENU
      ======================================================= -->
 
 <aside class="sidebar">
-
 
     <div class="logo">
 
@@ -1146,7 +1079,6 @@ td {
         </small>
 
     </div>
-
 
 
     <nav class="menu">
@@ -1161,7 +1093,6 @@ td {
         </a>
 
 
-
         <a
             href="produits.php"
             class="active"
@@ -1174,7 +1105,6 @@ td {
         </a>
 
 
-
         <a href="ventes.php">
 
             <i class="bi bi-cart-check"></i>
@@ -1182,7 +1112,6 @@ td {
             Ventes
 
         </a>
-
 
 
         <a href="prestations.php">
@@ -1194,7 +1123,6 @@ td {
         </a>
 
 
-
         <a href="recettes.php">
 
             <i class="bi bi-cash-coin"></i>
@@ -1202,7 +1130,6 @@ td {
             Recettes
 
         </a>
-
 
 
         <a href="depenses.php">
@@ -1214,7 +1141,6 @@ td {
         </a>
 
 
-
         <a href="statistiques.php">
 
             <i class="bi bi-bar-chart"></i>
@@ -1222,7 +1148,6 @@ td {
             Statistiques
 
         </a>
-
 
 
         <?php if ($role === "admin"): ?>
@@ -1236,7 +1161,6 @@ td {
             </a>
 
         <?php endif; ?>
-
 
 
         <a href="index.php?logout=1">
@@ -1253,13 +1177,11 @@ td {
 </aside>
 
 
-
 <!-- =======================================================
      CONTENU
      ======================================================= -->
 
 <main class="main">
-
 
 
     <div class="header">
@@ -1274,7 +1196,6 @@ td {
         </p>
 
     </div>
-
 
 
     <!-- =====================================================
@@ -1295,7 +1216,6 @@ td {
         </div>
 
     <?php endif; ?>
-
 
 
     <!-- =====================================================
@@ -1323,7 +1243,6 @@ td {
         </div>
 
 
-
         <div class="card-stat">
 
             <div class="label">
@@ -1345,7 +1264,6 @@ td {
     </div>
 
 
-
     <!-- =====================================================
          AJOUTER NOUVEL ARTICLE
          ===================================================== -->
@@ -1362,14 +1280,12 @@ td {
         </div>
 
 
-
         <p class="help">
 
             À utiliser uniquement si l'article
             n'existe pas encore dans le stock.
 
         </p>
-
 
 
         <form method="POST">
@@ -1382,20 +1298,14 @@ td {
             >
 
 
-
             <div class="row g-3">
 
-
-                <!-- DÉSIGNATION -->
 
                 <div class="col-md-4">
 
                     <label class="form-label">
-
                         Désignation
-
                     </label>
-
 
                     <input
                         type="text"
@@ -1408,17 +1318,11 @@ td {
                 </div>
 
 
-
-                <!-- CATÉGORIE -->
-
                 <div class="col-md-3">
 
                     <label class="form-label">
-
                         Catégorie
-
                     </label>
-
 
                     <input
                         type="text"
@@ -1430,17 +1334,11 @@ td {
                 </div>
 
 
-
-                <!-- PRIX -->
-
                 <div class="col-md-3">
 
                     <label class="form-label">
-
                         Prix d'achat unitaire
-
                     </label>
-
 
                     <input
                         type="number"
@@ -1455,17 +1353,11 @@ td {
                 </div>
 
 
-
-                <!-- QUANTITÉ -->
-
                 <div class="col-md-2">
 
                     <label class="form-label">
-
                         Quantité
-
                     </label>
-
 
                     <input
                         type="number"
@@ -1479,17 +1371,11 @@ td {
                 </div>
 
 
-
-                <!-- FOURNISSEUR -->
-
                 <div class="col-md-6">
 
                     <label class="form-label">
-
                         Fournisseur
-
                     </label>
-
 
                     <input
                         type="text"
@@ -1502,7 +1388,6 @@ td {
 
 
             </div>
-
 
 
             <button
@@ -1522,7 +1407,6 @@ td {
     </div>
 
 
-
     <!-- =====================================================
          ENREGISTRER UN ACHAT
          ===================================================== -->
@@ -1539,7 +1423,6 @@ td {
         </div>
 
 
-
         <form method="POST">
 
 
@@ -1550,20 +1433,14 @@ td {
             >
 
 
-
             <div class="row g-3">
 
-
-                <!-- ARTICLE -->
 
                 <div class="col-md-5">
 
                     <label class="form-label">
-
                         Désignation
-
                     </label>
-
 
                     <select
                         name="produit_id"
@@ -1572,20 +1449,16 @@ td {
                     >
 
                         <option value="">
-
                             Choisir un article
-
                         </option>
 
 
                         <?php if ($produits): ?>
 
-
                             <?php while (
                                 $p =
                                 $produits->fetch_assoc()
                             ): ?>
-
 
                                 <option
                                     value="<?= (int)$p["id"] ?>"
@@ -1601,29 +1474,20 @@ td {
 
                                 </option>
 
-
                             <?php endwhile; ?>
 
-
                         <?php endif; ?>
-
 
                     </select>
 
                 </div>
 
 
-
-                <!-- FOURNISSEUR -->
-
                 <div class="col-md-3">
 
                     <label class="form-label">
-
                         Fournisseur
-
                     </label>
-
 
                     <input
                         type="text"
@@ -1636,17 +1500,11 @@ td {
                 </div>
 
 
-
-                <!-- PRIX -->
-
                 <div class="col-md-2">
 
                     <label class="form-label">
-
                         Prix d'achat
-
                     </label>
-
 
                     <input
                         type="number"
@@ -1663,17 +1521,11 @@ td {
                 </div>
 
 
-
-                <!-- QUANTITÉ -->
-
                 <div class="col-md-2">
 
                     <label class="form-label">
-
                         Quantité
-
                     </label>
-
 
                     <input
                         type="number"
@@ -1692,33 +1544,22 @@ td {
             </div>
 
 
-
-            <!-- MONTANT -->
-
             <div class="amount">
 
                 MONTANT DE L'ACHAT :
 
                 <span id="montant">
-
                     0 FG
-
                 </span>
 
             </div>
 
 
-
-            <!-- NOTE -->
-
             <div class="mt-3">
 
                 <label class="form-label">
-
                     Note (facultatif)
-
                 </label>
-
 
                 <input
                     type="text"
@@ -1728,7 +1569,6 @@ td {
                 >
 
             </div>
-
 
 
             <button
@@ -1748,7 +1588,6 @@ td {
     </div>
 
 
-
     <!-- =====================================================
          STOCK ACTUEL
          ===================================================== -->
@@ -1765,37 +1604,25 @@ td {
         </div>
 
 
-
         <div class="table-responsive">
 
-
             <table>
-
 
                 <thead>
 
                     <tr>
 
-                        <th>
-                            Désignation
-                        </th>
+                        <th>Désignation</th>
 
-                        <th>
-                            Catégorie
-                        </th>
+                        <th>Catégorie</th>
 
-                        <th>
-                            Prix d'achat
-                        </th>
+                        <th>Prix d'achat</th>
 
-                        <th>
-                            Stock
-                        </th>
+                        <th>Stock</th>
 
                     </tr>
 
                 </thead>
-
 
 
                 <tbody>
@@ -1828,9 +1655,7 @@ td {
                         $liste_stock->fetch_assoc()
                     ): ?>
 
-
                         <tr>
-
 
                             <td>
 
@@ -1845,7 +1670,6 @@ td {
                             </td>
 
 
-
                             <td>
 
                                 <?= htmlspecialchars(
@@ -1855,7 +1679,6 @@ td {
                             </td>
 
 
-
                             <td>
 
                                 <?= argent(
@@ -1863,7 +1686,6 @@ td {
                                 ) ?>
 
                             </td>
-
 
 
                             <td>
@@ -1876,15 +1698,12 @@ td {
 
                             </td>
 
-
                         </tr>
-
 
                     <?php endwhile; ?>
 
 
                 <?php else: ?>
-
 
                     <tr>
 
@@ -1895,344 +1714,4 @@ td {
 
                             Aucun article enregistré.
 
-                        </td>
-
-                    </tr>
-
-
-                <?php endif; ?>
-
-
-                </tbody>
-
-
-            </table>
-
-
-        </div>
-
-    </div>
-
-
-
-    <!-- =====================================================
-         HISTORIQUE DES ACHATS
-         ===================================================== -->
-
-    <div class="box">
-
-
-        <div class="box-title">
-
-            <i class="bi bi-clock-history"></i>
-
-            Derniers achats
-
-        </div>
-
-
-
-        <div class="table-responsive">
-
-
-            <table>
-
-
-                <thead>
-
-                    <tr>
-
-                        <th>
-                            Désignation
-                        </th>
-
-                        <th>
-                            Fournisseur
-                        </th>
-
-                        <th>
-                            Prix unitaire
-                        </th>
-
-                        <th>
-                            Quantité
-                        </th>
-
-                        <th>
-                            Montant
-                        </th>
-
-                        <th>
-                            Date
-                        </th>
-
-                    </tr>
-
-                </thead>
-
-
-
-                <tbody>
-
-
-                <?php if (
-                    $mouvements
-                    && $mouvements->num_rows > 0
-                ): ?>
-
-
-                    <?php while (
-                        $m =
-                        $mouvements->fetch_assoc()
-                    ): ?>
-
-
-                        <?php
-
-
-                        $description =
-                            $m["description"] ?? "";
-
-
-                        $fournisseur =
-                            "Non renseigné";
-
-
-                        if (
-                            strpos(
-                                $description,
-                                "Fournisseur : "
-                            ) !== false
-                        ) {
-
-
-                            $parties =
-                                explode(
-                                    " | ",
-                                    $description
-                                );
-
-
-                            foreach (
-                                $parties
-                                as $partie
-                            ) {
-
-
-                                if (
-                                    strpos(
-                                        $partie,
-                                        "Fournisseur : "
-                                    ) === 0
-                                ) {
-
-
-                                    $fournisseur =
-                                        str_replace(
-                                            "Fournisseur : ",
-                                            "",
-                                            $partie
-                                        );
-
-
-                                }
-
-                            }
-
-                        }
-
-
-                        ?>
-
-
-                        <tr>
-
-
-                            <td>
-
-                                <?= htmlspecialchars(
-                                    $m["produit_nom"]
-                                    ??
-                                    "Article supprimé"
-                                ) ?>
-
-                            </td>
-
-
-
-                            <td>
-
-                                <?= htmlspecialchars(
-                                    $fournisseur
-                                ) ?>
-
-                            </td>
-
-
-
-                            <td>
-
-                                <?= argent(
-                                    $m["prix"]
-                                ) ?>
-
-                            </td>
-
-
-
-                            <td>
-
-                                <?= (int)$m["quantite"] ?>
-
-                            </td>
-
-
-
-                            <td>
-
-                                <strong>
-
-                                    <?= argent(
-                                        $m["prix"]
-                                        *
-                                        $m["quantite"]
-                                    ) ?>
-
-                                </strong>
-
-                            </td>
-
-
-
-                            <td>
-
-                                <strong>
-
-
-                                    <?php
-
-                                    if (
-                                        !empty(
-                                            $m[
-                                                "date_mouvement"
-                                            ]
-                                        )
-                                    ) {
-
-
-                                        echo date(
-                                            "d/m/Y H:i",
-                                            strtotime(
-                                                $m[
-                                                    "date_mouvement"
-                                                ]
-                                            )
-                                        );
-
-
-                                    } else {
-
-
-                                        echo
-                                            "Date inconnue";
-
-
-                                    }
-
-                                    ?>
-
-
-                                </strong>
-
-                            </td>
-
-
-                        </tr>
-
-
-                    <?php endwhile; ?>
-
-
-                <?php else: ?>
-
-
-                    <tr>
-
-                        <td
-                            colspan="6"
-                            class="text-center"
-                        >
-
-                            Aucun achat enregistré.
-
-                        </td>
-
-                    </tr>
-
-
-                <?php endif; ?>
-
-
-                </tbody>
-
-
-            </table>
-
-
-        </div>
-
-    </div>
-
-
-</main>
-
-
-
-<script>
-
-
-/* =========================================================
-   CALCUL AUTOMATIQUE DE L'ACHAT
-   ========================================================= */
-
-function calculerAchat()
-{
-
-    let prix =
-        parseFloat(
-            document.getElementById(
-                "prix"
-            ).value
-        ) || 0;
-
-
-    let quantite =
-        parseInt(
-            document.getElementById(
-                "quantite"
-            ).value
-        ) || 0;
-
-
-    let montant =
-        prix * quantite;
-
-
-    document.getElementById(
-        "montant"
-    ).textContent =
-
-        new Intl.NumberFormat(
-            "fr-FR"
-        ).format(
-            montant
-        ) + " FG";
-}
-
-
-</script>
-
-
-</body>
-
-</html>
+                       
