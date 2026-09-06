@@ -14,51 +14,50 @@ $message = "";
 $type = "";
 
 /* =========================================================
-   ENREGISTRER UNE VENTE AVEC PLUSIEURS ARTICLES
+   ENREGISTRER UNE VENTE
    ========================================================= */
 if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["enregistrer_vente"])) {
+
+    $client = trim($_POST["client"] ?? "");
 
     $produits_ids = $_POST["produit_id"] ?? [];
     $quantites = $_POST["quantite"] ?? [];
     $prix_unitaires = $_POST["prix_unitaire"] ?? [];
 
+    if ($client === "") {
+        $client = "Client non renseigné";
+    }
+
+    $articles = [];
+    $total_vente = 0;
+    $erreur = "";
+
     if (!is_array($produits_ids) || count($produits_ids) === 0) {
-        $message = "Ajoutez au moins un article.";
-        $type = "error";
+        $erreur = "Ajoutez au moins un article.";
     } else {
 
-        $articles = [];
-        $total_vente = 0;
-        $erreur = "";
-
-        /* Vérification de chaque ligne */
         for ($i = 0; $i < count($produits_ids); $i++) {
 
             $produit_id = (int)($produits_ids[$i] ?? 0);
             $quantite = (int)($quantites[$i] ?? 0);
             $prix_unitaire = (float)($prix_unitaires[$i] ?? 0);
 
-            /* Ignorer une ligne complètement vide */
-            if ($produit_id <= 0 && $quantite <= 0 && $prix_unitaire <= 0) {
-                continue;
-            }
-
             if ($produit_id <= 0) {
-                $erreur = "Veuillez sélectionner un article à la ligne " . ($i + 1) . ".";
+                $erreur = "Veuillez sélectionner l'article " . ($i + 1) . ".";
                 break;
             }
 
             if ($quantite <= 0) {
-                $erreur = "La quantité doit être supérieure à zéro à la ligne " . ($i + 1) . ".";
+                $erreur = "La quantité de l'article " . ($i + 1) . " est incorrecte.";
                 break;
             }
 
             if ($prix_unitaire <= 0) {
-                $erreur = "Veuillez indiquer le prix de vente à la ligne " . ($i + 1) . ".";
+                $erreur = "Veuillez saisir le PVU de l'article " . ($i + 1) . ".";
                 break;
             }
 
-            /* Vérifier le produit et son stock */
+            /* Vérifier le produit */
             $stmt = $conn->prepare(
                 "SELECT id, nom, stock
                  FROM produits
@@ -80,21 +79,20 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["enregistrer_vente"]))
             $stmt->close();
 
             if (!$produit) {
-                $erreur = "Produit introuvable à la ligne " . ($i + 1) . ".";
+                $erreur = "Produit introuvable.";
                 break;
             }
 
             if ((int)$produit["stock"] < $quantite) {
                 $erreur =
-                    "Stock insuffisant pour « " .
+                    "Stock insuffisant pour " .
                     $produit["nom"] .
-                    " ». Disponible : " .
-                    (int)$produit["stock"] .
-                    ".";
+                    ". Stock disponible : " .
+                    $produit["stock"];
                 break;
             }
 
-            $montant = $quantite * $prix_unitaire;
+            $montant = $prix_unitaire * $quantite;
 
             $articles[] = [
                 "produit_id" => $produit_id,
@@ -106,102 +104,104 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["enregistrer_vente"]))
 
             $total_vente += $montant;
         }
+    }
 
-        if (count($articles) === 0 && $erreur === "") {
-            $erreur = "Ajoutez au moins un article.";
-        }
+    /* =====================================================
+       ENREGISTREMENT
+       ===================================================== */
 
-        /* Enregistrement */
-        if ($erreur !== "") {
+    if ($erreur !== "") {
 
-            $message = $erreur;
-            $type = "error";
+        $message = $erreur;
+        $type = "error";
 
-        } else {
+    } elseif (count($articles) === 0) {
 
-            $conn->begin_transaction();
+        $message = "Ajoutez au moins un article.";
+        $type = "error";
 
-            try {
+    } else {
 
-                foreach ($articles as $article) {
+        $conn->begin_transaction();
 
-                    /* Description de la ligne */
-                    $description =
-                        "Vente - " .
-                        $article["nom"] .
-                        " | Quantité : " .
-                        $article["quantite"];
+        try {
 
-                    /* Enregistrer la vente */
-                    $stmt = $conn->prepare(
-                        "INSERT INTO ventes
-                        (produit_id, quantite, prix_unitaire, montant, description)
-                        VALUES (?, ?, ?, ?, ?)"
-                    );
+            foreach ($articles as $article) {
 
-                    if (!$stmt) {
-                        throw new Exception("Impossible de préparer la vente.");
-                    }
+                $description =
+                    "Client : " . $client .
+                    " | Vente de " . $article["nom"] .
+                    " | Quantité : " . $article["quantite"];
 
-                    $stmt->bind_param(
-                        "iidds",
-                        $article["produit_id"],
-                        $article["quantite"],
-                        $article["prix_unitaire"],
-                        $article["montant"],
-                        $description
-                    );
+                /* Enregistrer la vente */
+                $stmt = $conn->prepare(
+                    "INSERT INTO ventes
+                    (produit_id, quantite, prix_unitaire, montant, description)
+                    VALUES (?, ?, ?, ?, ?)"
+                );
 
-                    if (!$stmt->execute()) {
-                        $stmt->close();
-                        throw new Exception("Impossible d'enregistrer la vente.");
-                    }
-
-                    $stmt->close();
-
-                    /* Diminuer le stock */
-                    $stmt = $conn->prepare(
-                        "UPDATE produits
-                         SET stock = stock - ?
-                         WHERE id = ?
-                         AND stock >= ?"
-                    );
-
-                    if (!$stmt) {
-                        throw new Exception("Impossible de préparer la mise à jour du stock.");
-                    }
-
-                    $stmt->bind_param(
-                        "iii",
-                        $article["quantite"],
-                        $article["produit_id"],
-                        $article["quantite"]
-                    );
-
-                    if (!$stmt->execute() || $stmt->affected_rows !== 1) {
-                        $stmt->close();
-                        throw new Exception("Impossible de mettre à jour le stock.");
-                    }
-
-                    $stmt->close();
+                if (!$stmt) {
+                    throw new Exception("Erreur vente.");
                 }
 
-                $conn->commit();
+                $stmt->bind_param(
+                    "iidds",
+                    $article["produit_id"],
+                    $article["quantite"],
+                    $article["prix_unitaire"],
+                    $article["montant"],
+                    $description
+                );
 
-                $message =
-                    "Vente enregistrée avec succès ! Total : " .
-                    number_format($total_vente, 0, ",", " ") .
-                    " FG";
+                if (!$stmt->execute()) {
+                    throw new Exception("Impossible d'enregistrer la vente.");
+                }
 
-                $type = "success";
+                $stmt->close();
 
-            } catch (Exception $e) {
+                /* Diminuer le stock */
+                $stmt = $conn->prepare(
+                    "UPDATE produits
+                     SET stock = stock - ?
+                     WHERE id = ?
+                     AND stock >= ?"
+                );
 
-                $conn->rollback();
+                if (!$stmt) {
+                    throw new Exception("Erreur stock.");
+                }
 
-                $message = "La vente n'a pas pu être enregistrée.";
-                $type = "error";
+                $stmt->bind_param(
+                    "iii",
+                    $article["quantite"],
+                    $article["produit_id"],
+                    $article["quantite"]
+                );
+
+                if (!$stmt->execute() || $stmt->affected_rows !== 1) {
+                    throw new Exception("Impossible de mettre à jour le stock.");
+                }
+
+                $stmt->close();
             }
+
+            $conn->commit();
+
+            $message =
+                "Vente enregistrée pour " .
+                $client .
+                " — Total : " .
+                number_format($total_vente, 0, ",", " ") .
+                " FG";
+
+            $type = "success";
+
+        } catch (Exception $e) {
+
+            $conn->rollback();
+
+            $message = "La vente n'a pas pu être enregistrée.";
+            $type = "error";
         }
     }
 }
@@ -222,6 +222,7 @@ $result = $conn->query(
 );
 
 if ($result) {
+
     $data = $result->fetch_assoc();
 
     $total_ventes = (float)$data["total"];
@@ -230,23 +231,22 @@ if ($result) {
 
 
 /* =========================================================
-   PRODUITS DISPONIBLES
+   PRODUITS
    ========================================================= */
 
 $produits = $conn->query(
     "SELECT
         id,
         nom,
-        categorie,
-        stock,
-        prix_achat
+        stock
      FROM produits
+     WHERE stock > 0
      ORDER BY nom ASC"
 );
 
 
 /* =========================================================
-   HISTORIQUE DES VENTES
+   HISTORIQUE
    ========================================================= */
 
 $ventes = $conn->query(
@@ -259,39 +259,43 @@ $ventes = $conn->query(
         v.date_vente,
         p.nom AS produit_nom
      FROM ventes v
-     LEFT JOIN produits p ON p.id = v.produit_id
+     LEFT JOIN produits p
+        ON p.id = v.produit_id
      ORDER BY v.id DESC
      LIMIT 50"
 );
 
 
-/* =========================================================
-   FORMAT ARGENT
-   ========================================================= */
-
 function argent($montant) {
-    return number_format((float)$montant, 0, ",", " ") . " FG";
+    return number_format(
+        (float)$montant,
+        0,
+        ",",
+        " "
+    ) . " FG";
 }
 
 ?>
+
 <!DOCTYPE html>
 <html lang="fr">
+
 <head>
 
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
 
 <title>Ventes - LAMBEMAH GESTION</title>
 
 <link
 href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
-rel="stylesheet"
->
+rel="stylesheet">
 
 <link
 href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css"
-rel="stylesheet"
->
+rel="stylesheet">
 
 <style>
 
@@ -306,18 +310,15 @@ body {
     color: #172033;
 }
 
-/* SIDEBAR */
-
 .sidebar {
     position: fixed;
     left: 0;
     top: 0;
-    bottom: 0;
     width: 245px;
+    height: 100vh;
     background: #102a43;
     color: white;
     padding: 22px 15px;
-    overflow-y: auto;
 }
 
 .logo {
@@ -328,7 +329,7 @@ body {
 
 .logo small {
     display: block;
-    font-size: 12px;
+    font-size: 11px;
     color: #9cc8ff;
     margin-top: 4px;
 }
@@ -336,10 +337,10 @@ body {
 .menu a {
     display: flex;
     align-items: center;
-    gap: 11px;
+    gap: 10px;
     color: #dbeafe;
     text-decoration: none;
-    padding: 12px 13px;
+    padding: 12px;
     border-radius: 10px;
     margin-bottom: 5px;
     font-size: 14px;
@@ -351,32 +352,24 @@ body {
     color: white;
 }
 
-/* CONTENU */
-
 .main {
     margin-left: 245px;
     padding: 25px;
 }
 
 .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
     margin-bottom: 25px;
 }
 
 .header h1 {
     margin: 0;
-    font-size: 27px;
-    font-weight: 700;
+    font-size: 28px;
 }
 
 .header p {
     margin: 5px 0 0;
     color: #667085;
 }
-
-/* CARDS */
 
 .stats {
     display: grid;
@@ -387,43 +380,28 @@ body {
 
 .card-stat {
     background: white;
-    border-radius: 16px;
+    border-radius: 15px;
     padding: 20px;
-    box-shadow: 0 4px 15px rgba(0,0,0,.05);
+    box-shadow: 0 3px 15px rgba(0,0,0,.05);
 }
 
-.card-stat .icon {
-    width: 42px;
-    height: 42px;
-    background: #e8f1ff;
-    color: #1d4ed8;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 12px;
-    font-size: 20px;
-    margin-bottom: 12px;
-}
-
-.card-stat .label {
+.label {
     color: #667085;
     font-size: 13px;
 }
 
-.card-stat .value {
-    font-size: 23px;
+.value {
+    font-size: 24px;
     font-weight: bold;
-    margin-top: 4px;
+    margin-top: 6px;
 }
-
-/* FORMULAIRE */
 
 .box {
     background: white;
-    border-radius: 16px;
+    border-radius: 15px;
     padding: 20px;
-    box-shadow: 0 4px 15px rgba(0,0,0,.05);
     margin-bottom: 20px;
+    box-shadow: 0 3px 15px rgba(0,0,0,.05);
 }
 
 .box-title {
@@ -432,24 +410,18 @@ body {
     margin-bottom: 18px;
 }
 
-.article-line {
-    border: 1px solid #e1e7ef;
-    border-radius: 13px;
+.article {
+    background: #f8fafc;
+    border: 1px solid #e3e8ef;
+    border-radius: 12px;
     padding: 15px;
     margin-bottom: 12px;
-    background: #fbfcfe;
 }
 
-.line-number {
-    font-weight: bold;
+.article-title {
     color: #1d4ed8;
-    margin-bottom: 10px;
-}
-
-label {
-    font-size: 13px;
-    font-weight: 600;
-    margin-bottom: 6px;
+    font-weight: bold;
+    margin-bottom: 12px;
 }
 
 .form-control,
@@ -458,38 +430,29 @@ label {
     border-radius: 9px;
 }
 
-.total-line {
+.total {
     background: #eef5ff;
     border-radius: 12px;
     padding: 15px;
+    margin-top: 15px;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-top: 15px;
 }
 
-.total-line strong {
-    color: #1d4ed8;
+.total strong {
     font-size: 21px;
-}
-
-/* TABLE */
-
-.table-responsive {
-    overflow-x: auto;
+    color: #1d4ed8;
 }
 
 table {
     width: 100%;
-    border-collapse: collapse;
 }
 
 th {
     background: #f5f7fa;
-    color: #667085;
-    font-size: 12px;
     padding: 12px;
-    white-space: nowrap;
+    font-size: 12px;
 }
 
 td {
@@ -498,21 +461,7 @@ td {
     font-size: 13px;
 }
 
-.badge-stock {
-    background: #e9f7ef;
-    color: #18864b;
-    padding: 5px 9px;
-    border-radius: 20px;
-    font-size: 11px;
-}
-
-.alert {
-    border-radius: 12px;
-}
-
-/* MOBILE */
-
-@media (max-width: 768px) {
+@media(max-width: 768px) {
 
     .sidebar {
         position: static;
@@ -528,16 +477,16 @@ td {
     .menu {
         display: grid;
         grid-template-columns: repeat(4, 1fr);
-        gap: 5px;
+        gap: 4px;
     }
 
     .menu a {
         justify-content: center;
         flex-direction: column;
         gap: 3px;
-        padding: 8px 4px;
-        font-size: 10px;
         text-align: center;
+        font-size: 10px;
+        padding: 7px 3px;
     }
 
     .menu a i {
@@ -547,10 +496,7 @@ td {
     .main {
         margin-left: 0;
         padding: 14px;
-    }
-
-    .header {
-        display: block;
+        padding-bottom: 30px;
     }
 
     .header h1 {
@@ -565,22 +511,15 @@ td {
         padding: 15px;
     }
 
-    .article-line {
-        padding: 12px;
-    }
-
-    .total-line {
+    .total {
         display: block;
     }
 
-    .total-line strong {
+    .total strong {
         display: block;
         margin-top: 5px;
     }
 
-    .btn {
-        width: 100%;
-    }
 }
 
 </style>
@@ -590,9 +529,7 @@ td {
 <body>
 
 
-<!-- =====================================================
-     MENU
-     ===================================================== -->
+<!-- MENU -->
 
 <aside class="sidebar">
 
@@ -610,7 +547,7 @@ td {
 
         <a href="produits.php">
             <i class="bi bi-box"></i>
-            Produits
+            Achats
         </a>
 
         <a href="ventes.php" class="active">
@@ -657,26 +594,30 @@ td {
 </aside>
 
 
-<!-- =====================================================
-     CONTENU
-     ===================================================== -->
+<!-- CONTENU -->
 
 <main class="main">
 
     <div class="header">
 
-        <div>
-            <h1>Ventes</h1>
-            <p>Enregistrer les ventes de plusieurs articles.</p>
-        </div>
+        <h1>💰 Ventes</h1>
+
+        <p>
+            Enregistrer une vente avec plusieurs articles.
+        </p>
 
     </div>
 
 
     <?php if ($message !== ""): ?>
 
-        <div class="alert <?= $type === "success" ? "alert-success" : "alert-danger" ?>">
+        <div class="alert
+        <?= $type === "success"
+            ? "alert-success"
+            : "alert-danger" ?>">
+
             <?= htmlspecialchars($message) ?>
+
         </div>
 
     <?php endif; ?>
@@ -687,10 +628,6 @@ td {
     <div class="stats">
 
         <div class="card-stat">
-
-            <div class="icon">
-                <i class="bi bi-cash-stack"></i>
-            </div>
 
             <div class="label">
                 Chiffre d'affaires
@@ -705,12 +642,8 @@ td {
 
         <div class="card-stat">
 
-            <div class="icon">
-                <i class="bi bi-receipt"></i>
-            </div>
-
             <div class="label">
-                Nombre de lignes de vente
+                Articles vendus
             </div>
 
             <div class="value">
@@ -722,9 +655,7 @@ td {
     </div>
 
 
-    <!-- =================================================
-         NOUVELLE VENTE
-         ================================================= -->
+    <!-- NOUVELLE VENTE -->
 
     <div class="box">
 
@@ -734,15 +665,37 @@ td {
         </div>
 
 
-        <form method="POST" id="venteForm">
+        <form method="POST">
 
-            <div id="articlesContainer">
 
-                <!-- PREMIÈRE LIGNE -->
+            <!-- CLIENT -->
 
-                <div class="article-line">
+            <div class="mb-4">
 
-                    <div class="line-number">
+                <label class="form-label">
+                    Nom du client
+                </label>
+
+                <input
+                    type="text"
+                    name="client"
+                    class="form-control"
+                    placeholder="Ex : Mohamed"
+                    required>
+
+            </div>
+
+
+            <!-- ARTICLES -->
+
+            <div id="articles">
+
+
+                <!-- ARTICLE 1 -->
+
+                <div class="article">
+
+                    <div class="article-title">
                         Article 1
                     </div>
 
@@ -750,17 +703,18 @@ td {
 
                         <div class="col-md-5">
 
-                            <label>Désignation</label>
+                            <label>
+                                Désignation
+                            </label>
 
                             <select
                                 name="produit_id[]"
-                                class="form-select produit-select"
-                                onchange="calculerTotal()"
-                                required
-                            >
+                                class="form-select"
+                                onchange="calculer()"
+                                required>
 
                                 <option value="">
-                                    — Choisir un article —
+                                    Choisir un article
                                 </option>
 
                                 <?php if ($produits): ?>
@@ -768,11 +722,12 @@ td {
                                     <?php while ($p = $produits->fetch_assoc()): ?>
 
                                         <option
-                                            value="<?= (int)$p["id"] ?>"
-                                            data-stock="<?= (int)$p["stock"] ?>"
-                                        >
+                                            value="<?= (int)$p["id"] ?>">
+
                                             <?= htmlspecialchars($p["nom"]) ?>
-                                            — Stock : <?= (int)$p["stock"] ?>
+                                            — Stock :
+                                            <?= (int)$p["stock"] ?>
+
                                         </option>
 
                                     <?php endwhile; ?>
@@ -784,65 +739,53 @@ td {
                         </div>
 
 
-                        <div class="col-md-2">
+                        <div class="col-md-3">
 
-                            <label>PVU</label>
+                            <label>
+                                PVU
+                            </label>
 
                             <input
                                 type="number"
                                 name="prix_unitaire[]"
-                                class="form-control prix-input"
+                                class="form-control prix"
                                 min="1"
-                                step="1"
-                                placeholder="Ex : 70 000"
-                                oninput="calculerTotal()"
-                                required
-                            >
+                                placeholder="Ex : 70000"
+                                oninput="calculer()"
+                                required>
 
                         </div>
 
 
                         <div class="col-md-2">
 
-                            <label>Quantité</label>
+                            <label>
+                                Quantité
+                            </label>
 
                             <input
                                 type="number"
                                 name="quantite[]"
-                                class="form-control quantite-input"
+                                class="form-control quantite"
                                 min="1"
                                 value="1"
-                                oninput="calculerTotal()"
-                                required
-                            >
+                                oninput="calculer()"
+                                required>
 
                         </div>
 
 
                         <div class="col-md-2">
 
-                            <label>Montant</label>
+                            <label>
+                                Montant
+                            </label>
 
                             <input
                                 type="text"
-                                class="form-control montant-input"
+                                class="form-control montant"
                                 value="0 FG"
-                                readonly
-                            >
-
-                        </div>
-
-
-                        <div class="col-md-1 d-flex align-items-end">
-
-                            <button
-                                type="button"
-                                class="btn btn-outline-danger supprimer-btn"
-                                onclick="supprimerArticle(this)"
-                                style="display:none;"
-                            >
-                                <i class="bi bi-trash"></i>
-                            </button>
+                                readonly>
 
                         </div>
 
@@ -853,25 +796,26 @@ td {
             </div>
 
 
-            <!-- AJOUT ARTICLE -->
+            <!-- BOUTON AJOUT -->
 
             <button
                 type="button"
-                class="btn btn-outline-primary mb-3"
-                onclick="ajouterArticle()"
-            >
+                class="btn btn-outline-primary"
+                onclick="ajouterArticle()">
+
                 <i class="bi bi-plus-circle"></i>
-                Ajouter un autre article
+                Ajouter un article
+
             </button>
 
 
             <!-- TOTAL -->
 
-            <div class="total-line">
+            <div class="total">
 
-                <span>
-                    <strong>Total de la vente</strong>
-                </span>
+                <strong>
+                    Total de la vente
+                </strong>
 
                 <strong id="totalGeneral">
                     0 FG
@@ -880,23 +824,25 @@ td {
             </div>
 
 
+            <!-- ENREGISTRER -->
+
             <button
                 type="submit"
                 name="enregistrer_vente"
-                class="btn btn-primary mt-3"
-            >
+                class="btn btn-primary mt-3">
+
                 <i class="bi bi-check-circle"></i>
                 Enregistrer la vente
+
             </button>
+
 
         </form>
 
     </div>
 
 
-    <!-- =================================================
-         HISTORIQUE
-         ================================================= -->
+    <!-- HISTORIQUE -->
 
     <div class="box">
 
@@ -905,18 +851,20 @@ td {
             Dernières ventes
         </div>
 
-        <div class="table-responsive">
+        <div style="overflow-x:auto;">
 
             <table>
 
                 <thead>
 
                     <tr>
-                        <th>Désignation</th>
+
+                        <th>Client / Désignation</th>
                         <th>PVU</th>
-                        <th>Quantité</th>
+                        <th>Qté</th>
                         <th>Montant</th>
                         <th>Date</th>
+
                     </tr>
 
                 </thead>
@@ -930,29 +878,33 @@ td {
                         <tr>
 
                             <td>
+                                <?= htmlspecialchars(
+                                    $v["description"]
+                                ) ?>
+                            </td>
+
+                            <td>
+                                <?= argent(
+                                    $v["prix_unitaire"]
+                                ) ?>
+                            </td>
+
+                            <td>
+                                <?= (int)$v["quantite"] ?>
+                            </td>
+
+                            <td>
                                 <strong>
-                                    <?= htmlspecialchars($v["produit_nom"] ?? "Article supprimé") ?>
+                                    <?= argent(
+                                        $v["montant"]
+                                    ) ?>
                                 </strong>
                             </td>
 
                             <td>
-                                <?= argent($v["prix_unitaire"]) ?>
-                            </td>
-
-                            <td>
-                                <span class="badge-stock">
-                                    <?= (int)$v["quantite"] ?>
-                                </span>
-                            </td>
-
-                            <td>
-                                <strong>
-                                    <?= argent($v["montant"]) ?>
-                                </strong>
-                            </td>
-
-                            <td>
-                                <?= htmlspecialchars($v["date_vente"]) ?>
+                                <?= htmlspecialchars(
+                                    $v["date_vente"]
+                                ) ?>
                             </td>
 
                         </tr>
@@ -962,9 +914,14 @@ td {
                 <?php else: ?>
 
                     <tr>
-                        <td colspan="5" class="text-center">
+
+                        <td colspan="5"
+                            class="text-center">
+
                             Aucune vente enregistrée.
+
                         </td>
+
                     </tr>
 
                 <?php endif; ?>
@@ -989,164 +946,86 @@ td {
 function ajouterArticle() {
 
     const container =
-        document.getElementById("articlesContainer");
+        document.getElementById("articles");
 
-    const premiereLigne =
-        container.querySelector(".article-line");
+    const premier =
+        container.querySelector(".article");
 
-    const nouvelleLigne =
-        premiereLigne.cloneNode(true);
+    const nouveau =
+        premier.cloneNode(true);
 
-    /* Réinitialiser les champs */
 
-    const select =
-        nouvelleLigne.querySelector(".produit-select");
+    /* Vider les champs */
 
-    const prix =
-        nouvelleLigne.querySelector(".prix-input");
+    nouveau.querySelector("select").value = "";
 
-    const quantite =
-        nouvelleLigne.querySelector(".quantite-input");
+    nouveau.querySelector(".prix").value = "";
 
-    const montant =
-        nouvelleLigne.querySelector(".montant-input");
+    nouveau.querySelector(".quantite").value = 1;
 
-    select.value = "";
-    prix.value = "";
-    quantite.value = "1";
-    montant.value = "0 FG";
+    nouveau.querySelector(".montant").value = "0 FG";
 
-    /* Numéro de ligne */
+
+    /* Numéro */
 
     const nombre =
-        container.querySelectorAll(".article-line").length + 1;
+        container.querySelectorAll(".article").length + 1;
 
-    nouvelleLigne.querySelector(".line-number").textContent =
+    nouveau.querySelector(".article-title").textContent =
         "Article " + nombre;
 
-    /* Afficher la corbeille */
 
-    const supprimer =
-        nouvelleLigne.querySelector(".supprimer-btn");
+    /* Ajouter */
 
-    supprimer.style.display = "block";
+    container.appendChild(nouveau);
 
-    container.appendChild(nouvelleLigne);
-
-    mettreAJourBoutons();
-
-    calculerTotal();
+    calculer();
 }
 
 
 /* =========================================================
-   SUPPRIMER UN ARTICLE
+   CALCUL
    ========================================================= */
 
-function supprimerArticle(bouton) {
+function calculer() {
 
-    const ligne =
-        bouton.closest(".article-line");
+    const articles =
+        document.querySelectorAll(".article");
 
-    const container =
-        document.getElementById("articlesContainer");
-
-    if (container.querySelectorAll(".article-line").length <= 1) {
-        return;
-    }
-
-    ligne.remove();
-
-    renumeroterArticles();
-
-    mettreAJourBoutons();
-
-    calculerTotal();
-}
+    let total = 0;
 
 
-/* =========================================================
-   RENUMÉROTATION
-   ========================================================= */
-
-function renumeroterArticles() {
-
-    const lignes =
-        document.querySelectorAll(".article-line");
-
-    lignes.forEach(function(ligne, index) {
-
-        ligne.querySelector(".line-number").textContent =
-            "Article " + (index + 1);
-
-    });
-}
-
-
-/* =========================================================
-   BOUTONS SUPPRIMER
-   ========================================================= */
-
-function mettreAJourBoutons() {
-
-    const lignes =
-        document.querySelectorAll(".article-line");
-
-    lignes.forEach(function(ligne) {
-
-        const bouton =
-            ligne.querySelector(".supprimer-btn");
-
-        if (lignes.length > 1) {
-            bouton.style.display = "block";
-        } else {
-            bouton.style.display = "none";
-        }
-
-    });
-}
-
-
-/* =========================================================
-   CALCUL TOTAL
-   ========================================================= */
-
-function calculerTotal() {
-
-    const lignes =
-        document.querySelectorAll(".article-line");
-
-    let totalGeneral = 0;
-
-    lignes.forEach(function(ligne) {
+    articles.forEach(function(article) {
 
         const prix =
             parseFloat(
-                ligne.querySelector(".prix-input").value
+                article.querySelector(".prix").value
             ) || 0;
 
         const quantite =
             parseInt(
-                ligne.querySelector(".quantite-input").value
+                article.querySelector(".quantite").value
             ) || 0;
 
         const montant =
             prix * quantite;
 
-        ligne.querySelector(".montant-input").value =
-            new Intl.NumberFormat("fr-FR").format(montant) +
-            " FG";
+        article.querySelector(".montant").value =
+            new Intl.NumberFormat("fr-FR")
+            .format(montant) + " FG";
 
-        totalGeneral += montant;
+        total += montant;
 
     });
 
+
     document.getElementById("totalGeneral").textContent =
-        new Intl.NumberFormat("fr-FR").format(totalGeneral) +
-        " FG";
+        new Intl.NumberFormat("fr-FR")
+        .format(total) + " FG";
 }
 
 </script>
+
 
 </body>
 </html>
