@@ -1714,4 +1714,274 @@ td {
 
                             Aucun article enregistré.
 
-                       
+                        </td>
+
+                    </tr>
+
+                <?php endif; ?>
+
+
+                </tbody>
+
+            </table>
+
+        </div>
+
+    </div>
+
+
+    <!-- =====================================================
+         HISTORIQUE DES ACHATS
+         ===================================================== -->
+
+    <div class="box">
+
+
+        <div class="box-title">
+
+            <i class="bi bi-clock-history"></i>
+
+            Derniers achats
+
+        </div>
+
+
+        <div class="table-responsive">
+
+            <table>
+
+                <thead>
+
+                    <tr>
+
+                        <th>Désignation</th>
+
+                        <th>Fournisseur</th>
+
+                        <th>Prix unitaire</th>
+
+                        <th>Quantité</th>
+
+                        <th>Montant</th>
+
+                        <th>Date</th>
+
+                    </tr>
+
+                </thead>
+
+
+                <tbody>
+
+
+                <?php if (
+                    $mouvements
+                    && $mouvements->num_rows > 0
+                ): ?>
+
+
+                    <?php while (
+                        $m =
+                        $mouvements->fetch_assoc()
+                    ): ?>
+
+
+                        <?php
+
+                        $description =
+                            $m["description"] ?? "";
+
+                        $fournisseur =
+                            "Non renseigné";
+
+
+                        $parties =
+                            explode(
+                                " | ",
+                                $description
+                            );
+
+
+                        foreach (
+                            $parties
+                            as $partie
+                        ) {
+
+                            if (
+                                strpos(
+                                    $partie,
+                                    "Fournisseur : "
+                                ) === 0
+                            ) {
+
+                                $fournisseur =
+                                    str_replace(
+                                        "Fournisseur : ",
+                                        "",
+                                        $partie
+                                    );
+
+                            }
+
+                        }
+
+                        ?>
+
+
+                        <tr>
+
+
+                            <td>
+
+                                <?= htmlspecialchars(
+                                    $m["produit_nom"]
+                                    ??
+                                    "Article supprimé"
+                                ) ?>
+
+                            </td>
+
+
+                            <td>
+
+                                <?= htmlspecialchars(
+                                    $fournisseur
+                                ) ?>
+
+                            </td>
+
+
+                            <td>
+
+                                <?= argent(
+                                    $m["prix"]
+                                ) ?>
+
+                            </td>
+
+
+                            <td>
+
+                                <?= (int)$m["quantite"] ?>
+
+                            </td>
+
+
+                            <td>
+
+                                <strong>
+
+                                    <?= argent(
+                                        $m["prix"]
+                                        *
+                                        $m["quantite"]
+                                    ) ?>
+
+                                </strong>
+
+                            </td>
+
+
+                            <td>
+
+                                <?php
+
+                                if (
+                                    !empty(
+                                        $m["date_mouvement"]
+                                    )
+                                ) {
+
+                                    echo date(
+                                        "d/m/Y H:i",
+                                        strtotime(
+                                            $m["date_mouvement"]
+                                        )
+                                    );
+
+                                } else {
+
+                                    echo "Date inconnue";
+
+                                }
+
+                                ?>
+
+                            </td>
+
+
+                        </tr>
+
+
+                    <?php endwhile; ?>
+
+
+                <?php else: ?>
+
+
+                    <tr>
+
+                        <td
+                            colspan="6"
+                            class="text-center"
+                        >
+
+                            Aucun achat enregistré.
+
+                        </td>
+
+                    </tr>
+
+
+                <?php endif; ?>
+
+
+                </tbody>
+
+            </table>
+
+        </div>
+
+    </div>
+
+
+</main>
+
+
+<script>
+
+/* =========================================================
+   CALCUL AUTOMATIQUE
+   ========================================================= */
+
+function calculerAchat()
+{
+
+    let prix =
+        parseFloat(
+            document.getElementById("prix").value
+        ) || 0;
+
+
+    let quantite =
+        parseInt(
+            document.getElementById("quantite").value
+        ) || 0;
+
+
+    let montant =
+        prix * quantite;
+
+
+    document.getElementById("montant").textContent =
+        new Intl.NumberFormat("fr-FR").format(montant)
+        + " FG";
+}
+
+
+</script>
+
+
+</body>
+
+</html>
