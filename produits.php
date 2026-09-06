@@ -69,8 +69,8 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_produit"])) {
             try {
 
                 /*
-                 * prix_vente reste à 0 dans la base
-                 * car cette page concerne uniquement les achats.
+                 * Le prix de vente reste à 0 dans la base.
+                 * Cette page concerne uniquement les achats.
                  */
 
                 $prix_vente = 0;
@@ -99,7 +99,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_produit"])) {
                 $stmt->close();
 
 
-                /* Enregistrer l'entrée initiale dans mouvements */
+                /* Enregistrer l'achat initial */
 
                 if ($stock_initial > 0) {
 
@@ -143,9 +143,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_produit"])) {
 
                 $conn->rollback();
 
-                $message =
-                    "Impossible d'ajouter l'article.";
-
+                $message = "Impossible d'ajouter l'article.";
                 $type = "error";
             }
         }
@@ -154,7 +152,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_produit"])) {
 
 
 /* =========================================================
-   ENREGISTRER UN ACHAT / ENTRÉE DE STOCK
+   ENREGISTRER UN ACHAT
    ========================================================= */
 
 if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_entree"])) {
@@ -164,7 +162,6 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_entree"])) {
     $prix = (float)($_POST["prix"] ?? 0);
     $fournisseur = trim($_POST["fournisseur"] ?? "");
     $description_note = trim($_POST["description"] ?? "");
-
 
     if ($produit_id <= 0) {
 
@@ -209,6 +206,11 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_entree"])) {
             }
 
 
+            /* Date automatique de l'achat */
+
+            $date_achat = date("Y-m-d H:i:s");
+
+
             /* Description */
 
             $description =
@@ -228,20 +230,24 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_entree"])) {
             }
 
 
-            /* Enregistrer le mouvement */
+            /*
+             * Enregistrer le mouvement
+             * avec la date automatique.
+             */
 
             $stmt = $conn->prepare(
                 "INSERT INTO mouvements
-                (produit_id, type, quantite, prix, description)
-                VALUES (?, 'ENTREE', ?, ?, ?)"
+                (produit_id, type, quantite, prix, description, date_mouvement)
+                VALUES (?, 'ENTREE', ?, ?, ?, ?)"
             );
 
             $stmt->bind_param(
-                "iids",
+                "iidds",
                 $produit_id,
                 $quantite,
                 $prix,
-                $description
+                $description,
+                $date_achat
             );
 
             if (!$stmt->execute()) {
@@ -280,7 +286,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["ajouter_entree"])) {
             $montant_achat = $quantite * $prix;
 
             $message =
-                "Achat enregistré : " .
+                "Achat enregistré le " .
+                date("d/m/Y à H:i") .
+                " : " .
                 number_format(
                     $montant_achat,
                     0,
@@ -959,9 +967,7 @@ td {
         </div>
 
 
-        <form
-            method="POST"
-            id="achatForm">
+        <form method="POST">
 
 
             <input
@@ -981,7 +987,6 @@ td {
 
                     <select
                         name="produit_id"
-                        id="produit"
                         class="form-select"
                         required>
 
@@ -1042,7 +1047,7 @@ td {
                         class="form-control"
                         min="0"
                         step="1"
-                        placeholder="5000"
+                        placeholder="Ex : 5000"
                         oninput="calculerAchat()"
                         required>
 
@@ -1162,11 +1167,6 @@ td {
 
                 <?php
 
-                /*
-                 * Recharger les produits pour
-                 * afficher le stock actuel.
-                 */
-
                 $liste_stock = $conn->query(
                     "SELECT
                         nom,
@@ -1188,22 +1188,33 @@ td {
                         <tr>
 
                             <td>
+
                                 <strong>
-                                    <?= htmlspecialchars($p["nom"]) ?>
+                                    <?= htmlspecialchars(
+                                        $p["nom"]
+                                    ) ?>
                                 </strong>
+
                             </td>
 
+
                             <td>
+
                                 <?= htmlspecialchars(
                                     $p["categorie"] ?? ""
                                 ) ?>
+
                             </td>
 
+
                             <td>
+
                                 <?= argent(
                                     $p["prix_achat"]
                                 ) ?>
+
                             </td>
+
 
                             <td>
 
@@ -1222,7 +1233,8 @@ td {
 
                     <tr>
 
-                        <td colspan="4"
+                        <td
+                            colspan="4"
                             class="text-center">
 
                             Aucun article enregistré.
@@ -1296,10 +1308,15 @@ td {
                 <tbody>
 
 
-                <?php if ($mouvements && $mouvements->num_rows > 0): ?>
+                <?php if (
+                    $mouvements &&
+                    $mouvements->num_rows > 0
+                ): ?>
 
 
-                    <?php while ($m = $mouvements->fetch_assoc()): ?>
+                    <?php while (
+                        $m = $mouvements->fetch_assoc()
+                    ): ?>
 
 
                         <?php
@@ -1310,11 +1327,6 @@ td {
                         $fournisseur =
                             "Non renseigné";
 
-
-                        /*
-                         * Récupérer le fournisseur
-                         * depuis la description.
-                         */
 
                         if (
                             strpos(
@@ -1408,9 +1420,32 @@ td {
 
                             <td>
 
-                                <?= htmlspecialchars(
-                                    $m["date_mouvement"]
-                                ) ?>
+                                <strong>
+
+                                    <?php
+
+                                    if (
+                                        !empty(
+                                            $m["date_mouvement"]
+                                        )
+                                    ) {
+
+                                        echo date(
+                                            "d/m/Y H:i",
+                                            strtotime(
+                                                $m["date_mouvement"]
+                                            )
+                                        );
+
+                                    } else {
+
+                                        echo "Date inconnue";
+
+                                    }
+
+                                    ?>
+
+                                </strong>
 
                             </td>
 
@@ -1455,7 +1490,7 @@ td {
 <script>
 
 /* =========================================================
-   CALCUL AUTOMATIQUE ACHAT
+   CALCUL AUTOMATIQUE
    ========================================================= */
 
 function calculerAchat() {
