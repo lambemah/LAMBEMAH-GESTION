@@ -2,676 +2,806 @@
 session_start();
 require_once "config.php";
 
-/*
-|--------------------------------------------------------------------------
-| LAMBEMAH GESTION - VENTES
-|--------------------------------------------------------------------------
-| - Vente avec plusieurs articles
-| - Client
-| - Prix de vente unitaire
-| - Quantité
-| - Payé / avance / reste
-| - Modification si aucun paiement
-| - Suppression uniquement si aucun paiement
-| - Annulation si paiement/avance déjà effectué
-| - Impression facture
-| - Correction automatique du stock
-| - Aucun ajout de table
-|--------------------------------------------------------------------------
-*/
+if (!isset($_SESSION["id"])) {
+    header("Location: index.php");
+    exit;
+}
+
+$nom  = $_SESSION["nom"] ?? "Utilisateur";
+$role = $_SESSION["role"] ?? "lecture";
 
 $message = "";
-$erreur = "";
+$type = "";
+
+function argent($n) {
+    return number_format((float)$n, 0, ",", " ") . " FG";
+}
 
 /* =========================================================
-   OUTILS
+   ID MANUEL
 ========================================================= */
-
-function prochainId($conn, $table)
-{
+function prochain_id($conn, $table) {
     $table = preg_replace('/[^a-zA-Z0-9_]/', '', $table);
 
-    $sql = "SELECT COALESCE(MAX(id), 0) + 1 AS prochain_id FROM `$table`";
-    $result = $conn->query($sql);
+    $r = $conn->query(
+        "SELECT COALESCE(MAX(id),0)+1 AS prochain_id FROM $table"
+    );
 
-    if (!$result) {
-        throw new Exception($conn->error);
-    }
-
-    $row = $result->fetch_assoc();
-    return (int)$row['prochain_id'];
-}
-
-function montantDepuisDescription($description)
-{
-    if (preg_match('/Payé\s*:\s*([0-9\s.,]+)/i', $description, $m)) {
-        $valeur = str_replace([' ', ','], ['', '.'], $m[1]);
-        return (float)$valeur;
-    }
-
-    return 0;
-}
-
-function estAnnulee($description)
-{
-    return stripos($description, "ANNULÉE") !== false ||
-           stripos($description, "ANNULEE") !== false;
-}
-
-function estPayeeOuAvance($description)
-{
-    return montantDepuisDescription($description) > 0;
-}
-
-function formatMoney($montant)
-{
-    return number_format((float)$montant, 0, ',', ' ') . " FG";
-}
-
-/* =========================================================
-   ANNULER UNE VENTE
-   On ne supprime pas la ligne.
-   On restaure le stock et on garde l'historique.
-========================================================= */
-
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["annuler_vente"])) {
-
-    $vente_id = (int)($_POST["vente_id"] ?? 0);
-
-    try {
-
-        $stmt = $conn->prepare("
-            SELECT *
-            FROM ventes
-            WHERE id = ?
-            LIMIT 1
-        ");
-
-        $stmt->bind_param("i", $vente_id);
-        $stmt->execute();
-
-        $result = $stmt->get_result();
-        $vente = $result->fetch_assoc();
-
-        if (!$vente) {
-            throw new Exception("Vente introuvable.");
-        }
-
-        if (estAnnulee($vente['description'])) {
-            throw new Exception("Cette vente est déjà annulée.");
-        }
-
-        /*
-         * On peut annuler même une facture avec avance,
-         * mais on ne la supprime jamais.
-         */
-
-        $conn->begin_transaction();
-
-        /* Restaurer le stock */
-        $stmtStock = $conn->prepare("
-            UPDATE produits
-            SET stock = stock + ?
-            WHERE id = ?
-        ");
-
-        $stmtStock->bind_param(
-            "ii",
-            $vente['quantite'],
-            $vente['produit_id']
-        );
-
-        if (!$stmtStock->execute()) {
-            throw new Exception($stmtStock->error);
-        }
-
-        /* Mouvement inverse */
-        $mouvement_id = prochainId($conn, "mouvements");
-        $date_mouvement = date("Y-m-d H:i:s");
-
-        $descriptionMouvement =
-            "ANNULATION VENTE #" . $vente_id .
-            " | Restauration stock | " .
-            $vente['description'];
-
-        $stmtMouvement = $conn->prepare("
-            INSERT INTO mouvements
-            (id, produit_id, type, quantite, prix, description, date_mouvement)
-            VALUES (?, ?, 'ENTREE', ?, ?, ?, ?)
-        ");
-
-        $stmtMouvement->bind_param(
-            "iiidss",
-            $mouvement_id,
-            $vente['produit_id'],
-            $vente['quantite'],
-            $vente['prix_unitaire'],
-            $descriptionMouvement,
-            $date_mouvement
-        );
-
-        if (!$stmtMouvement->execute()) {
-            throw new Exception($stmtMouvement->error);
-        }
-
-        /* Marquer la vente comme annulée */
-        $nouvelleDescription =
-            $vente['description'] .
-            " | ANNULÉE LE " . date("d/m/Y H:i");
-
-        $stmtUpdate = $conn->prepare("
-            UPDATE ventes
-            SET description = ?
-            WHERE id = ?
-        ");
-
-        $stmtUpdate->bind_param(
-            "si",
-            $nouvelleDescription,
-            $vente_id
-        );
-
-        if (!$stmtUpdate->execute()) {
-            throw new Exception($stmtUpdate->error);
-        }
-
-        $conn->commit();
-
-        $message = "La vente #".$vente_id." a été annulée et le stock a été restauré.";
-
-    } catch (Exception $e) {
-
-        if ($conn->errno) {
-            @$conn->rollback();
-        }
-
-        $erreur = "Impossible d'annuler la vente : " . $e->getMessage();
-    }
+    return (int)$r->fetch_assoc()["prochain_id"];
 }
 
 
 /* =========================================================
-   SUPPRIMER UNE VENTE
-   Autorisé uniquement si aucun paiement / avance.
+   MODIFIER UNE VENTE NON PAYÉE
 ========================================================= */
-
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["supprimer_vente"])) {
-
-    $vente_id = (int)($_POST["vente_id"] ?? 0);
-
-    try {
-
-        $stmt = $conn->prepare("
-            SELECT *
-            FROM ventes
-            WHERE id = ?
-            LIMIT 1
-        ");
-
-        $stmt->bind_param("i", $vente_id);
-        $stmt->execute();
-
-        $result = $stmt->get_result();
-        $vente = $result->fetch_assoc();
-
-        if (!$vente) {
-            throw new Exception("Vente introuvable.");
-        }
-
-        if (estAnnulee($vente['description'])) {
-            throw new Exception("Cette vente est déjà annulée.");
-        }
-
-        /* PROTECTION PAIEMENT */
-        if (estPayeeOuAvance($vente['description'])) {
-            throw new Exception(
-                "Cette facture ne peut pas être supprimée car un paiement ou une avance existe. Utilisez ANNULER."
-            );
-        }
-
-        $conn->begin_transaction();
-
-        /* Restaurer le stock */
-        $stmtStock = $conn->prepare("
-            UPDATE produits
-            SET stock = stock + ?
-            WHERE id = ?
-        ");
-
-        $stmtStock->bind_param(
-            "ii",
-            $vente['quantite'],
-            $vente['produit_id']
-        );
-
-        if (!$stmtStock->execute()) {
-            throw new Exception($stmtStock->error);
-        }
-
-        /* Mouvement inverse */
-        $mouvement_id = prochainId($conn, "mouvements");
-        $date_mouvement = date("Y-m-d H:i:s");
-
-        $descriptionMouvement =
-            "SUPPRESSION VENTE #" . $vente_id .
-            " | Stock restauré";
-
-        $stmtMouvement = $conn->prepare("
-            INSERT INTO mouvements
-            (id, produit_id, type, quantite, prix, description, date_mouvement)
-            VALUES (?, ?, 'ENTREE', ?, ?, ?, ?)
-        ");
-
-        $stmtMouvement->bind_param(
-            "iiidss",
-            $mouvement_id,
-            $vente['produit_id'],
-            $vente['quantite'],
-            $vente['prix_unitaire'],
-            $descriptionMouvement,
-            $date_mouvement
-        );
-
-        if (!$stmtMouvement->execute()) {
-            throw new Exception($stmtMouvement->error);
-        }
-
-        /* Supprimer la vente */
-        $stmtDelete = $conn->prepare("
-            DELETE FROM ventes
-            WHERE id = ?
-        ");
-
-        $stmtDelete->bind_param("i", $vente_id);
-
-        if (!$stmtDelete->execute()) {
-            throw new Exception($stmtDelete->error);
-        }
-
-        $conn->commit();
-
-        $message = "La vente #".$vente_id." a été supprimée.";
-
-    } catch (Exception $e) {
-
-        @$conn->rollback();
-
-        $erreur = "Impossible de supprimer la vente : " . $e->getMessage();
-    }
-}
-
-
-/* =========================================================
-   MODIFIER UNE VENTE
-   Autorisé uniquement si aucun paiement.
-========================================================= */
-
 if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["modifier_vente"])) {
 
     $vente_id = (int)($_POST["vente_id"] ?? 0);
-    $nouveau_produit = (int)($_POST["produit_id"] ?? 0);
-    $nouvelle_quantite = (int)($_POST["quantite"] ?? 0);
-    $nouveau_pvu = (float)($_POST["prix_unitaire"] ?? 0);
-    $nouveau_client = trim($_POST["client"] ?? "");
+    $produit_id = (int)($_POST["produit_id"] ?? 0);
+    $quantite = (int)($_POST["quantite"] ?? 0);
+    $prix_unitaire = (float)($_POST["prix_unitaire"] ?? 0);
+    $client = trim($_POST["client"] ?? "");
 
-    try {
+    if (
+        $vente_id <= 0 ||
+        $produit_id <= 0 ||
+        $quantite <= 0 ||
+        $prix_unitaire < 0
+    ) {
+        $message = "Les informations de la vente sont incorrectes.";
+        $type = "error";
+    } else {
 
-        if ($nouvelle_quantite <= 0) {
-            throw new Exception("La quantité doit être supérieure à zéro.");
-        }
-
-        if ($nouveau_pvu <= 0) {
-            throw new Exception("Le prix de vente doit être supérieur à zéro.");
-        }
-
-        $stmt = $conn->prepare("
-            SELECT *
-            FROM ventes
-            WHERE id = ?
-            LIMIT 1
-        ");
-
-        $stmt->bind_param("i", $vente_id);
-        $stmt->execute();
-
-        $result = $stmt->get_result();
-        $ancienne = $result->fetch_assoc();
-
-        if (!$ancienne) {
-            throw new Exception("Vente introuvable.");
-        }
-
-        if (estAnnulee($ancienne['description'])) {
-            throw new Exception("Une vente annulée ne peut pas être modifiée.");
-        }
-
-        if (estPayeeOuAvance($ancienne['description'])) {
-            throw new Exception(
-                "Cette facture est verrouillée car un paiement ou une avance existe."
-            );
-        }
-
-        /* Vérifier le produit */
-        $stmtProduit = $conn->prepare("
-            SELECT id, nom, stock
-            FROM produits
-            WHERE id = ?
-            LIMIT 1
-        ");
-
-        $stmtProduit->bind_param("i", $nouveau_produit);
-        $stmtProduit->execute();
-
-        $produit = $stmtProduit->get_result()->fetch_assoc();
-
-        if (!$produit) {
-            throw new Exception("Produit introuvable.");
-        }
-
-        /*
-         * L'ancien stock avait déjà été diminué.
-         * On le remet d'abord.
-         */
         $conn->begin_transaction();
 
-        $stmtStockAncien = $conn->prepare("
-            UPDATE produits
-            SET stock = stock + ?
-            WHERE id = ?
-        ");
+        try {
 
-        $stmtStockAncien->bind_param(
-            "ii",
-            $ancienne['quantite'],
-            $ancienne['produit_id']
-        );
-
-        if (!$stmtStockAncien->execute()) {
-            throw new Exception($stmtStockAncien->error);
-        }
-
-        /* Vérifier le nouveau stock */
-        $stmtStock = $conn->prepare("
-            SELECT stock
-            FROM produits
-            WHERE id = ?
-            LIMIT 1
-        ");
-
-        $stmtStock->bind_param("i", $nouveau_produit);
-        $stmtStock->execute();
-
-        $stockDisponible = (int)$stmtStock->get_result()->fetch_assoc()['stock'];
-
-        if ($stockDisponible < $nouvelle_quantite) {
-            throw new Exception(
-                "Stock insuffisant. Disponible : " . $stockDisponible
+            $stmt = $conn->prepare(
+                "SELECT *
+                 FROM ventes
+                 WHERE id = ?
+                 LIMIT 1"
             );
-        }
 
-        /* Déduire le nouveau stock */
-        $stmtStockNouveau = $conn->prepare("
-            UPDATE produits
-            SET stock = stock - ?
-            WHERE id = ?
-        ");
-
-        $stmtStockNouveau->bind_param(
-            "ii",
-            $nouvelle_quantite,
-            $nouveau_produit
-        );
-
-        if (!$stmtStockNouveau->execute()) {
-            throw new Exception($stmtStockNouveau->error);
-        }
-
-        $montant = $nouvelle_quantite * $nouveau_pvu;
-
-        /*
-         * On garde la date originale.
-         * Le paiement reste 0 puisque la facture était impayée.
-         */
-        $description =
-            "Client : " . ($nouveau_client ?: "Non renseigné") .
-            " | Vente de " . $produit['nom'] .
-            " | Quantité : " . $nouvelle_quantite .
-            " | Total : " . $montant .
-            " | Payé : 0" .
-            " | Reste : " . $montant;
-
-        $stmtUpdate = $conn->prepare("
-            UPDATE ventes
-            SET produit_id = ?,
-                quantite = ?,
-                prix_unitaire = ?,
-                montant = ?,
-                description = ?
-            WHERE id = ?
-        ");
-
-        $stmtUpdate->bind_param(
-            "iiddsi",
-            $nouveau_produit,
-            $nouvelle_quantite,
-            $nouveau_pvu,
-            $montant,
-            $description,
-            $vente_id
-        );
-
-        if (!$stmtUpdate->execute()) {
-            throw new Exception($stmtUpdate->error);
-        }
-
-        $conn->commit();
-
-        $message = "La vente #".$vente_id." a été modifiée.";
-
-    } catch (Exception $e) {
-
-        @$conn->rollback();
-
-        $erreur = "Impossible de modifier la vente : " . $e->getMessage();
-    }
-}
-
-
-/* =========================================================
-   AJOUTER UNE VENTE
-========================================================= */
-
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["enregistrer_vente"])) {
-
-    $client = trim($_POST["client"] ?? "");
-    $payé = (float)($_POST["paye"] ?? 0);
-
-    $produitsIds = $_POST["produit_id"] ?? [];
-    $quantites = $_POST["quantite"] ?? [];
-    $prixUnitaires = $_POST["prix_unitaire"] ?? [];
-
-    try {
-
-        if (!is_array($produitsIds)) {
-            $produitsIds = [];
-        }
-
-        if (count($produitsIds) === 0) {
-            throw new Exception("Ajoutez au moins un article.");
-        }
-
-        if ($payé < 0) {
-            throw new Exception("Le montant payé est incorrect.");
-        }
-
-        $lignes = [];
-        $total = 0;
-
-        /* Vérification des lignes */
-        foreach ($produitsIds as $i => $produit_id) {
-
-            $produit_id = (int)$produit_id;
-            $quantite = (int)($quantites[$i] ?? 0);
-            $pvu = (float)($prixUnitaires[$i] ?? 0);
-
-            if ($produit_id <= 0 || $quantite <= 0 || $pvu <= 0) {
-                continue;
-            }
-
-            $stmt = $conn->prepare("
-                SELECT id, nom, stock
-                FROM produits
-                WHERE id = ?
-                LIMIT 1
-            ");
-
-            $stmt->bind_param("i", $produit_id);
+            $stmt->bind_param("i", $vente_id);
             $stmt->execute();
 
-            $produit = $stmt->get_result()->fetch_assoc();
+            $ancienne = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
 
-            if (!$produit) {
-                throw new Exception("Un des articles sélectionnés est introuvable.");
+            if (!$ancienne) {
+                throw new Exception("Vente introuvable.");
             }
 
-            if ($produit['stock'] < $quantite) {
-                throw new Exception(
-                    "Stock insuffisant pour : " .
-                    $produit['nom'] .
-                    " | Disponible : " .
-                    $produit['stock']
+            /* Paiement récupéré dans description */
+            $ancienne_description = $ancienne["description"] ?? "";
+
+            preg_match(
+                '/Payé\s*:\s*([0-9\s,\.]+)\s*FG/i',
+                $ancienne_description,
+                $matchPaye
+            );
+
+            $ancien_paye = 0;
+
+            if (isset($matchPaye[1])) {
+                $ancien_paye = (float)str_replace(
+                    [" ", ","],
+                    ["", "."],
+                    $matchPaye[1]
                 );
             }
 
-            $montantLigne = $quantite * $pvu;
+            if ($ancien_paye > 0) {
+                throw new Exception(
+                    "Cette vente contient déjà un paiement ou une avance. Elle est verrouillée."
+                );
+            }
 
-            $lignes[] = [
-                "produit_id" => $produit_id,
-                "nom" => $produit['nom'],
-                "quantite" => $quantite,
-                "pvu" => $pvu,
-                "montant" => $montantLigne
-            ];
-
-            $total += $montantLigne;
-        }
-
-        if (count($lignes) === 0) {
-            throw new Exception("Aucun article valide n'a été ajouté.");
-        }
-
-        if ($payé > $total) {
-            throw new Exception(
-                "Le montant payé ne peut pas dépasser le total."
+            /* Produit demandé */
+            $stmt = $conn->prepare(
+                "SELECT nom, stock
+                 FROM produits
+                 WHERE id = ?
+                 LIMIT 1"
             );
-        }
-
-        $reste = $total - $payé;
-
-        $conn->begin_transaction();
-
-        $date_vente = date("Y-m-d H:i:s");
-
-        /*
-         * Pour chaque article, une ligne est créée dans ventes.
-         * On garde le même client et les informations de paiement
-         * dans la description.
-         */
-
-        foreach ($lignes as $ligne) {
-
-            $vente_id = prochainId($conn, "ventes");
-
-            $description =
-                "Client : " . ($client ?: "Non renseigné") .
-                " | Vente de " . $ligne['nom'] .
-                " | Quantité : " . $ligne['quantite'] .
-                " | Total facture : " . $total .
-                " | Payé : " . $payé .
-                " | Reste : " . $reste;
-
-            $stmt = $conn->prepare("
-                INSERT INTO ventes
-                (id, produit_id, quantite, prix_unitaire, montant, description, date_vente)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ");
 
             $stmt->bind_param(
-                "iiiddss",
-                $vente_id,
-                $ligne['produit_id'],
-                $ligne['quantite'],
-                $ligne['pvu'],
-                $ligne['montant'],
-                $description,
-                $date_vente
+                "i",
+                $produit_id
+            );
+
+            $stmt->execute();
+
+            $produit = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            if (!$produit) {
+                throw new Exception("Article introuvable.");
+            }
+
+            /*
+             * Remettre l'ancien article en stock
+             */
+            $ancien_produit_id = (int)$ancienne["produit_id"];
+            $ancienne_qte = (int)$ancienne["quantite"];
+
+            $stmt = $conn->prepare(
+                "UPDATE produits
+                 SET stock = stock + ?
+                 WHERE id = ?"
+            );
+
+            $stmt->bind_param(
+                "ii",
+                $ancienne_qte,
+                $ancien_produit_id
             );
 
             if (!$stmt->execute()) {
                 throw new Exception($stmt->error);
             }
 
-            /* Déduction du stock */
-            $stmtStock = $conn->prepare("
-                UPDATE produits
-                SET stock = stock - ?
-                WHERE id = ?
-            ");
+            $stmt->close();
 
-            $stmtStock->bind_param(
+            /*
+             * Vérifier le nouveau stock
+             */
+            if ((int)$produit["stock"] < $quantite &&
+                $produit_id != $ancien_produit_id) {
+
+                throw new Exception(
+                    "Stock insuffisant pour le nouvel article."
+                );
+            }
+
+            /*
+             * Si même article, le stock disponible comprend
+             * déjà l'ancienne quantité remise.
+             */
+            if ($produit_id == $ancien_produit_id) {
+
+                $stock_disponible =
+                    (int)$produit["stock"] + $ancienne_qte;
+
+            } else {
+
+                $stock_disponible =
+                    (int)$produit["stock"];
+            }
+
+            if ($stock_disponible < $quantite) {
+
+                throw new Exception(
+                    "Stock insuffisant."
+                );
+            }
+
+            /*
+             * Retirer la nouvelle quantité
+             */
+            $stmt = $conn->prepare(
+                "UPDATE produits
+                 SET stock = stock - ?
+                 WHERE id = ?"
+            );
+
+            $stmt->bind_param(
                 "ii",
-                $ligne['quantite'],
-                $ligne['produit_id']
+                $quantite,
+                $produit_id
             );
 
-            if (!$stmtStock->execute()) {
-                throw new Exception($stmtStock->error);
+            if (!$stmt->execute()) {
+                throw new Exception($stmt->error);
             }
 
-            /* Mouvement SORTIE */
-            $mouvement_id = prochainId($conn, "mouvements");
+            $stmt->close();
 
-            $descriptionMouvement =
-                "VENTE #" . $vente_id .
-                " | Client : " . ($client ?: "Non renseigné") .
-                " | " . $ligne['nom'];
+            $montant =
+                $quantite * $prix_unitaire;
 
-            $stmtMouvement = $conn->prepare("
-                INSERT INTO mouvements
-                (id, produit_id, type, quantite, prix, description, date_mouvement)
-                VALUES (?, ?, 'SORTIE', ?, ?, ?, ?)
-            ");
+            $date =
+                $ancienne["date_vente"] ??
+                date("Y-m-d H:i:s");
 
-            $stmtMouvement->bind_param(
-                "iiidss",
-                $mouvement_id,
-                $ligne['produit_id'],
-                $ligne['quantite'],
-                $ligne['pvu'],
-                $descriptionMouvement,
-                $date_vente
+            $description =
+                "VENTE | Client : " .
+                ($client ?: "Client comptoir") .
+                " | Désignation : " .
+                $produit["nom"] .
+                " | Total : " .
+                argent($montant) .
+                " | Payé : 0 FG" .
+                " | Reste : " .
+                argent($montant);
+
+            /*
+             * Modifier la vente
+             */
+            $stmt = $conn->prepare(
+                "UPDATE ventes
+                 SET produit_id = ?,
+                     quantite = ?,
+                     prix_unitaire = ?,
+                     montant = ?,
+                     description = ?
+                 WHERE id = ?"
             );
 
-            if (!$stmtMouvement->execute()) {
-                throw new Exception($stmtMouvement->error);
+            $stmt->bind_param(
+                "iiddsi",
+                $produit_id,
+                $quantite,
+                $prix_unitaire,
+                $montant,
+                $description,
+                $vente_id
+            );
+
+            if (!$stmt->execute()) {
+                throw new Exception($stmt->error);
             }
+
+            $stmt->close();
+
+            $conn->commit();
+
+            $message =
+                "Vente modifiée avec succès.";
+
+            $type = "success";
+
+        } catch (Exception $e) {
+
+            $conn->rollback();
+
+            $message =
+                "Impossible de modifier : " .
+                $e->getMessage();
+
+            $type = "error";
         }
+    }
+}
 
-        $conn->commit();
+
+/* =========================================================
+   SUPPRIMER UNE VENTE NON PAYÉE
+========================================================= */
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["supprimer_vente"])) {
+
+    $vente_id =
+        (int)($_POST["vente_id"] ?? 0);
+
+    if ($vente_id <= 0) {
+
+        $message = "Vente introuvable.";
+        $type = "error";
+
+    } else {
+
+        $conn->begin_transaction();
+
+        try {
+
+            $stmt = $conn->prepare(
+                "SELECT *
+                 FROM ventes
+                 WHERE id = ?
+                 LIMIT 1"
+            );
+
+            $stmt->bind_param(
+                "i",
+                $vente_id
+            );
+
+            $stmt->execute();
+
+            $vente =
+                $stmt->get_result()->fetch_assoc();
+
+            $stmt->close();
+
+            if (!$vente) {
+                throw new Exception(
+                    "Vente introuvable."
+                );
+            }
+
+            $description =
+                $vente["description"] ?? "";
+
+            preg_match(
+                '/Payé\s*:\s*([0-9\s,\.]+)\s*FG/i',
+                $description,
+                $matchPaye
+            );
+
+            $paye = 0;
+
+            if (isset($matchPaye[1])) {
+
+                $paye =
+                    (float)str_replace(
+                        [" ", ","],
+                        ["", "."],
+                        $matchPaye[1]
+                    );
+            }
+
+            if ($paye > 0) {
+
+                throw new Exception(
+                    "Cette vente contient déjà un paiement ou une avance. Elle ne peut pas être supprimée."
+                );
+            }
+
+            /*
+             * Restaurer stock
+             */
+            $produit_id =
+                (int)$vente["produit_id"];
+
+            $quantite =
+                (int)$vente["quantite"];
+
+            $stmt = $conn->prepare(
+                "UPDATE produits
+                 SET stock = stock + ?
+                 WHERE id = ?"
+            );
+
+            $stmt->bind_param(
+                "ii",
+                $quantite,
+                $produit_id
+            );
+
+            if (!$stmt->execute()) {
+                throw new Exception($stmt->error);
+            }
+
+            $stmt->close();
+
+            /*
+             * Supprimer vente
+             */
+            $stmt = $conn->prepare(
+                "DELETE FROM ventes
+                 WHERE id = ?"
+            );
+
+            $stmt->bind_param(
+                "i",
+                $vente_id
+            );
+
+            if (!$stmt->execute()) {
+                throw new Exception($stmt->error);
+            }
+
+            $stmt->close();
+
+            $conn->commit();
+
+            $message =
+                "Vente supprimée et stock restauré.";
+
+            $type = "success";
+
+        } catch (Exception $e) {
+
+            $conn->rollback();
+
+            $message =
+                "Impossible de supprimer : " .
+                $e->getMessage();
+
+            $type = "error";
+        }
+    }
+}
+
+
+/* =========================================================
+   ANNULER UNE VENTE PAYÉE / AVEC AVANCE
+========================================================= */
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["annuler_vente"])) {
+
+    $vente_id =
+        (int)($_POST["vente_id"] ?? 0);
+
+    if ($vente_id <= 0) {
+
+        $message = "Vente introuvable.";
+        $type = "error";
+
+    } else {
+
+        $conn->begin_transaction();
+
+        try {
+
+            $stmt = $conn->prepare(
+                "SELECT *
+                 FROM ventes
+                 WHERE id = ?
+                 LIMIT 1"
+            );
+
+            $stmt->bind_param(
+                "i",
+                $vente_id
+            );
+
+            $stmt->execute();
+
+            $vente =
+                $stmt->get_result()->fetch_assoc();
+
+            $stmt->close();
+
+            if (!$vente) {
+                throw new Exception(
+                    "Vente introuvable."
+                );
+            }
+
+            $description =
+                $vente["description"] ?? "";
+
+            if (
+                strpos($description, "ANNULÉE") !== false ||
+                strpos($description, "ANNULEE") !== false
+            ) {
+
+                throw new Exception(
+                    "Cette vente est déjà annulée."
+                );
+            }
+
+            /*
+             * Restaurer le stock
+             */
+            $produit_id =
+                (int)$vente["produit_id"];
+
+            $quantite =
+                (int)$vente["quantite"];
+
+            $stmt = $conn->prepare(
+                "UPDATE produits
+                 SET stock = stock + ?
+                 WHERE id = ?"
+            );
+
+            $stmt->bind_param(
+                "ii",
+                $quantite,
+                $produit_id
+            );
+
+            if (!$stmt->execute()) {
+                throw new Exception($stmt->error);
+            }
+
+            $stmt->close();
+
+            /*
+             * Marquer comme annulée
+             */
+            $nouvelle_description =
+                $description .
+                " | ANNULÉE LE " .
+                date("d/m/Y H:i");
+
+            $stmt = $conn->prepare(
+                "UPDATE ventes
+                 SET description = ?
+                 WHERE id = ?"
+            );
+
+            $stmt->bind_param(
+                "si",
+                $nouvelle_description,
+                $vente_id
+            );
+
+            if (!$stmt->execute()) {
+                throw new Exception($stmt->error);
+            }
+
+            $stmt->close();
+
+            $conn->commit();
+
+            $message =
+                "Vente annulée. Le stock a été restauré.";
+
+            $type = "success";
+
+        } catch (Exception $e) {
+
+            $conn->rollback();
+
+            $message =
+                "Impossible d'annuler : " .
+                $e->getMessage();
+
+            $type = "error";
+        }
+    }
+}
+
+
+/* =========================================================
+   NOUVELLE VENTE
+========================================================= */
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["enregistrer_vente"])) {
+
+    $client =
+        trim($_POST["client"] ?? "");
+
+    $paye =
+        (float)($_POST["paye"] ?? 0);
+
+    $ids =
+        $_POST["produit_id"] ?? [];
+
+    $quantites =
+        $_POST["quantite"] ?? [];
+
+    $prix =
+        $_POST["prix"] ?? [];
+
+    $lignes = [];
+    $total = 0;
+
+    for ($i = 0; $i < count($ids); $i++) {
+
+        $produit_id =
+            (int)($ids[$i] ?? 0);
+
+        $qte =
+            (int)($quantites[$i] ?? 0);
+
+        $pu =
+            (float)($prix[$i] ?? 0);
+
+        if (
+            $produit_id > 0 &&
+            $qte > 0 &&
+            $pu >= 0
+        ) {
+
+            $lignes[] = [
+                "produit_id" => $produit_id,
+                "quantite" => $qte,
+                "prix" => $pu
+            ];
+
+            $total +=
+                $qte * $pu;
+        }
+    }
+
+    if (count($lignes) === 0) {
 
         $message =
-            "Vente enregistrée avec succès. Total : " .
-            formatMoney($total) .
-            " | Payé : " .
-            formatMoney($payé) .
-            " | Reste : " .
-            formatMoney($reste);
+            "Ajoute au moins un article.";
 
-    } catch (Exception $e) {
+        $type = "error";
 
-        @$conn->rollback();
+    } elseif ($paye < 0 || $paye > $total) {
 
-        $erreur = "Impossible d'enregistrer la vente : " . $e->getMessage();
+        $message =
+            "Le montant payé est incorrect.";
+
+        $type = "error";
+
+    } else {
+
+        $reste =
+            $total - $paye;
+
+        $date =
+            date("Y-m-d H:i:s");
+
+        $conn->begin_transaction();
+
+        try {
+
+            foreach ($lignes as $ligne) {
+
+                $produit_id =
+                    $ligne["produit_id"];
+
+                $qte =
+                    $ligne["quantite"];
+
+                $pu =
+                    $ligne["prix"];
+
+                /*
+                 * Vérifier article et stock
+                 */
+                $stmt = $conn->prepare(
+                    "SELECT nom, stock
+                     FROM produits
+                     WHERE id = ?
+                     LIMIT 1"
+                );
+
+                $stmt->bind_param(
+                    "i",
+                    $produit_id
+                );
+
+                $stmt->execute();
+
+                $produit =
+                    $stmt->get_result()->fetch_assoc();
+
+                $stmt->close();
+
+                if (!$produit) {
+
+                    throw new Exception(
+                        "Article introuvable."
+                    );
+                }
+
+                if (
+                    (int)$produit["stock"] <
+                    $qte
+                ) {
+
+                    throw new Exception(
+                        "Stock insuffisant pour : " .
+                        $produit["nom"]
+                    );
+                }
+
+                $montant =
+                    $qte * $pu;
+
+                /*
+                 * Description historique.
+                 * Le nom est conservé ici pour
+                 * ne pas dépendre du nom futur
+                 * du produit.
+                 */
+                $description =
+                    "VENTE | Client : " .
+                    ($client ?: "Client comptoir") .
+                    " | Désignation : " .
+                    $produit["nom"] .
+                    " | Total facture : " .
+                    argent($total) .
+                    " | Payé : " .
+                    argent($paye) .
+                    " | Reste : " .
+                    argent($reste);
+
+                /*
+                 * ID manuel
+                 */
+                $vente_id =
+                    prochain_id(
+                        $conn,
+                        "ventes"
+                    );
+
+                /*
+                 * Enregistrer vente
+                 */
+                $stmt = $conn->prepare(
+                    "INSERT INTO ventes
+                    (id, produit_id, quantite, prix_unitaire, montant, description, date_vente)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)"
+                );
+
+                $stmt->bind_param(
+                    "iiiddss",
+                    $vente_id,
+                    $produit_id,
+                    $qte,
+                    $pu,
+                    $montant,
+                    $description,
+                    $date
+                );
+
+                if (!$stmt->execute()) {
+                    throw new Exception(
+                        $stmt->error
+                    );
+                }
+
+                $stmt->close();
+
+                /*
+                 * Diminuer stock
+                 */
+                $stmt = $conn->prepare(
+                    "UPDATE produits
+                     SET stock = stock - ?
+                     WHERE id = ?"
+                );
+
+                $stmt->bind_param(
+                    "ii",
+                    $qte,
+                    $produit_id
+                );
+
+                if (!$stmt->execute()) {
+                    throw new Exception(
+                        $stmt->error
+                    );
+                }
+
+                $stmt->close();
+            }
+
+            $conn->commit();
+
+            $message =
+                "Vente enregistrée : " .
+                argent($total) .
+                " • Payé : " .
+                argent($paye) .
+                " • Reste : " .
+                argent($reste);
+
+            $type = "success";
+
+        } catch (Exception $e) {
+
+            $conn->rollback();
+
+            $message =
+                "Erreur : " .
+                $e->getMessage();
+
+            $type = "error";
+        }
+    }
+}
+
+
+/* =========================================================
+   ARTICLE À MODIFIER
+========================================================= */
+$vente_edit = null;
+
+if (isset($_GET["modifier"])) {
+
+    $id =
+        (int)$_GET["modifier"];
+
+    if ($id > 0) {
+
+        $stmt = $conn->prepare(
+            "SELECT *
+             FROM ventes
+             WHERE id = ?
+             LIMIT 1"
+        );
+
+        $stmt->bind_param(
+            "i",
+            $id
+        );
+
+        $stmt->execute();
+
+        $vente_edit =
+            $stmt->get_result()->fetch_assoc();
+
+        $stmt->close();
     }
 }
 
@@ -679,1330 +809,1973 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["enregistrer_vente"]))
 /* =========================================================
    FACTURE
 ========================================================= */
+$facture = null;
+$facture_lignes = [];
 
 if (isset($_GET["facture"])) {
 
-    $vente_id = (int)$_GET["facture"];
+    $facture_id =
+        (int)$_GET["facture"];
 
-    $stmt = $conn->prepare("
-        SELECT
-            v.*,
-            p.nom AS produit_nom
-        FROM ventes v
-        LEFT JOIN produits p ON p.id = v.produit_id
-        WHERE v.id = ?
-        LIMIT 1
-    ");
+    if ($facture_id > 0) {
 
-    $stmt->bind_param("i", $vente_id);
-    $stmt->execute();
-
-    $facture = $stmt->get_result()->fetch_assoc();
-
-    if (!$facture) {
-        die("Facture introuvable.");
-    }
-
-    $description = $facture['description'];
-
-    preg_match('/Client\s*:\s*(.*?)\s*\|/i', $description, $clientMatch);
-    $clientFacture = $clientMatch[1] ?? "Non renseigné";
-
-    $payeFacture = montantDepuisDescription($description);
-    $totalFacture = (float)$facture['montant'];
-
-    if (preg_match('/Total facture\s*:\s*([0-9\s.,]+)/i', $description, $totalMatch)) {
-        $totalFacture = (float)str_replace(
-            [' ', ','],
-            ['', '.'],
-            $totalMatch[1]
+        $stmt = $conn->prepare(
+            "SELECT *
+             FROM ventes
+             WHERE id = ?
+             LIMIT 1"
         );
-    }
 
-    $resteFacture = $totalFacture - $payeFacture;
+        $stmt->bind_param(
+            "i",
+            $facture_id
+        );
 
-    ?>
-    <!DOCTYPE html>
-    <html lang="fr">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Facture #<?= $facture['id'] ?></title>
+        $stmt->execute();
 
-        <style>
-            body {
-                font-family: Arial, sans-serif;
-                background: #f2f5f9;
-                margin: 0;
-                padding: 20px;
-                color: #172033;
-            }
+        $facture =
+            $stmt->get_result()->fetch_assoc();
 
-            .facture {
-                max-width: 800px;
-                margin: auto;
-                background: white;
-                padding: 35px;
-                border-radius: 12px;
-                box-shadow: 0 5px 25px rgba(0,0,0,.08);
-            }
+        $stmt->close();
 
-            .haut {
-                display: flex;
-                justify-content: space-between;
-                gap: 20px;
-                border-bottom: 2px solid #172033;
-                padding-bottom: 20px;
-            }
+        if ($facture) {
 
-            h1 {
-                margin: 0;
-            }
+            $description =
+                $facture["description"] ?? "";
 
-            .numero {
-                text-align: right;
-            }
-
-            table {
-                width: 100%;
-                border-collapse: collapse;
-                margin-top: 30px;
-            }
-
-            th, td {
-                padding: 12px;
-                border-bottom: 1px solid #ddd;
-                text-align: left;
-            }
-
-            th {
-                background: #172033;
-                color: white;
-            }
-
-            .totaux {
-                margin-top: 25px;
-                margin-left: auto;
-                max-width: 350px;
-            }
-
-            .ligne-total {
-                display: flex;
-                justify-content: space-between;
-                padding: 8px 0;
-            }
-
-            .grand-total {
-                font-size: 22px;
-                font-weight: bold;
-                border-top: 2px solid #172033;
-            }
-
-            .boutons {
-                margin-top: 30px;
-                text-align: center;
-            }
-
-            button {
-                background: #172033;
-                color: white;
-                border: 0;
-                padding: 12px 22px;
-                border-radius: 8px;
-                cursor: pointer;
-            }
-
-            @media print {
-                body {
-                    background: white;
-                    padding: 0;
-                }
-
-                .facture {
-                    box-shadow: none;
-                    border-radius: 0;
-                }
-
-                .boutons {
-                    display: none;
-                }
-            }
-        </style>
-    </head>
-
-    <body>
-
-    <div class="facture">
-
-        <div class="haut">
-            <div>
-                <h1>LAMBEMAH GESTION</h1>
-                <p>Facture commerciale</p>
-            </div>
-
-            <div class="numero">
-                <strong>FACTURE #<?= $facture['id'] ?></strong><br>
-                <?= date("d/m/Y H:i", strtotime($facture['date_vente'])) ?>
-            </div>
-        </div>
-
-        <p>
-            <strong>Client :</strong>
-            <?= htmlspecialchars($clientFacture) ?>
-        </p>
-
-        <table>
-            <thead>
-            <tr>
-                <th>Désignation</th>
-                <th>Qté</th>
-                <th>PVU</th>
-                <th>Montant</th>
-            </tr>
-            </thead>
-
-            <tbody>
-            <tr>
-                <td><?= htmlspecialchars($facture['produit_nom'] ?? 'Article') ?></td>
-                <td><?= $facture['quantite'] ?></td>
-                <td><?= formatMoney($facture['prix_unitaire']) ?></td>
-                <td><?= formatMoney($facture['montant']) ?></td>
-            </tr>
-            </tbody>
-        </table>
-
-        <div class="totaux">
-
-            <div class="ligne-total">
-                <span>Total</span>
-                <strong><?= formatMoney($totalFacture) ?></strong>
-            </div>
-
-            <div class="ligne-total">
-                <span>Payé / Avance</span>
-                <strong><?= formatMoney($payeFacture) ?></strong>
-            </div>
-
-            <div class="ligne-total grand-total">
-                <span>Reste</span>
-                <strong><?= formatMoney($resteFacture) ?></strong>
-            </div>
-
-        </div>
-
-        <div class="boutons">
-            <button onclick="window.print()">
-                🖨️ Imprimer / Enregistrer PDF
-            </button>
-        </div>
-
-    </div>
-
-    </body>
-    </html>
-
-    <?php
-    exit;
-}
-
-
-/* =========================================================
-   PRODUITS POUR LES LISTES
-========================================================= */
-
-$produits = [];
-
-$resultProduits = $conn->query("
-    SELECT id, nom, categorie, prix_achat, stock
-    FROM produits
-    ORDER BY nom ASC
-");
-
-if ($resultProduits) {
-    while ($row = $resultProduits->fetch_assoc()) {
-        $produits[] = $row;
-    }
-}
-
-
-/* =========================================================
-   HISTORIQUE DES VENTES
-========================================================= */
-
-$ventes = [];
-
-$resultVentes = $conn->query("
-    SELECT
-        v.*,
-        p.nom AS produit_nom
-    FROM ventes v
-    LEFT JOIN produits p ON p.id = v.produit_id
-    ORDER BY v.date_vente DESC, v.id DESC
-");
-
-if ($resultVentes) {
-
-    while ($row = $resultVentes->fetch_assoc()) {
-
-        $description = $row['description'];
-
-        $client = "Non renseigné";
-
-        if (preg_match('/Client\s*:\s*(.*?)\s*\|/i', $description, $m)) {
-            $client = trim($m[1]);
-        }
-
-        $paye = montantDepuisDescription($description);
-
-        $totalFacture = (float)$row['montant'];
-
-        if (preg_match('/Total facture\s*:\s*([0-9\s.,]+)/i', $description, $m)) {
-            $totalFacture = (float)str_replace(
-                [' ', ','],
-                ['', '.'],
-                $m[1]
+            preg_match(
+                '/Client\s*:\s*(.*?)\s*\|/i',
+                $description,
+                $clientMatch
             );
+
+            preg_match(
+                '/Désignation\s*:\s*(.*?)\s*\|/i',
+                $description,
+                $designationMatch
+            );
+
+            preg_match(
+                '/Payé\s*:\s*([0-9\s,\.]+)\s*FG/i',
+                $description,
+                $payeMatch
+            );
+
+            preg_match(
+                '/Reste\s*:\s*([0-9\s,\.]+)\s*FG/i',
+                $description,
+                $resteMatch
+            );
+
+            $facture_client =
+                $clientMatch[1] ??
+                "Client comptoir";
+
+            $facture_designation =
+                $designationMatch[1] ??
+                "Article";
+
+            $facture_paye = 0;
+            $facture_reste = 0;
+
+            if(isset($payeMatch[1])) {
+
+                $facture_paye =
+                    (float)str_replace(
+                        [" ", ","],
+                        ["", "."],
+                        $payeMatch[1]
+                    );
+            }
+
+            if(isset($resteMatch[1])) {
+
+                $facture_reste =
+                    (float)str_replace(
+                        [" ", ","],
+                        ["", "."],
+                        $resteMatch[1]
+                    );
+            }
         }
-
-        $reste = $totalFacture - $paye;
-
-        $row['client'] = $client;
-        $row['paye'] = $paye;
-        $row['total_facture'] = $totalFacture;
-        $row['reste'] = $reste;
-        $row['annulee'] = estAnnulee($description);
-
-        $ventes[] = $row;
     }
 }
 
 
 /* =========================================================
-   STATISTIQUES
+   LISTE PRODUITS
 ========================================================= */
+$produits =
+$conn->query(
+    "SELECT id, nom, stock
+     FROM produits
+     ORDER BY nom ASC"
+);
 
-$totalVentes = 0;
-$totalPaye = 0;
-$totalReste = 0;
 
-foreach ($ventes as $vente) {
+/* =========================================================
+   HISTORIQUE VENTES
+========================================================= */
+$ventes =
+$conn->query(
+    "SELECT v.*, p.nom AS produit_nom
+     FROM ventes v
+     LEFT JOIN produits p
+     ON p.id = v.produit_id
+     ORDER BY v.id DESC
+     LIMIT 100"
+);
 
-    if (!$vente['annulee']) {
 
-        $totalVentes += $vente['montant'];
-        $totalPaye += $vente['paye'];
-        $totalReste += $vente['reste'];
-    }
+/* =========================================================
+   TOTAL VENTES
+========================================================= */
+$total_ventes = 0;
+
+$r =
+$conn->query(
+    "SELECT COALESCE(SUM(montant),0) AS total
+     FROM ventes
+     WHERE description NOT LIKE '%ANNULÉE%'
+     AND description NOT LIKE '%ANNULEE%'"
+);
+
+if($r) {
+
+    $total_ventes =
+        (float)$r->fetch_assoc()["total"];
+}
+
+
+/* =========================================================
+   NOMBRE VENTES
+========================================================= */
+$nombre_ventes = 0;
+
+$r =
+$conn->query(
+    "SELECT COUNT(*) AS total
+     FROM ventes
+     WHERE description NOT LIKE '%ANNULÉE%'
+     AND description NOT LIKE '%ANNULEE%'"
+);
+
+if($r) {
+
+    $nombre_ventes =
+        (int)$r->fetch_assoc()["total"];
 }
 
 ?>
+
 <!DOCTYPE html>
 <html lang="fr">
 
 <head>
 
-    <meta charset="UTF-8">
+<meta charset="UTF-8">
 
-    <meta name="viewport"
-          content="width=device-width, initial-scale=1.0">
+<meta
+name="viewport"
+content="width=device-width, initial-scale=1.0"
+>
 
-    <title>Ventes - LAMBEMAH GESTION</title>
+<title>LAMBEMAH • Ventes</title>
 
-    <style>
+<link
+href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+rel="stylesheet"
+>
 
-        * {
-            box-sizing: border-box;
-        }
+<link
+href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css"
+rel="stylesheet"
+>
 
-        body {
-            margin: 0;
-            font-family: Arial, sans-serif;
-            background: #f3f6fa;
-            color: #172033;
-        }
 
-        .container {
-            max-width: 1250px;
-            margin: auto;
-            padding: 20px;
-        }
+<style>
 
-        .top {
-            background: #172033;
-            color: white;
-            padding: 18px 22px;
-            border-radius: 12px;
-            margin-bottom: 20px;
-        }
+:root{
+    --bleu:#102a43;
+    --bleu2:#1d4ed8;
+    --bleu3:#eaf2ff;
+    --fond:#f5f8fc;
+    --texte:#172033;
+    --gris:#64748b;
+}
 
-        .top h1 {
-            margin: 0;
-            font-size: 25px;
-        }
+*{
+    box-sizing:border-box;
+}
 
-        .top p {
-            margin: 5px 0 0;
-            opacity: .8;
-        }
+body{
+    margin:0;
+    background:var(--fond);
+    font-family:Arial,sans-serif;
+    color:var(--texte);
+}
 
-        .message {
-            background: #d1fae5;
-            color: #065f46;
-            padding: 13px;
-            border-radius: 8px;
-            margin-bottom: 15px;
-        }
 
-        .erreur {
-            background: #fee2e2;
-            color: #991b1b;
-            padding: 13px;
-            border-radius: 8px;
-            margin-bottom: 15px;
-        }
+/* SIDEBAR */
 
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 15px;
-            margin-bottom: 20px;
-        }
+.sidebar{
+    position:fixed;
+    left:0;
+    top:0;
+    width:245px;
+    height:100vh;
+    background:var(--bleu);
+    padding:20px 15px;
+    color:white;
+    z-index:1000;
+}
 
-        .stat {
-            background: white;
-            padding: 18px;
-            border-radius: 12px;
-            box-shadow: 0 3px 15px rgba(0,0,0,.05);
-        }
+.logo{
+    font-size:23px;
+    font-weight:800;
+    padding:5px 10px 20px;
+}
 
-        .stat small {
-            color: #6b7280;
-        }
+.logo small{
+    display:block;
+    font-size:10px;
+    color:#9cc8ff;
+    margin-top:5px;
+    letter-spacing:1px;
+}
 
-        .stat strong {
-            display: block;
-            font-size: 20px;
-            margin-top: 6px;
-        }
+.menu a{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    color:#dbeafe;
+    text-decoration:none;
+    padding:11px;
+    border-radius:9px;
+    margin-bottom:4px;
+}
 
-        .card {
-            background: white;
-            padding: 20px;
-            border-radius: 12px;
-            margin-bottom: 20px;
-            box-shadow: 0 3px 15px rgba(0,0,0,.05);
-        }
+.menu a:hover,
+.menu a.active{
+    background:var(--bleu2);
+    color:white;
+}
 
-        .card h2 {
-            margin-top: 0;
-            font-size: 20px;
-        }
 
-        .ligne {
-            display: grid;
-            grid-template-columns: 2fr 1fr 1fr auto;
-            gap: 10px;
-            margin-bottom: 10px;
-            align-items: end;
-        }
+/* MAIN */
 
-        .champ {
-            display: flex;
-            flex-direction: column;
-            gap: 5px;
-        }
+.main{
+    margin-left:245px;
+    padding:25px;
+    max-width:1500px;
+}
 
-        label {
-            font-size: 13px;
-            font-weight: bold;
-        }
+.top-title{
+    margin-bottom:20px;
+}
 
-        input,
-        select {
-            width: 100%;
-            padding: 11px;
-            border: 1px solid #d5dae2;
-            border-radius: 8px;
-            background: white;
-        }
+.top-title h1{
+    margin:0;
+    font-size:28px;
+    font-weight:800;
+}
 
-        button {
-            border: 0;
-            border-radius: 8px;
-            padding: 11px 15px;
-            cursor: pointer;
-            font-weight: bold;
-        }
+.top-title p{
+    color:var(--gris);
+    margin:5px 0 0;
+}
 
-        .btn-principal {
-            background: #172033;
-            color: white;
-        }
 
-        .btn-ajouter {
-            background: #e8eef7;
-            color: #172033;
-        }
+/* STATS */
 
-        .btn-supprimer {
-            background: #fee2e2;
-            color: #991b1b;
-        }
+.stats{
+    display:grid;
+    grid-template-columns:repeat(2,1fr);
+    gap:15px;
+    margin-bottom:20px;
+}
 
-        .btn-modifier {
-            background: #e0f2fe;
-            color: #075985;
-        }
+.stat{
+    background:white;
+    padding:18px;
+    border-radius:15px;
+    box-shadow:0 3px 15px rgba(0,0,0,.05);
+}
 
-        .btn-annuler {
-            background: #fff7ed;
-            color: #9a3412;
-        }
+.stat-icon{
+    width:42px;
+    height:42px;
+    border-radius:12px;
+    background:var(--bleu3);
+    color:var(--bleu2);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-size:20px;
+    margin-bottom:10px;
+}
 
-        .btn-facture {
-            background: #ecfdf5;
-            color: #047857;
-        }
+.stat-label{
+    color:var(--gris);
+    font-size:13px;
+}
 
-        .total-box {
-            background: #f5f7fa;
-            padding: 15px;
-            border-radius: 10px;
-            margin: 15px 0;
-        }
+.stat-value{
+    font-size:23px;
+    font-weight:800;
+}
 
-        .total-box strong {
-            font-size: 22px;
-        }
 
-        .paiement {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
-        }
+/* BOX */
 
-        .table-container {
-            overflow-x: auto;
-        }
+.box{
+    background:white;
+    border-radius:16px;
+    padding:20px;
+    margin-bottom:20px;
+    box-shadow:0 3px 15px rgba(0,0,0,.05);
+}
 
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            min-width: 950px;
-        }
+.box-title{
+    font-size:19px;
+    font-weight:800;
+    margin-bottom:15px;
+}
 
-        th,
-        td {
-            padding: 11px;
-            border-bottom: 1px solid #e5e7eb;
-            text-align: left;
-        }
 
-        th {
-            background: #172033;
-            color: white;
-        }
+/* FORM */
 
-        .badge {
-            display: inline-block;
-            padding: 5px 9px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: bold;
-        }
+.form-control,
+.form-select{
+    min-height:44px;
+    border-radius:9px;
+}
 
-        .badge-ok {
-            background: #dcfce7;
-            color: #166534;
-        }
+label{
+    font-size:13px;
+    font-weight:600;
+    margin-bottom:5px;
+}
 
-        .badge-reste {
-            background: #fef3c7;
-            color: #92400e;
-        }
+.ligne{
+    background:#f8fafc;
+    border:1px solid #e5e7eb;
+    border-radius:11px;
+    padding:12px;
+    margin-bottom:10px;
+}
 
-        .badge-annule {
-            background: #fee2e2;
-            color: #991b1b;
-        }
+.total{
+    background:var(--bleu3);
+    border-radius:11px;
+    padding:15px;
+    font-size:19px;
+    font-weight:800;
+}
 
-        .actions {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 5px;
-        }
+.reste{
+    color:#b42318;
+}
 
-        .actions form {
-            margin: 0;
-        }
 
-        .aide {
-            background: #eef4ff;
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 15px;
-            font-size: 14px;
-        }
+/* FACTURE */
 
-        @media (max-width: 800px) {
+.facture{
+    border:1px solid #e2e8f0;
+    border-radius:15px;
+    padding:25px;
+    background:white;
+}
 
-            .container {
-                padding: 10px;
-            }
+.facture-head{
+    display:flex;
+    justify-content:space-between;
+    gap:20px;
+    border-bottom:1px solid #e5e7eb;
+    padding-bottom:15px;
+    margin-bottom:20px;
+}
 
-            .stats {
-                grid-template-columns: 1fr;
-            }
+.facture-brand{
+    font-size:24px;
+    font-weight:900;
+    color:var(--bleu);
+}
 
-            .ligne {
-                grid-template-columns: 1fr;
-            }
+.facture-number{
+    font-weight:bold;
+    color:var(--bleu2);
+}
 
-            .paiement {
-                grid-template-columns: 1fr;
-            }
+.paye-ok{
+    color:#166534;
+    font-weight:bold;
+}
 
-            .top h1 {
-                font-size: 21px;
-            }
+.paye-reste{
+    color:#b42318;
+    font-weight:bold;
+}
 
-            .card {
-                padding: 15px;
-            }
-        }
 
-    </style>
+/* MOBILE */
+
+@media(max-width:768px){
+
+    .sidebar{
+        position:static;
+        width:100%;
+        height:auto;
+        padding:14px 10px;
+    }
+
+    .logo{
+        text-align:center;
+        padding-bottom:12px;
+    }
+
+    .menu{
+        display:grid;
+        grid-template-columns:repeat(4,1fr);
+        gap:3px;
+    }
+
+    .menu a{
+        flex-direction:column;
+        justify-content:center;
+        font-size:9px;
+        text-align:center;
+        padding:8px 3px;
+        margin:0;
+        gap:4px;
+    }
+
+    .main{
+        margin-left:0;
+        padding:12px;
+    }
+
+    .top-title h1{
+        font-size:22px;
+    }
+
+    .stats{
+        grid-template-columns:1fr;
+        gap:10px;
+    }
+
+    .box{
+        padding:14px;
+        border-radius:13px;
+    }
+
+    .table{
+        font-size:12px;
+    }
+
+    .table th,
+    .table td{
+        white-space:nowrap;
+    }
+
+    .facture{
+        padding:15px;
+    }
+
+    .facture-head{
+        display:block;
+    }
+}
+
+
+/* IMPRESSION */
+
+@media print{
+
+    body{
+        background:white;
+    }
+
+    .sidebar,
+    .main > *:not(.zone-facture){
+        display:none !important;
+    }
+
+    .zone-facture{
+        display:block !important;
+    }
+
+    .facture{
+        box-shadow:none;
+        border:none;
+    }
+
+}
+
+</style>
 
 </head>
 
+
 <body>
 
-<div class="container">
 
-    <div class="top">
-        <h1>🛒 VENTES</h1>
-        <p>Revente des articles — LAMBEMAH GESTION</p>
-    </div>
+<!-- ======================================================
+     MENU
+====================================================== -->
 
+<aside class="sidebar">
 
-    <?php if ($message): ?>
-        <div class="message">
-            <?= htmlspecialchars($message) ?>
-        </div>
-    <?php endif; ?>
+<div class="logo">
 
+LAMBEMAH
 
-    <?php if ($erreur): ?>
-        <div class="erreur">
-            <?= htmlspecialchars($erreur) ?>
-        </div>
-    <?php endif; ?>
-
-
-    <!-- STATISTIQUES -->
-
-    <div class="stats">
-
-        <div class="stat">
-            <small>Ventes enregistrées</small>
-            <strong><?= count($ventes) ?></strong>
-        </div>
-
-        <div class="stat">
-            <small>Total vendu</small>
-            <strong><?= formatMoney($totalVentes) ?></strong>
-        </div>
-
-        <div class="stat">
-            <small>Reste clients</small>
-            <strong><?= formatMoney($totalReste) ?></strong>
-        </div>
-
-    </div>
-
-
-    <!-- NOUVELLE VENTE -->
-
-    <div class="card">
-
-        <h2>➕ Nouvelle vente</h2>
-
-        <div class="aide">
-            Ajoutez un ou plusieurs articles. Le stock sera automatiquement diminué.
-            Vous pouvez enregistrer un paiement complet, une avance ou zéro paiement.
-        </div>
-
-        <form method="POST">
-
-            <div class="champ" style="margin-bottom:15px;">
-                <label>Client</label>
-
-                <input
-                    type="text"
-                    name="client"
-                    placeholder="Nom du client"
-                >
-            </div>
-
-
-            <div id="lignes">
-
-                <div class="ligne ligne-vente">
-
-                    <div class="champ">
-
-                        <label>Article</label>
-
-                        <select
-                            name="produit_id[]"
-                            onchange="calculerTotal()"
-                            required
-                        >
-
-                            <option value="">
-                                -- Choisir un article --
-                            </option>
-
-                            <?php foreach ($produits as $produit): ?>
-
-                                <option
-                                    value="<?= $produit['id'] ?>"
-                                    data-stock="<?= $produit['stock'] ?>"
-                                >
-                                    <?= htmlspecialchars($produit['nom']) ?>
-                                    — Stock : <?= $produit['stock'] ?>
-                                </option>
-
-                            <?php endforeach; ?>
-
-                        </select>
-
-                    </div>
-
-
-                    <div class="champ">
-
-                        <label>PVU (FG)</label>
-
-                        <input
-                            type="number"
-                            name="prix_unitaire[]"
-                            min="1"
-                            step="1"
-                            oninput="calculerTotal()"
-                            required
-                        >
-
-                    </div>
-
-
-                    <div class="champ">
-
-                        <label>Quantité</label>
-
-                        <input
-                            type="number"
-                            name="quantite[]"
-                            min="1"
-                            value="1"
-                            oninput="calculerTotal()"
-                            required
-                        >
-
-                    </div>
-
-
-                    <button
-                        type="button"
-                        class="btn-supprimer"
-                        onclick="supprimerLigne(this)"
-                    >
-                        ✕
-                    </button>
-
-                </div>
-
-            </div>
-
-
-            <button
-                type="button"
-                class="btn-ajouter"
-                onclick="ajouterLigne()"
-            >
-                + Ajouter un autre article
-            </button>
-
-
-            <div class="total-box">
-
-                Total de la vente :
-
-                <strong>
-                    <span id="total">0</span> FG
-                </strong>
-
-            </div>
-
-
-            <div class="paiement">
-
-                <div class="champ">
-
-                    <label>Payé / Avance (FG)</label>
-
-                    <input
-                        type="number"
-                        name="paye"
-                        id="paye"
-                        value="0"
-                        min="0"
-                        step="1"
-                        oninput="calculerReste()"
-                    >
-
-                </div>
-
-
-                <div class="champ">
-
-                    <label>Reste client</label>
-
-                    <input
-                        type="text"
-                        id="reste"
-                        value="0 FG"
-                        readonly
-                    >
-
-                </div>
-
-            </div>
-
-
-            <br>
-
-            <button
-                type="submit"
-                name="enregistrer_vente"
-                class="btn-principal"
-            >
-                💾 Enregistrer la vente
-            </button>
-
-        </form>
-
-    </div>
-
-
-    <!-- HISTORIQUE -->
-
-    <div class="card">
-
-        <h2>📋 Historique des ventes</h2>
-
-        <div class="table-container">
-
-            <table>
-
-                <thead>
-
-                <tr>
-                    <th>N°</th>
-                    <th>Client</th>
-                    <th>Désignation</th>
-                    <th>PVU</th>
-                    <th>Qté</th>
-                    <th>Total</th>
-                    <th>Payé</th>
-                    <th>Reste</th>
-                    <th>État</th>
-                    <th>Date</th>
-                    <th>Actions</th>
-                </tr>
-
-                </thead>
-
-                <tbody>
-
-                <?php if (empty($ventes)): ?>
-
-                    <tr>
-                        <td colspan="11">
-                            Aucune vente enregistrée.
-                        </td>
-                    </tr>
-
-                <?php else: ?>
-
-                    <?php foreach ($ventes as $vente): ?>
-
-                        <tr>
-
-                            <td>
-                                <strong>#<?= $vente['id'] ?></strong>
-                            </td>
-
-                            <td>
-                                <?= htmlspecialchars($vente['client']) ?>
-                            </td>
-
-                            <td>
-                                <?= htmlspecialchars($vente['produit_nom'] ?? 'Article supprimé') ?>
-                            </td>
-
-                            <td>
-                                <?= formatMoney($vente['prix_unitaire']) ?>
-                            </td>
-
-                            <td>
-                                <?= $vente['quantite'] ?>
-                            </td>
-
-                            <td>
-                                <?= formatMoney($vente['total_facture']) ?>
-                            </td>
-
-                            <td>
-                                <?= formatMoney($vente['paye']) ?>
-                            </td>
-
-                            <td>
-                                <?= formatMoney($vente['reste']) ?>
-                            </td>
-
-                            <td>
-
-                                <?php if ($vente['annulee']): ?>
-
-                                    <span class="badge badge-annule">
-                                        ANNULÉE
-                                    </span>
-
-                                <?php elseif ($vente['reste'] <= 0): ?>
-
-                                    <span class="badge badge-ok">
-                                        PAYÉE
-                                    </span>
-
-                                <?php elseif ($vente['paye'] > 0): ?>
-
-                                    <span class="badge badge-reste">
-                                        AVANCE
-                                    </span>
-
-                                <?php else: ?>
-
-                                    <span class="badge badge-reste">
-                                        NON PAYÉE
-                                    </span>
-
-                                <?php endif; ?>
-
-                            </td>
-
-                            <td>
-                                <?= date(
-                                    "d/m/Y H:i",
-                                    strtotime($vente['date_vente'])
-                                ) ?>
-                            </td>
-
-                            <td>
-
-                                <div class="actions">
-
-                                    <!-- FACTURE -->
-
-                                    <a
-                                        href="?facture=<?= $vente['id'] ?>"
-                                        target="_blank"
-                                    >
-                                        <button
-                                            type="button"
-                                            class="btn-facture"
-                                        >
-                                            🧾 Facture
-                                        </button>
-                                    </a>
-
-
-                                    <?php if (!$vente['annulee']): ?>
-
-                                        <?php if ($vente['paye'] <= 0): ?>
-
-                                            <!-- MODIFIER -->
-
-                                            <button
-                                                type="button"
-                                                class="btn-modifier"
-                                                onclick="ouvrirModification(
-                                                    <?= $vente['id'] ?>,
-                                                    <?= $vente['produit_id'] ?>,
-                                                    <?= $vente['quantite'] ?>,
-                                                    <?= $vente['prix_unitaire'] ?>,
-                                                    '<?= htmlspecialchars(
-                                                        $vente['client'],
-                                                        ENT_QUOTES
-                                                    ) ?>'
-                                                )"
-                                            >
-                                                ✏️ Modifier
-                                            </button>
-
-
-                                            <!-- SUPPRIMER -->
-
-                                            <form
-                                                method="POST"
-                                                onsubmit="return confirm(
-                                                    'Supprimer définitivement cette vente ? Le stock sera restauré.'
-                                                )"
-                                            >
-
-                                                <input
-                                                    type="hidden"
-                                                    name="vente_id"
-                                                    value="<?= $vente['id'] ?>"
-                                                >
-
-                                                <button
-                                                    type="submit"
-                                                    name="supprimer_vente"
-                                                    class="btn-supprimer"
-                                                >
-                                                    🗑️ Supprimer
-                                                </button>
-
-                                            </form>
-
-                                        <?php endif; ?>
-
-
-                                        <!-- ANNULER -->
-
-                                        <form
-                                            method="POST"
-                                            onsubmit="return confirm(
-                                                'Annuler cette vente ? Le stock sera restauré.'
-                                            )"
-                                        >
-
-                                            <input
-                                                type="hidden"
-                                                name="vente_id"
-                                                value="<?= $vente['id'] ?>"
-                                            >
-
-                                            <button
-                                                type="submit"
-                                                name="annuler_vente"
-                                                class="btn-annuler"
-                                            >
-                                                ↩️ Annuler
-                                            </button>
-
-                                        </form>
-
-                                    <?php endif; ?>
-
-                                </div>
-
-                            </td>
-
-                        </tr>
-
-                    <?php endforeach; ?>
-
-                <?php endif; ?>
-
-                </tbody>
-
-            </table>
-
-        </div>
-
-    </div>
-
-
-    <!-- FORMULAIRE MODIFICATION -->
-
-    <div
-        class="card"
-        id="modification"
-        style="display:none;"
-    >
-
-        <h2>✏️ Modifier la vente</h2>
-
-        <div class="aide">
-            Une facture avec avance ou paiement ne peut pas être modifiée.
-        </div>
-
-        <form method="POST">
-
-            <input
-                type="hidden"
-                name="vente_id"
-                id="mod_vente_id"
-            >
-
-            <div class="champ">
-
-                <label>Client</label>
-
-                <input
-                    type="text"
-                    name="client"
-                    id="mod_client"
-                >
-
-            </div>
-
-            <br>
-
-            <div class="champ">
-
-                <label>Article</label>
-
-                <select
-                    name="produit_id"
-                    id="mod_produit"
-                    required
-                >
-
-                    <?php foreach ($produits as $produit): ?>
-
-                        <option value="<?= $produit['id'] ?>">
-                            <?= htmlspecialchars($produit['nom']) ?>
-                            — Stock : <?= $produit['stock'] ?>
-                        </option>
-
-                    <?php endforeach; ?>
-
-                </select>
-
-            </div>
-
-            <br>
-
-            <div class="paiement">
-
-                <div class="champ">
-
-                    <label>PVU</label>
-
-                    <input
-                        type="number"
-                        name="prix_unitaire"
-                        id="mod_pvu"
-                        min="1"
-                        required
-                    >
-
-                </div>
-
-                <div class="champ">
-
-                    <label>Quantité</label>
-
-                    <input
-                        type="number"
-                        name="quantite"
-                        id="mod_quantite"
-                        min="1"
-                        required
-                    >
-
-                </div>
-
-            </div>
-
-            <br>
-
-            <button
-                type="submit"
-                name="modifier_vente"
-                class="btn-principal"
-            >
-                💾 Enregistrer la modification
-            </button>
-
-            <button
-                type="button"
-                class="btn-supprimer"
-                onclick="fermerModification()"
-            >
-                Fermer
-            </button>
-
-        </form>
-
-    </div>
+<small>
+GESTION • PRESTATION
+</small>
 
 </div>
 
 
-<script>
+<nav class="menu">
 
-function calculerTotal() {
+<a href="index.php">
 
-    let total = 0;
+<i class="bi bi-house"></i>
+Accueil
 
-    const lignes = document.querySelectorAll(".ligne-vente");
+</a>
 
-    lignes.forEach(function(ligne) {
 
-        const prix = parseFloat(
-            ligne.querySelector(
-                'input[name="prix_unitaire[]"]'
-            ).value
-        ) || 0;
+<a href="produits.php">
 
-        const quantite = parseInt(
-            ligne.querySelector(
-                'input[name="quantite[]"]'
-            ).value
-        ) || 0;
+<i class="bi bi-box"></i>
+Achats / Stock
 
-        total += prix * quantite;
+</a>
 
-    });
 
-    document.getElementById("total").innerText =
-        total.toLocaleString("fr-FR");
+<a
+href="ventes.php"
+class="active"
+>
 
-    calculerReste();
+<i class="bi bi-cart-check"></i>
+Ventes
+
+</a>
+
+
+<a href="prestations.php">
+
+<i class="bi bi-printer"></i>
+Prestations
+
+</a>
+
+
+<a href="recettes.php">
+
+<i class="bi bi-cash-coin"></i>
+Recettes
+
+</a>
+
+
+<a href="depenses.php">
+
+<i class="bi bi-wallet2"></i>
+Dépenses
+
+</a>
+
+
+<a href="statistiques.php">
+
+<i class="bi bi-bar-chart"></i>
+Statistiques
+
+</a>
+
+
+<?php if($role === "admin"): ?>
+
+<a href="utilisateurs.php">
+
+<i class="bi bi-people"></i>
+Équipe
+
+</a>
+
+<?php endif; ?>
+
+
+<a href="index.php?logout=1">
+
+<i class="bi bi-box-arrow-right"></i>
+Déconnexion
+
+</a>
+
+</nav>
+
+</aside>
+
+
+<!-- ======================================================
+     MAIN
+====================================================== -->
+
+<main class="main">
+
+
+<div class="top-title">
+
+<h1>
+🧾 Ventes
+</h1>
+
+<p>
+Créez vos ventes, factures et suivez les paiements.
+</p>
+
+</div>
+
+
+<?php if($message): ?>
+
+<div class="alert
+<?= $type === "success"
+? "alert-success"
+: "alert-danger"
+?>
+">
+
+<?= htmlspecialchars($message) ?>
+
+</div>
+
+<?php endif; ?>
+
+
+<!-- ======================================================
+     STATS
+====================================================== -->
+
+<div class="stats">
+
+
+<div class="stat">
+
+<div class="stat-icon">
+
+<i class="bi bi-receipt"></i>
+
+</div>
+
+<div class="stat-label">
+Ventes enregistrées
+</div>
+
+<div class="stat-value">
+<?= $nombre_ventes ?>
+</div>
+
+</div>
+
+
+<div class="stat">
+
+<div class="stat-icon">
+
+<i class="bi bi-cash-stack"></i>
+
+</div>
+
+<div class="stat-label">
+Total des ventes
+</div>
+
+<div class="stat-value">
+<?= argent($total_ventes) ?>
+</div>
+
+</div>
+
+</div>
+
+
+<!-- ======================================================
+     FACTURE
+====================================================== -->
+
+<?php if($facture): ?>
+
+<div
+class="box zone-facture"
+>
+
+<div class="facture">
+
+<div class="facture-head">
+
+<div>
+
+<div class="facture-brand">
+LAMBEMAH
+</div>
+
+<div class="text-muted">
+GESTION • PRESTATION
+</div>
+
+</div>
+
+
+<div class="text-end">
+
+<div class="facture-number">
+FACTURE #<?= (int)$facture["id"] ?>
+</div>
+
+<div>
+
+<?= !empty($facture["date_vente"])
+? date(
+    "d/m/Y H:i",
+    strtotime($facture["date_vente"])
+)
+: "-"
+?>
+
+</div>
+
+</div>
+
+</div>
+
+
+<div class="mb-3">
+
+<strong>
+Client :
+</strong>
+
+<?= htmlspecialchars(
+$facture_client
+) ?>
+
+</div>
+
+
+<table class="table">
+
+<thead>
+
+<tr>
+
+<th>
+Désignation
+</th>
+
+<th>
+Qté
+</th>
+
+<th>
+PU
+</th>
+
+<th>
+Montant
+</th>
+
+</tr>
+
+</thead>
+
+
+<tbody>
+
+<tr>
+
+<td>
+
+<?= htmlspecialchars(
+$facture_designation
+) ?>
+
+</td>
+
+<td>
+<?= (int)$facture["quantite"] ?>
+</td>
+
+<td>
+<?= argent(
+$facture["prix_unitaire"]
+) ?>
+</td>
+
+<td>
+
+<strong>
+<?= argent(
+$facture["montant"]
+) ?>
+</strong>
+
+</td>
+
+</tr>
+
+</tbody>
+
+</table>
+
+
+<div class="row justify-content-end">
+
+<div class="col-md-5">
+
+<div class="d-flex justify-content-between">
+
+<span>
+Total
+</span>
+
+<strong>
+<?= argent(
+$facture["montant"]
+) ?>
+</strong>
+
+</div>
+
+
+<div class="d-flex justify-content-between">
+
+<span>
+Payé
+</span>
+
+<strong class="paye-ok">
+
+<?= argent(
+$facture_paye
+) ?>
+
+</strong>
+
+</div>
+
+
+<div class="d-flex justify-content-between">
+
+<span>
+Reste
+</span>
+
+<strong class="paye-reste">
+
+<?= argent(
+$facture_reste
+) ?>
+
+</strong>
+
+</div>
+
+</div>
+
+</div>
+
+
+<div class="mt-4">
+
+<button
+onclick="window.print()"
+class="btn btn-primary"
+>
+
+<i class="bi bi-printer"></i>
+
+Imprimer
+
+</button>
+
+
+<a
+href="ventes.php"
+class="btn btn-light"
+>
+
+Retour
+
+</a>
+
+</div>
+
+</div>
+
+</div>
+
+<?php endif; ?>
+
+
+<!-- ======================================================
+     MODIFIER VENTE
+====================================================== -->
+
+<?php if($vente_edit): ?>
+
+<div class="box">
+
+<div class="box-title">
+
+<i class="bi bi-pencil-square"></i>
+
+Modifier la vente
+
+</div>
+
+
+<?php
+
+$edit_description =
+$vente_edit["description"] ?? "";
+
+preg_match(
+    '/Payé\s*:\s*([0-9\s,\.]+)\s*FG/i',
+    $edit_description,
+    $editPaye
+);
+
+$edit_paye = 0;
+
+if(isset($editPaye[1])){
+
+    $edit_paye =
+        (float)str_replace(
+            [" ", ","],
+            ["", "."],
+            $editPaye[1]
+        );
+}
+
+?>
+
+
+<?php if($edit_paye > 0): ?>
+
+<div class="alert alert-warning">
+
+<i class="bi bi-lock-fill"></i>
+
+Cette vente possède déjà un paiement ou une avance.
+Elle est verrouillée et ne peut pas être modifiée.
+
+</div>
+
+<a
+href="ventes.php"
+class="btn btn-light"
+>
+Retour
+</a>
+
+
+<?php else: ?>
+
+
+<form method="POST">
+
+<input
+type="hidden"
+name="modifier_vente"
+value="1"
+>
+
+<input
+type="hidden"
+name="vente_id"
+value="<?= (int)$vente_edit["id"] ?>"
+>
+
+
+<div class="row g-3">
+
+
+<div class="col-md-4">
+
+<label>
+Client
+</label>
+
+<?php
+
+preg_match(
+    '/Client\s*:\s*(.*?)\s*\|/i',
+    $edit_description,
+    $clientEdit
+);
+
+$client_value =
+$clientEdit[1] ??
+"Client comptoir";
+
+?>
+
+<input
+type="text"
+name="client"
+class="form-control"
+value="<?= htmlspecialchars($client_value) ?>"
+>
+
+</div>
+
+
+<div class="col-md-4">
+
+<label>
+Article
+</label>
+
+<select
+name="produit_id"
+class="form-select"
+required
+>
+
+<?php
+
+$produits_edit =
+$conn->query(
+"SELECT id, nom, stock
+ FROM produits
+ ORDER BY nom"
+);
+
+while(
+$p = $produits_edit->fetch_assoc()
+):
+
+?>
+
+<option
+value="<?= (int)$p["id"] ?>"
+<?= (int)$p["id"] ===
+(int)$vente_edit["produit_id"]
+? "selected"
+: ""
+?>
+>
+
+<?= htmlspecialchars($p["nom"]) ?>
+
+— Stock <?= (int)$p["stock"] ?>
+
+</option>
+
+<?php endwhile; ?>
+
+</select>
+
+</div>
+
+
+<div class="col-md-2">
+
+<label>
+Prix unitaire
+</label>
+
+<input
+type="number"
+name="prix_unitaire"
+class="form-control"
+min="0"
+value="<?= (float)$vente_edit["prix_unitaire"] ?>"
+required
+>
+
+</div>
+
+
+<div class="col-md-2">
+
+<label>
+Quantité
+</label>
+
+<input
+type="number"
+name="quantite"
+class="form-control"
+min="1"
+value="<?= (int)$vente_edit["quantite"] ?>"
+required
+>
+
+</div>
+
+
+</div>
+
+
+<div class="mt-3">
+
+<button
+class="btn btn-primary"
+>
+
+<i class="bi bi-check-lg"></i>
+
+Enregistrer les modifications
+
+</button>
+
+
+<a
+href="ventes.php"
+class="btn btn-light"
+>
+
+Annuler
+
+</a>
+
+</div>
+
+</form>
+
+<?php endif; ?>
+
+</div>
+
+<?php endif; ?>
+
+
+<!-- ======================================================
+     NOUVELLE VENTE
+====================================================== -->
+
+<div class="box">
+
+<div class="box-title">
+
+🛒 Nouvelle vente
+
+</div>
+
+
+<form method="POST">
+
+
+<input
+type="hidden"
+name="enregistrer_vente"
+value="1"
+>
+
+
+<div class="mb-3">
+
+<label>
+Client
+</label>
+
+<input
+type="text"
+name="client"
+class="form-control"
+placeholder="Ex : Mme Mariama"
+>
+
+</div>
+
+
+<div id="lignes">
+
+
+<div class="ligne">
+
+<div class="row g-2 align-items-end">
+
+
+<div class="col-md-5">
+
+<label>
+Article
+</label>
+
+<select
+name="produit_id[]"
+class="form-select"
+required
+>
+
+<option value="">
+Choisir un article
+</option>
+
+
+<?php
+
+$produits_form =
+$conn->query(
+"SELECT id, nom, stock
+ FROM produits
+ ORDER BY nom ASC"
+);
+
+while(
+$p = $produits_form->fetch_assoc()
+):
+
+?>
+
+<option value="<?= (int)$p["id"] ?>">
+
+<?= htmlspecialchars($p["nom"]) ?>
+
+— Stock <?= (int)$p["stock"] ?>
+
+</option>
+
+<?php endwhile; ?>
+
+</select>
+
+</div>
+
+
+<div class="col-md-2">
+
+<label>
+PVU
+</label>
+
+<input
+type="number"
+name="prix[]"
+class="form-control prix"
+min="0"
+value="0"
+oninput="calculer()"
+required
+>
+
+</div>
+
+
+<div class="col-md-2">
+
+<label>
+Quantité
+</label>
+
+<input
+type="number"
+name="quantite[]"
+class="form-control quantite"
+min="1"
+value="1"
+oninput="calculer()"
+required
+>
+
+</div>
+
+
+<div class="col-md-2">
+
+<label>
+Montant
+</label>
+
+<input
+type="text"
+class="form-control montant"
+value="0 FG"
+readonly
+>
+
+</div>
+
+
+<div class="col-md-1">
+
+<button
+type="button"
+class="btn btn-danger"
+onclick="supprimerLigne(this)"
+>
+
+<i class="bi bi-trash"></i>
+
+</button>
+
+</div>
+
+</div>
+
+</div>
+
+</div>
+
+
+<button
+type="button"
+class="btn btn-outline-primary mb-3"
+onclick="ajouterLigne()"
+>
+
+<i class="bi bi-plus-circle"></i>
+
+Ajouter un article
+
+</button>
+
+
+<div class="total mb-3">
+
+TOTAL :
+
+<span id="total">
+0 FG
+</span>
+
+</div>
+
+
+<div class="mb-3">
+
+<label>
+Montant payé / avance
+</label>
+
+<input
+type="number"
+name="paye"
+id="paye"
+class="form-control"
+min="0"
+value="0"
+oninput="calculer()"
+>
+
+</div>
+
+
+<div class="total mb-3">
+
+RESTE À PAYER :
+
+<span
+id="reste"
+class="reste"
+>
+0 FG
+</span>
+
+</div>
+
+
+<button
+class="btn btn-primary btn-lg"
+>
+
+<i class="bi bi-receipt"></i>
+
+Créer la vente
+
+</button>
+
+</form>
+
+</div>
+
+
+<!-- ======================================================
+     HISTORIQUE
+====================================================== -->
+
+<div class="box">
+
+<div class="box-title">
+
+🧾 Historique des ventes
+
+</div>
+
+
+<div class="table-responsive">
+
+<table class="table align-middle">
+
+<thead>
+
+<tr>
+
+<th>
+Client
+</th>
+
+<th>
+Article
+</th>
+
+<th>
+Qté
+</th>
+
+<th>
+PVU
+</th>
+
+<th>
+Total
+</th>
+
+<th>
+Paiement
+</th>
+
+<th>
+Date
+</th>
+
+<th>
+Actions
+</th>
+
+</tr>
+
+</thead>
+
+
+<tbody>
+
+
+<?php if(
+$ventes &&
+$ventes->num_rows
+): ?>
+
+
+<?php while(
+$v = $ventes->fetch_assoc()
+): ?>
+
+
+<?php
+
+$desc =
+$v["description"] ?? "";
+
+
+/* Client */
+preg_match(
+    '/Client\s*:\s*(.*?)\s*\|/i',
+    $desc,
+    $clientMatch
+);
+
+$client =
+$clientMatch[1] ??
+"Client comptoir";
+
+
+/* Paiement */
+preg_match(
+    '/Payé\s*:\s*([0-9\s,\.]+)\s*FG/i',
+    $desc,
+    $payeMatch
+);
+
+$paye = 0;
+
+if(isset($payeMatch[1])){
+
+    $paye =
+        (float)str_replace(
+            [" ", ","],
+            ["", "."],
+            $payeMatch[1]
+        );
 }
 
 
-function calculerReste() {
+/* État */
+$annulee =
+(
+    strpos($desc,"ANNULÉE") !== false ||
+    strpos($desc,"ANNULEE") !== false
+);
 
-    let totalText =
-        document.getElementById("total").innerText
-            .replace(/\s/g, "")
-            .replace(/,/g, "");
+?>
 
-    let total = parseFloat(totalText) || 0;
+
+<tr>
+
+
+<td>
+
+<strong>
+<?= htmlspecialchars($client) ?>
+</strong>
+
+</td>
+
+
+<td>
+
+<?= htmlspecialchars(
+$v["produit_nom"] ??
+"Article"
+) ?>
+
+</td>
+
+
+<td>
+
+<?= (int)$v["quantite"] ?>
+
+</td>
+
+
+<td>
+
+<?= argent(
+$v["prix_unitaire"]
+) ?>
+
+</td>
+
+
+<td>
+
+<strong>
+
+<?= argent(
+$v["montant"]
+) ?>
+
+</strong>
+
+</td>
+
+
+<td>
+
+
+<?php if($annulee): ?>
+
+<span class="badge text-bg-secondary">
+Annulée
+</span>
+
+
+<?php elseif($paye > 0): ?>
+
+<span class="badge text-bg-warning">
+Payée / Avance
+</span>
+
+
+<?php else: ?>
+
+<span class="badge text-bg-success">
+Non payée
+</span>
+
+<?php endif; ?>
+
+
+</td>
+
+
+<td>
+
+<?= !empty($v["date_vente"])
+? date(
+    "d/m/Y H:i",
+    strtotime($v["date_vente"])
+)
+: "-"
+?>
+
+</td>
+
+
+<td>
+
+
+<?php if(!$annulee): ?>
+
+
+<!-- FACTURE -->
+
+<a
+href="ventes.php?facture=<?= (int)$v["id"] ?>"
+class="btn btn-sm btn-outline-primary"
+title="Facture"
+>
+
+<i class="bi bi-receipt"></i>
+
+</a>
+
+
+<?php if($paye <= 0): ?>
+
+
+<!-- MODIFIER -->
+
+<a
+href="ventes.php?modifier=<?= (int)$v["id"] ?>"
+class="btn btn-sm btn-outline-secondary"
+title="Modifier"
+>
+
+<i class="bi bi-pencil"></i>
+
+</a>
+
+
+<!-- SUPPRIMER -->
+
+<form
+method="POST"
+style="display:inline"
+onsubmit="return confirmerSuppression()"
+>
+
+<input
+type="hidden"
+name="supprimer_vente"
+value="1"
+>
+
+<input
+type="hidden"
+name="vente_id"
+value="<?= (int)$v["id"] ?>"
+>
+
+<button
+class="btn btn-sm btn-outline-danger"
+title="Supprimer"
+>
+
+<i class="bi bi-trash"></i>
+
+</button>
+
+</form>
+
+
+<?php else: ?>
+
+
+<!-- ANNULER SI PAIEMENT -->
+
+<form
+method="POST"
+style="display:inline"
+onsubmit="return confirmerAnnulation()"
+>
+
+<input
+type="hidden"
+name="annuler_vente"
+value="1"
+>
+
+<input
+type="hidden"
+name="vente_id"
+value="<?= (int)$v["id"] ?>"
+>
+
+<button
+class="btn btn-sm btn-outline-warning"
+title="Annuler"
+>
+
+<i class="bi bi-x-circle"></i>
+
+</button>
+
+</form>
+
+
+<span
+class="text-muted"
+title="Vente verrouillée"
+>
+
+<i class="bi bi-lock-fill"></i>
+
+</span>
+
+<?php endif; ?>
+
+
+<?php endif; ?>
+
+
+</td>
+
+
+</tr>
+
+
+<?php endwhile; ?>
+
+
+<?php else: ?>
+
+
+<tr>
+
+<td
+colspan="8"
+class="text-center text-muted"
+>
+
+Aucune vente enregistrée.
+
+</td>
+
+</tr>
+
+
+<?php endif; ?>
+
+
+</tbody>
+
+</table>
+
+</div>
+
+</div>
+
+
+</main>
+
+
+<script>
+
+
+/* =========================================================
+   FORMAT ARGENT
+========================================================= */
+
+function argent(n){
+
+    return new Intl.NumberFormat("fr-FR")
+    .format(n) + " FG";
+
+}
+
+
+/* =========================================================
+   CALCUL
+========================================================= */
+
+function calculer(){
+
+    let total = 0;
+
+    document
+    .querySelectorAll(".ligne")
+    .forEach(function(ligne){
+
+        let prix =
+            parseFloat(
+                ligne.querySelector(".prix").value
+            ) || 0;
+
+        let qte =
+            parseInt(
+                ligne.querySelector(".quantite").value
+            ) || 0;
+
+        let montant =
+            prix * qte;
+
+        ligne.querySelector(".montant").value =
+            argent(montant);
+
+        total += montant;
+
+    });
+
+
+    document
+    .getElementById("total")
+    .textContent =
+        argent(total);
+
 
     let paye =
         parseFloat(
             document.getElementById("paye").value
         ) || 0;
 
-    let reste = total - paye;
 
-    if (reste < 0) {
+    let reste =
+        total - paye;
+
+
+    if(reste < 0){
         reste = 0;
     }
 
-    document.getElementById("reste").value =
-        reste.toLocaleString("fr-FR") + " FG";
+
+    document
+    .getElementById("reste")
+    .textContent =
+        argent(reste);
+
 }
 
 
-function ajouterLigne() {
+/* =========================================================
+   AJOUTER ARTICLE
+========================================================= */
 
-    const conteneur =
+function ajouterLigne(){
+
+    let conteneur =
         document.getElementById("lignes");
 
-    const premiere =
-        document.querySelector(".ligne-vente");
+    let premiere =
+        conteneur.querySelector(".ligne");
 
-    const nouvelle =
+    let nouvelle =
         premiere.cloneNode(true);
 
-    nouvelle
-        .querySelector(
-            'select[name="produit_id[]"]'
-        )
-        .value = "";
 
     nouvelle
-        .querySelector(
-            'input[name="prix_unitaire[]"]'
-        )
-        .value = "";
+    .querySelectorAll("input")
+    .forEach(function(input){
+
+        if(
+            input.classList.contains("prix")
+        ){
+
+            input.value = 0;
+
+        }
+
+        else if(
+            input.classList.contains("quantite")
+        ){
+
+            input.value = 1;
+
+        }
+
+        else if(
+            input.classList.contains("montant")
+        ){
+
+            input.value = "0 FG";
+
+        }
+
+    });
+
 
     nouvelle
-        .querySelector(
-            'input[name="quantite[]"]'
-        )
-        .value = "1";
+    .querySelector("select")
+    .selectedIndex = 0;
+
 
     conteneur.appendChild(nouvelle);
 
-    calculerTotal();
+    calculer();
+
 }
 
 
-function supprimerLigne(bouton) {
+/* =========================================================
+   SUPPRIMER LIGNE
+========================================================= */
 
-    const lignes =
-        document.querySelectorAll(".ligne-vente");
+function supprimerLigne(btn){
 
-    if (lignes.length <= 1) {
+    let lignes =
+        document.querySelectorAll(".ligne");
 
-        alert("Il faut garder au moins un article.");
+
+    if(lignes.length <= 1){
+
+        alert(
+            "Il faut garder au moins un article."
+        );
 
         return;
     }
 
-    bouton.closest(".ligne-vente").remove();
 
-    calculerTotal();
+    btn
+    .closest(".ligne")
+    .remove();
+
+
+    calculer();
+
+}
+
+
+/* =========================================================
+   CONFIRMATIONS
+========================================================= */
+
+function confirmerSuppression(){
+
+    return confirm(
+        "Supprimer cette vente ?\n\n" +
+        "Le stock sera automatiquement restauré."
+    );
+
 }
 
 
-function ouvrirModification(
-    id,
-    produit,
-    quantite,
-    pvu,
-    client
-) {
+function confirmerAnnulation(){
 
-    document.getElementById(
-        "modification"
-    ).style.display = "block";
-
-    document.getElementById(
-        "mod_vente_id"
-    ).value = id;
-
-    document.getElementById(
-        "mod_produit"
-    ).value = produit;
-
-    document.getElementById(
-        "mod_quantite"
-    ).value = quantite;
-
-    document.getElementById(
-        "mod_pvu"
-    ).value = pvu;
-
-    document.getElementById(
-        "mod_client"
-    ).value = client;
-
-    document.getElementById(
-        "modification"
-    ).scrollIntoView({
-        behavior: "smooth"
-    });
-}
-
-
-function fermerModification() {
-
-    document.getElementById(
-        "modification"
-    ).style.display = "none";
+    return confirm(
+        "Annuler cette vente ?\n\n" +
+        "La vente restera dans l'historique " +
+        "et le stock sera restauré."
+    );
 
 }
+
+
+/* =========================================================
+   INIT
+========================================================= */
+
+document.addEventListener(
+    "DOMContentLoaded",
+    function(){
+
+        calculer();
+
+    }
+);
 
 </script>
 
+
 </body>
+
 </html>
