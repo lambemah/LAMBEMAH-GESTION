@@ -2,20 +2,6 @@
 session_start();
 require_once 'config.php';
 
-/*
-|--------------------------------------------------------------------------
-| LAMBEMAH GESTION - ACHATS / STOCK
-|--------------------------------------------------------------------------
-| Aucun ajout de table.
-| Utilise uniquement :
-|   produits
-|   mouvements
-|
-| Une facture validée est enregistrée dans mouvements.
-| Le brouillon est conservé temporairement en session.
-|--------------------------------------------------------------------------
-*/
-
 $conn = $conn ?? ($mysqli ?? null);
 
 if (!$conn) {
@@ -39,13 +25,17 @@ function money($v) {
 function nextId($conn, $table) {
     $table = preg_replace('/[^a-zA-Z0-9_]/', '', $table);
 
-    $q = mysqli_query($conn, "SELECT COALESCE(MAX(id),0)+1 AS prochain FROM `$table`");
+    $q = mysqli_query(
+        $conn,
+        "SELECT COALESCE(MAX(id),0)+1 AS prochain FROM `$table`"
+    );
 
     if (!$q) {
         return 1;
     }
 
     $r = mysqli_fetch_assoc($q);
+
     return (int)$r['prochain'];
 }
 
@@ -71,7 +61,13 @@ function parseFacture($description) {
     return $data;
 }
 
-function factureDescription($numero, $fournisseur, $statut, $paye, $reste) {
+function factureDescription(
+    $numero,
+    $fournisseur,
+    $statut,
+    $paye,
+    $reste
+) {
 
     return 'FACTURE=' . $numero .
            '|FOURNISSEUR=' . str_replace('|', '/', $fournisseur) .
@@ -81,62 +77,185 @@ function factureDescription($numero, $fournisseur, $statut, $paye, $reste) {
 }
 
 /* ============================================================
-   PRODUITS
-============================================================ */
-
-$produits = [];
-
-$qProduits = mysqli_query(
-    $conn,
-    "SELECT id, nom, categorie, prix_achat, stock
-     FROM produits
-     ORDER BY nom ASC"
-);
-
-if ($qProduits) {
-
-    while ($row = mysqli_fetch_assoc($qProduits)) {
-        $produits[] = $row;
-    }
-}
-
-/* ============================================================
-   BROUILLON EN SESSION
+   BROUILLON
 ============================================================ */
 
 if (!isset($_SESSION['achat_brouillon'])) {
 
     $_SESSION['achat_brouillon'] = [
         'fournisseur' => '',
-        'lignes' => []
+        'lignes' => [],
+        'numero_facture' => '',
+        'paye_existant' => 0,
+        'mode' => 'nouveau'
     ];
 }
 
 $brouillon =& $_SESSION['achat_brouillon'];
 
 /* ============================================================
-   AJOUTER UNE LIGNE AU BROUILLON
+   MESSAGES
+============================================================ */
+
+$message = '';
+$erreur = '';
+
+/* ============================================================
+   ANNULER MODIFICATION
+============================================================ */
+
+if (isset($_GET['annuler_modification'])) {
+
+    $_SESSION['achat_brouillon'] = [
+        'fournisseur' => '',
+        'lignes' => [],
+        'numero_facture' => '',
+        'paye_existant' => 0,
+        'mode' => 'nouveau'
+    ];
+
+    header("Location: produits.php");
+    exit;
+}
+
+/* ============================================================
+   MODIFIER UNE FACTURE EXISTANTE
+============================================================ */
+
+if (isset($_GET['modifier_facture'])) {
+
+    $numero = trim($_GET['modifier_facture']);
+
+    if ($numero !== '') {
+
+        $numeroEsc = mysqli_real_escape_string($conn, $numero);
+
+        $q = mysqli_query(
+            $conn,
+            "SELECT id, produit_id, quantite, prix, description
+             FROM mouvements
+             WHERE type='ENTREE'
+             AND description LIKE 'FACTURE=$numeroEsc|%'
+             ORDER BY id ASC"
+        );
+
+        $lignes = [];
+
+        if ($q) {
+
+            while ($row = mysqli_fetch_assoc($q)) {
+                $lignes[] = $row;
+            }
+        }
+
+        if (!empty($lignes)) {
+
+            $infos = parseFacture($lignes[0]['description']);
+
+            $reste = (float)($infos['RESTE'] ?? 0);
+            $paye = (float)($infos['PAYE'] ?? 0);
+
+            /*
+             * Une facture totalement payée ne peut pas être modifiée.
+             */
+
+            if ($reste <= 0) {
+
+                $erreur = "Cette facture est totalement payée et ne peut plus être modifiée.";
+
+            } else {
+
+                $lignesBrouillon = [];
+
+                foreach ($lignes as $ligne) {
+
+                    $pid = (int)$ligne['produit_id'];
+
+                    $rp = mysqli_query(
+                        $conn,
+                        "SELECT nom FROM produits WHERE id=$pid LIMIT 1"
+                    );
+
+                    $nom = 'Article';
+
+                    if ($rp && $pp = mysqli_fetch_assoc($rp)) {
+                        $nom = $pp['nom'];
+                    }
+
+                    $quantite = (int)$ligne['quantite'];
+                    $prix = (float)$ligne['prix'];
+
+                    $lignesBrouillon[] = [
+                        'produit_id' => $pid,
+                        'nom' => $nom,
+                        'quantite' => $quantite,
+                        'prix' => $prix,
+                        'montant' => $quantite * $prix
+                    ];
+                }
+
+                $_SESSION['achat_brouillon'] = [
+                    'fournisseur' => $infos['FOURNISSEUR'] ?? '',
+                    'lignes' => $lignesBrouillon,
+                    'numero_facture' => $numero,
+                    'paye_existant' => $paye,
+                    'mode' => 'modification'
+                ];
+
+                header("Location: produits.php");
+                exit;
+            }
+
+        } else {
+
+            $erreur = "Facture introuvable.";
+        }
+    }
+}
+
+/*
+ * On recharge la référence après une éventuelle modification.
+ */
+$brouillon =& $_SESSION['achat_brouillon'];
+
+/* ============================================================
+   AJOUTER UNE LIGNE
 ============================================================ */
 
 if (isset($_POST['ajouter_ligne'])) {
 
     $produit_id = (int)($_POST['produit_id'] ?? 0);
-    $quantite   = (int)($_POST['quantite'] ?? 0);
-    $prix       = (float)($_POST['prix_achat'] ?? 0);
+    $quantite = (int)($_POST['quantite'] ?? 0);
+    $prix = (float)($_POST['prix_achat'] ?? 0);
+    $fournisseur = trim($_POST['fournisseur'] ?? '');
+
+    /*
+     * Toujours conserver le fournisseur saisi.
+     */
+    $brouillon['fournisseur'] = $fournisseur;
 
     if ($produit_id > 0 && $quantite > 0 && $prix >= 0) {
 
         $stmt = mysqli_prepare(
             $conn,
-            "SELECT id, nom FROM produits WHERE id = ? LIMIT 1"
+            "SELECT id, nom
+             FROM produits
+             WHERE id = ?
+             LIMIT 1"
         );
 
         if ($stmt) {
 
-            mysqli_stmt_bind_param($stmt, "i", $produit_id);
+            mysqli_stmt_bind_param(
+                $stmt,
+                "i",
+                $produit_id
+            );
+
             mysqli_stmt_execute($stmt);
 
             $res = mysqli_stmt_get_result($stmt);
+
             $prod = mysqli_fetch_assoc($res);
 
             mysqli_stmt_close($stmt);
@@ -145,23 +264,21 @@ if (isset($_POST['ajouter_ligne'])) {
 
                 $brouillon['lignes'][] = [
                     'produit_id' => $produit_id,
-                    'nom'        => $prod['nom'],
-                    'quantite'   => $quantite,
-                    'prix'       => $prix,
-                    'montant'    => $quantite * $prix
+                    'nom' => $prod['nom'],
+                    'quantite' => $quantite,
+                    'prix' => $prix,
+                    'montant' => $quantite * $prix
                 ];
             }
         }
     }
-
-    $brouillon['fournisseur'] = trim($_POST['fournisseur'] ?? '');
 
     header("Location: produits.php");
     exit;
 }
 
 /* ============================================================
-   SUPPRIMER UNE LIGNE DU BROUILLON
+   SUPPRIMER UNE LIGNE
 ============================================================ */
 
 if (isset($_GET['supprimer_ligne'])) {
@@ -172,7 +289,8 @@ if (isset($_GET['supprimer_ligne'])) {
 
         unset($brouillon['lignes'][$index]);
 
-        $brouillon['lignes'] = array_values($brouillon['lignes']);
+        $brouillon['lignes'] =
+            array_values($brouillon['lignes']);
     }
 
     header("Location: produits.php");
@@ -187,7 +305,10 @@ if (isset($_POST['vider_brouillon'])) {
 
     $_SESSION['achat_brouillon'] = [
         'fournisseur' => '',
-        'lignes' => []
+        'lignes' => [],
+        'numero_facture' => '',
+        'paye_existant' => 0,
+        'mode' => 'nouveau'
     ];
 
     header("Location: produits.php");
@@ -195,43 +316,80 @@ if (isset($_POST['vider_brouillon'])) {
 }
 
 /* ============================================================
-   MODIFIER FOURNISSEUR DU BROUILLON
+   MODIFIER FOURNISSEUR
 ============================================================ */
 
 if (isset($_POST['modifier_fournisseur'])) {
 
-    $brouillon['fournisseur'] = trim($_POST['fournisseur'] ?? '');
+    $brouillon['fournisseur'] =
+        trim($_POST['fournisseur'] ?? '');
 
     header("Location: produits.php");
     exit;
 }
 
 /* ============================================================
-   VALIDATION DE LA FACTURE
+   VALIDER / MODIFIER LA FACTURE
 ============================================================ */
-
-$message = '';
-$erreur = '';
 
 if (isset($_POST['valider_facture'])) {
 
-    $fournisseur = trim($brouillon['fournisseur'] ?? '');
-    $paye = (float)($_POST['paye'] ?? 0);
+    $fournisseur =
+        trim($brouillon['fournisseur'] ?? '');
+
+    if (!empty($_POST['fournisseur'])) {
+        $fournisseur =
+            trim($_POST['fournisseur']);
+    }
+
+    $lignes =
+        $brouillon['lignes'] ?? [];
+
+    $mode =
+        $brouillon['mode'] ?? 'nouveau';
+
+    $ancienneFacture =
+        $brouillon['numero_facture'] ?? '';
+
+    $payeExistant =
+        (float)($brouillon['paye_existant'] ?? 0);
 
     if ($fournisseur === '') {
 
-        $erreur = "Veuillez renseigner le fournisseur.";
+        $erreur =
+            "Veuillez renseigner le fournisseur.";
 
-    } elseif (empty($brouillon['lignes'])) {
+    } elseif (empty($lignes)) {
 
-        $erreur = "Ajoutez au moins un article à la facture.";
+        $erreur =
+            "Ajoutez au moins un article à la facture.";
 
     } else {
 
         $total = 0;
 
-        foreach ($brouillon['lignes'] as $ligne) {
-            $total += (float)$ligne['montant'];
+        foreach ($lignes as $ligne) {
+
+            $total +=
+                (float)$ligne['montant'];
+        }
+
+        /*
+         * Pour une nouvelle facture :
+         * paiement saisi maintenant.
+         *
+         * Pour une modification :
+         * on conserve le paiement déjà effectué.
+         */
+
+        if ($mode === 'modification') {
+
+            $paye = $payeExistant;
+
+        } else {
+
+            $paye =
+                (float)($_POST['paye'] ?? 0);
         }
 
         if ($paye < 0) {
@@ -242,149 +400,415 @@ if (isset($_POST['valider_facture'])) {
             $paye = $total;
         }
 
-        $reste = $total - $paye;
+        $reste =
+            $total - $paye;
 
         if ($reste <= 0) {
+
             $statut = 'PAYEE';
             $reste = 0;
+
         } elseif ($paye > 0) {
+
             $statut = 'PARTIELLE';
+
         } else {
+
             $statut = 'IMPAYEE';
         }
 
         /*
-         * Numéro de facture
-         * Exemple : ACH-20260908-123
+         * Nouveau numéro seulement pour une nouvelle facture.
          */
-        $numero = 'ACH-' . date('Ymd-His') . '-' . rand(100, 999);
+
+        if ($mode === 'modification') {
+
+            $numero = $ancienneFacture;
+
+        } else {
+
+            $numero =
+                'ACH-' .
+                date('Ymd-His') .
+                '-' .
+                rand(100, 999);
+        }
+
+        /*
+         * Vérification des produits.
+         */
 
         $ok = true;
 
-        /*
-         * On vérifie d'abord les produits.
-         */
-        foreach ($brouillon['lignes'] as $ligne) {
+        foreach ($lignes as $ligne) {
 
-            $pid = (int)$ligne['produit_id'];
+            $pid =
+                (int)$ligne['produit_id'];
 
             $test = mysqli_query(
                 $conn,
-                "SELECT id FROM produits WHERE id = $pid LIMIT 1"
+                "SELECT id
+                 FROM produits
+                 WHERE id=$pid
+                 LIMIT 1"
             );
 
-            if (!$test || mysqli_num_rows($test) === 0) {
+            if (!$test ||
+                mysqli_num_rows($test) === 0) {
+
                 $ok = false;
                 break;
             }
         }
 
-        if ($ok) {
+        /*
+         * ====================================================
+         * MODIFICATION D'UNE FACTURE EXISTANTE
+         * ====================================================
+         */
+
+        if ($ok && $mode === 'modification') {
+
+            $numeroEsc =
+                mysqli_real_escape_string(
+                    $conn,
+                    $numero
+                );
 
             /*
-             * Enregistrement des lignes d'achat
+             * On récupère les anciennes lignes
+             * avant de les remplacer.
              */
-            foreach ($brouillon['lignes'] as $ligne) {
 
-                $mouvement_id = nextId($conn, 'mouvements');
+            $anciennes = [];
 
-                $pid       = (int)$ligne['produit_id'];
-                $quantite  = (int)$ligne['quantite'];
-                $prix      = (float)$ligne['prix'];
-                $montant   = (float)$ligne['montant'];
+            $qa = mysqli_query(
+                $conn,
+                "SELECT id, produit_id, quantite
+                 FROM mouvements
+                 WHERE type='ENTREE'
+                 AND description LIKE 'FACTURE=$numeroEsc|%'"
+            );
 
-                $description = factureDescription(
-                    $numero,
-                    $fournisseur,
-                    $statut,
-                    $paye,
-                    $reste
-                );
+            if ($qa) {
 
-                /*
-                 * mouvements :
-                 * id
-                 * produit_id
-                 * type
-                 * quantite
-                 * prix
-                 * description
-                 * date_mouvement
-                 */
+                while ($row =
+                    mysqli_fetch_assoc($qa)) {
 
-                $stmt = mysqli_prepare(
-                    $conn,
-                    "INSERT INTO mouvements
-                    (id, produit_id, type, quantite, prix, description, date_mouvement)
-                    VALUES (?, ?, 'ENTREE', ?, ?, ?, NOW())"
-                );
-
-                if (!$stmt) {
-                    $ok = false;
-                    break;
+                    $anciennes[] = $row;
                 }
-
-                mysqli_stmt_bind_param(
-                    $stmt,
-                    "iiids",
-                    $mouvement_id,
-                    $pid,
-                    $quantite,
-                    $prix,
-                    $description
-                );
-
-                if (!mysqli_stmt_execute($stmt)) {
-                    $ok = false;
-                    mysqli_stmt_close($stmt);
-                    break;
-                }
-
-                mysqli_stmt_close($stmt);
-
-                /*
-                 * Mise à jour du stock
-                 */
-                mysqli_query(
-                    $conn,
-                    "UPDATE produits
-                     SET stock = COALESCE(stock,0) + $quantite,
-                         prix_achat = $prix
-                     WHERE id = $pid"
-                );
             }
-        }
 
-        if ($ok) {
+            /*
+             * Transaction.
+             */
 
-            $_SESSION['achat_brouillon'] = [
-                'fournisseur' => '',
-                'lignes' => []
-            ];
+            mysqli_begin_transaction($conn);
 
-            $message = "Facture $numero validée avec succès.";
+            try {
 
-        } else {
+                /*
+                 * 1. Retirer l'ancien stock.
+                 */
 
-            $erreur = "La facture n'a pas pu être enregistrée.";
+                foreach ($anciennes as $ancienne) {
+
+                    $pid =
+                        (int)$ancienne['produit_id'];
+
+                    $qte =
+                        (int)$ancienne['quantite'];
+
+                    $updateStock = mysqli_query(
+                        $conn,
+                        "UPDATE produits
+                         SET stock =
+                             COALESCE(stock,0) - $qte
+                         WHERE id=$pid"
+                    );
+
+                    if (!$updateStock) {
+                        throw new Exception(
+                            "Impossible de corriger le stock."
+                        );
+                    }
+                }
+
+                /*
+                 * 2. Supprimer les anciennes lignes
+                 *    de la facture.
+                 */
+
+                $delete = mysqli_query(
+                    $conn,
+                    "DELETE FROM mouvements
+                     WHERE type='ENTREE'
+                     AND description LIKE 'FACTURE=$numeroEsc|%'"
+                );
+
+                if (!$delete) {
+                    throw new Exception(
+                        "Impossible de remplacer la facture."
+                    );
+                }
+
+                /*
+                 * 3. Réinsérer les nouvelles lignes.
+                 */
+
+                foreach ($lignes as $ligne) {
+
+                    $mouvement_id =
+                        nextId($conn, 'mouvements');
+
+                    $pid =
+                        (int)$ligne['produit_id'];
+
+                    $quantite =
+                        (int)$ligne['quantite'];
+
+                    $prix =
+                        (float)$ligne['prix'];
+
+                    $description =
+                        factureDescription(
+                            $numero,
+                            $fournisseur,
+                            $statut,
+                            $paye,
+                            $reste
+                        );
+
+                    $stmt = mysqli_prepare(
+                        $conn,
+                        "INSERT INTO mouvements
+                        (
+                            id,
+                            produit_id,
+                            type,
+                            quantite,
+                            prix,
+                            description,
+                            date_mouvement
+                        )
+                        VALUES
+                        (
+                            ?,
+                            ?,
+                            'ENTREE',
+                            ?,
+                            ?,
+                            ?,
+                            NOW()
+                        )"
+                    );
+
+                    if (!$stmt) {
+                        throw new Exception(
+                            "Erreur de préparation."
+                        );
+                    }
+
+                    mysqli_stmt_bind_param(
+                        $stmt,
+                        "iiids",
+                        $mouvement_id,
+                        $pid,
+                        $quantite,
+                        $prix,
+                        $description
+                    );
+
+                    if (!mysqli_stmt_execute($stmt)) {
+
+                        mysqli_stmt_close($stmt);
+
+                        throw new Exception(
+                            "Erreur lors de l'enregistrement."
+                        );
+                    }
+
+                    mysqli_stmt_close($stmt);
+
+                    /*
+                     * 4. Ajouter le nouveau stock.
+                     */
+
+                    $updateStock = mysqli_query(
+                        $conn,
+                        "UPDATE produits
+                         SET stock =
+                             COALESCE(stock,0) + $quantite,
+                             prix_achat = $prix
+                         WHERE id=$pid"
+                    );
+
+                    if (!$updateStock) {
+
+                        throw new Exception(
+                            "Erreur de mise à jour du stock."
+                        );
+                    }
+                }
+
+                mysqli_commit($conn);
+
+                $_SESSION['achat_brouillon'] = [
+                    'fournisseur' => '',
+                    'lignes' => [],
+                    'numero_facture' => '',
+                    'paye_existant' => 0,
+                    'mode' => 'nouveau'
+                ];
+
+                $message =
+                    "Facture $numero modifiée avec succès.";
+
+            } catch (Exception $e) {
+
+                mysqli_rollback($conn);
+
+                $erreur =
+                    "La modification n'a pas pu être enregistrée : "
+                    . $e->getMessage();
+            }
+
+        /*
+         * ====================================================
+         * NOUVELLE FACTURE
+         * ====================================================
+         */
+
+        } elseif ($ok) {
+
+            mysqli_begin_transaction($conn);
+
+            try {
+
+                foreach ($lignes as $ligne) {
+
+                    $mouvement_id =
+                        nextId($conn, 'mouvements');
+
+                    $pid =
+                        (int)$ligne['produit_id'];
+
+                    $quantite =
+                        (int)$ligne['quantite'];
+
+                    $prix =
+                        (float)$ligne['prix'];
+
+                    $description =
+                        factureDescription(
+                            $numero,
+                            $fournisseur,
+                            $statut,
+                            $paye,
+                            $reste
+                        );
+
+                    $stmt = mysqli_prepare(
+                        $conn,
+                        "INSERT INTO mouvements
+                        (
+                            id,
+                            produit_id,
+                            type,
+                            quantite,
+                            prix,
+                            description,
+                            date_mouvement
+                        )
+                        VALUES
+                        (
+                            ?,
+                            ?,
+                            'ENTREE',
+                            ?,
+                            ?,
+                            ?,
+                            NOW()
+                        )"
+                    );
+
+                    if (!$stmt) {
+                        throw new Exception(
+                            "Erreur de préparation."
+                        );
+                    }
+
+                    mysqli_stmt_bind_param(
+                        $stmt,
+                        "iiids",
+                        $mouvement_id,
+                        $pid,
+                        $quantite,
+                        $prix,
+                        $description
+                    );
+
+                    if (!mysqli_stmt_execute($stmt)) {
+
+                        mysqli_stmt_close($stmt);
+
+                        throw new Exception(
+                            "Erreur lors de l'enregistrement."
+                        );
+                    }
+
+                    mysqli_stmt_close($stmt);
+
+                    mysqli_query(
+                        $conn,
+                        "UPDATE produits
+                         SET stock =
+                             COALESCE(stock,0) + $quantite,
+                             prix_achat = $prix
+                         WHERE id=$pid"
+                    );
+                }
+
+                mysqli_commit($conn);
+
+                $_SESSION['achat_brouillon'] = [
+                    'fournisseur' => '',
+                    'lignes' => [],
+                    'numero_facture' => '',
+                    'paye_existant' => 0,
+                    'mode' => 'nouveau'
+                ];
+
+                $message =
+                    "Facture $numero validée avec succès.";
+
+            } catch (Exception $e) {
+
+                mysqli_rollback($conn);
+
+                $erreur =
+                    "La facture n'a pas pu être enregistrée.";
+            }
         }
     }
 }
 
 /* ============================================================
-   REGLEMENT D'UNE FACTURE
+   RÈGLEMENT FACTURE
 ============================================================ */
 
 if (isset($_POST['regler_facture'])) {
 
-    $numero = trim($_POST['numero_facture'] ?? '');
+    $numero =
+        trim($_POST['numero_facture'] ?? '');
 
     if ($numero !== '') {
 
-        /*
-         * Récupération des lignes de la facture
-         */
-        $numeroEsc = mysqli_real_escape_string($conn, $numero);
+        $numeroEsc =
+            mysqli_real_escape_string(
+                $conn,
+                $numero
+            );
 
         $q = mysqli_query(
             $conn,
@@ -399,47 +823,50 @@ if (isset($_POST['regler_facture'])) {
 
         if ($q) {
 
-            while ($row = mysqli_fetch_assoc($q)) {
+            while ($row =
+                mysqli_fetch_assoc($q)) {
+
                 $lignesFacture[] = $row;
             }
         }
 
         if (!empty($lignesFacture)) {
 
-            $premier = parseFacture($lignesFacture[0]['description']);
+            $premier =
+                parseFacture(
+                    $lignesFacture[0]['description']
+                );
 
-            $ancienReste = (float)($premier['RESTE'] ?? 0);
+            $ancienReste =
+                (float)($premier['RESTE'] ?? 0);
 
             if ($ancienReste > 0) {
 
-                $descriptionBase = $lignesFacture[0]['description'];
-                $data = parseFacture($descriptionBase);
+                $paye =
+                    (float)($premier['PAYE'] ?? 0);
 
-                $data['STATUT'] = 'PAYEE';
-                $data['PAYE'] = (string)($data['PAYE'] ?? '0');
-
-                /*
-                 * Le règlement solde entièrement la facture.
-                 */
-                $data['RESTE'] = '0';
+                $fournisseur =
+                    $premier['FOURNISSEUR'] ?? '';
 
                 $nouvelleDescription =
                     factureDescription(
                         $numero,
-                        $data['FOURNISSEUR'] ?? '',
+                        $fournisseur,
                         'PAYEE',
-                        $data['PAYE'],
+                        $paye + $ancienReste,
                         0
+                    );
+
+                $descEsc =
+                    mysqli_real_escape_string(
+                        $conn,
+                        $nouvelleDescription
                     );
 
                 foreach ($lignesFacture as $ligne) {
 
-                    $idMouvement = (int)$ligne['id'];
-
-                    $descEsc = mysqli_real_escape_string(
-                        $conn,
-                        $nouvelleDescription
-                    );
+                    $idMouvement =
+                        (int)$ligne['id'];
 
                     mysqli_query(
                         $conn,
@@ -449,29 +876,65 @@ if (isset($_POST['regler_facture'])) {
                     );
                 }
 
-                $message = "La facture $numero est maintenant entièrement payée.";
+                $message =
+                    "La facture $numero est maintenant entièrement payée.";
 
             } else {
 
-                $erreur = "Cette facture est déjà payée.";
+                $erreur =
+                    "Cette facture est déjà payée.";
             }
 
         } else {
 
-            $erreur = "Facture introuvable.";
+            $erreur =
+                "Facture introuvable.";
         }
     }
 }
 
 /* ============================================================
-   FACTURES D'ACHAT
+   PRODUITS
+============================================================ */
+
+$produits = [];
+
+$qProduits = mysqli_query(
+    $conn,
+    "SELECT
+        id,
+        nom,
+        categorie,
+        prix_achat,
+        stock
+     FROM produits
+     ORDER BY nom ASC"
+);
+
+if ($qProduits) {
+
+    while ($row =
+        mysqli_fetch_assoc($qProduits)) {
+
+        $produits[] = $row;
+    }
+}
+
+/* ============================================================
+   FACTURES
 ============================================================ */
 
 $factures = [];
 
 $qFactures = mysqli_query(
     $conn,
-    "SELECT id, produit_id, quantite, prix, description, date_mouvement
+    "SELECT
+        id,
+        produit_id,
+        quantite,
+        prix,
+        description,
+        date_mouvement
      FROM mouvements
      WHERE type='ENTREE'
      AND description LIKE 'FACTURE=%'
@@ -482,41 +945,63 @@ if ($qFactures) {
 
     $groupes = [];
 
-    while ($row = mysqli_fetch_assoc($qFactures)) {
+    while ($row =
+        mysqli_fetch_assoc($qFactures)) {
 
-        $data = parseFacture($row['description']);
+        $data =
+            parseFacture(
+                $row['description']
+            );
 
         if (empty($data['FACTURE'])) {
             continue;
         }
 
-        $numero = $data['FACTURE'];
+        $numero =
+            $data['FACTURE'];
 
         if (!isset($groupes[$numero])) {
 
             $groupes[$numero] = [
-                'numero'      => $numero,
-                'fournisseur' => $data['FOURNISSEUR'] ?? '',
-                'statut'      => $data['STATUT'] ?? 'IMPAYEE',
-                'paye'        => (float)($data['PAYE'] ?? 0),
-                'reste'       => (float)($data['RESTE'] ?? 0),
-                'total'       => 0,
-                'date'        => $row['date_mouvement'],
-                'lignes'      => 0
+                'numero' =>
+                    $numero,
+
+                'fournisseur' =>
+                    $data['FOURNISSEUR'] ?? '',
+
+                'statut' =>
+                    $data['STATUT'] ?? 'IMPAYEE',
+
+                'paye' =>
+                    (float)($data['PAYE'] ?? 0),
+
+                'reste' =>
+                    (float)($data['RESTE'] ?? 0),
+
+                'total' =>
+                    0,
+
+                'date' =>
+                    $row['date_mouvement'],
+
+                'lignes' =>
+                    0
             ];
         }
 
         $groupes[$numero]['total'] +=
-            ((float)$row['quantite'] * (float)$row['prix']);
+            ((float)$row['quantite'] *
+             (float)$row['prix']);
 
         $groupes[$numero]['lignes']++;
     }
 
-    $factures = array_values($groupes);
+    $factures =
+        array_values($groupes);
 }
 
 /* ============================================================
-   CALCUL STOCK
+   STOCK
 ============================================================ */
 
 $totalStock = 0;
@@ -524,14 +1009,20 @@ $valeurStock = 0;
 
 foreach ($produits as $p) {
 
-    $stock = (int)($p['stock'] ?? 0);
-    $prix = (float)($p['prix_achat'] ?? 0);
+    $stock =
+        (int)($p['stock'] ?? 0);
+
+    $prix =
+        (float)($p['prix_achat'] ?? 0);
 
     $totalStock += $stock;
-    $valeurStock += ($stock * $prix);
+
+    $valeurStock +=
+        ($stock * $prix);
 }
 
-$totalFactures = count($factures);
+$totalFactures =
+    count($factures);
 
 $totalImpayes = 0;
 $totalPartiel = 0;
@@ -553,14 +1044,19 @@ foreach ($factures as $f) {
 }
 
 /* ============================================================
-   IMPRESSION FACTURE
+   IMPRESSION
 ============================================================ */
 
 if (isset($_GET['imprimer'])) {
 
-    $numero = trim($_GET['imprimer']);
+    $numero =
+        trim($_GET['imprimer']);
 
-    $numeroEsc = mysqli_real_escape_string($conn, $numero);
+    $numeroEsc =
+        mysqli_real_escape_string(
+            $conn,
+            $numero
+        );
 
     $q = mysqli_query(
         $conn,
@@ -575,7 +1071,9 @@ if (isset($_GET['imprimer'])) {
 
     if ($q) {
 
-        while ($row = mysqli_fetch_assoc($q)) {
+        while ($row =
+            mysqli_fetch_assoc($q)) {
+
             $lignes[] = $row;
         }
     }
@@ -584,88 +1082,100 @@ if (isset($_GET['imprimer'])) {
         die("Facture introuvable.");
     }
 
-    $infos = parseFacture($lignes[0]['description']);
+    $infos =
+        parseFacture(
+            $lignes[0]['description']
+        );
 
     $total = 0;
 
     foreach ($lignes as $l) {
-        $total += ((float)$l['quantite'] * (float)$l['prix']);
+
+        $total +=
+            ((float)$l['quantite'] *
+             (float)$l['prix']);
     }
 
     ?>
     <!DOCTYPE html>
     <html lang="fr">
+
     <head>
+
         <meta charset="UTF-8">
+
+        <meta name="viewport"
+              content="width=device-width,initial-scale=1">
+
         <title><?= h($numero) ?></title>
 
         <style>
 
             body {
-                font-family: Arial, sans-serif;
+                font-family: Arial,sans-serif;
                 margin: 30px;
-                color: #111827;
+                color:#111827;
             }
 
             .facture {
-                max-width: 850px;
-                margin: auto;
+                max-width:850px;
+                margin:auto;
             }
 
             h1 {
-                margin-bottom: 5px;
+                margin-bottom:5px;
             }
 
             .entete {
-                display: flex;
-                justify-content: space-between;
-                border-bottom: 2px solid #111827;
-                padding-bottom: 20px;
-                margin-bottom: 25px;
+                display:flex;
+                justify-content:space-between;
+                border-bottom:2px solid #111827;
+                padding-bottom:20px;
+                margin-bottom:25px;
             }
 
             table {
-                width: 100%;
-                border-collapse: collapse;
-                margin-top: 25px;
+                width:100%;
+                border-collapse:collapse;
+                margin-top:25px;
             }
 
-            th,
-            td {
-                border: 1px solid #ddd;
-                padding: 10px;
+            th,td {
+                border:1px solid #ddd;
+                padding:10px;
             }
 
             th {
-                background: #f1f5f9;
+                background:#f1f5f9;
             }
 
             .total {
-                margin-top: 25px;
-                text-align: right;
-                font-size: 18px;
+                margin-top:25px;
+                text-align:right;
+                font-size:18px;
             }
 
             .actions {
-                margin-bottom: 20px;
+                margin-bottom:20px;
             }
 
             button {
-                padding: 10px 18px;
-                cursor: pointer;
+                padding:10px 18px;
+                cursor:pointer;
             }
 
             @media print {
                 .actions {
-                    display: none;
+                    display:none;
                 }
 
                 body {
-                    margin: 0;
+                    margin:0;
                 }
             }
 
         </style>
+
     </head>
 
     <body>
@@ -673,39 +1183,76 @@ if (isset($_GET['imprimer'])) {
     <div class="facture">
 
         <div class="actions">
-            <button onclick="window.print()">🖨️ Imprimer / PDF</button>
-            <button onclick="window.history.back()">Retour</button>
+
+            <button onclick="window.print()">
+                🖨️ Imprimer / PDF
+            </button>
+
+            <button onclick="window.history.back()">
+                Retour
+            </button>
+
         </div>
 
         <div class="entete">
 
             <div>
+
                 <h1>LAMBEMAH GESTION</h1>
-                <div>Facture d'achat</div>
+
+                <div>
+                    Facture d'achat
+                </div>
+
             </div>
 
             <div>
-                <strong><?= h($numero) ?></strong><br>
+
+                <strong>
+                    <?= h($numero) ?>
+                </strong>
+
+                <br>
+
                 Date :
-                <?= h(date('d/m/Y', strtotime($lignes[0]['date_mouvement']))) ?>
+                <?= h(
+                    date(
+                        'd/m/Y',
+                        strtotime(
+                            $lignes[0]['date_mouvement']
+                        )
+                    )
+                ) ?>
+
             </div>
 
         </div>
 
         <p>
-            <strong>Fournisseur :</strong>
-            <?= h($infos['FOURNISSEUR'] ?? '') ?>
+
+            <strong>
+                Fournisseur :
+            </strong>
+
+            <?= h(
+                $infos['FOURNISSEUR'] ?? ''
+            ) ?>
+
         </p>
 
         <table>
 
             <thead>
+
             <tr>
+
                 <th>Article</th>
                 <th>Quantité</th>
                 <th>Prix d'achat</th>
                 <th>Total</th>
+
             </tr>
+
             </thead>
 
             <tbody>
@@ -715,24 +1262,37 @@ if (isset($_GET['imprimer'])) {
                 <tr>
 
                     <td>
+
                         <?php
 
-                        $pid = (int)$l['produit_id'];
+                        $pid =
+                            (int)$l['produit_id'];
 
                         $rp = mysqli_query(
                             $conn,
-                            "SELECT nom FROM produits WHERE id=$pid LIMIT 1"
+                            "SELECT nom
+                             FROM produits
+                             WHERE id=$pid
+                             LIMIT 1"
                         );
 
-                        $nomProduit = 'Article';
+                        $nomProduit =
+                            'Article';
 
-                        if ($rp && $pp = mysqli_fetch_assoc($rp)) {
-                            $nomProduit = $pp['nom'];
+                        if (
+                            $rp &&
+                            $pp =
+                                mysqli_fetch_assoc($rp)
+                        ) {
+
+                            $nomProduit =
+                                $pp['nom'];
                         }
 
                         echo h($nomProduit);
 
                         ?>
+
                     </td>
 
                     <td>
@@ -744,7 +1304,10 @@ if (isset($_GET['imprimer'])) {
                     </td>
 
                     <td>
-                        <?= money((float)$l['quantite'] * (float)$l['prix']) ?>
+                        <?= money(
+                            (float)$l['quantite'] *
+                            (float)$l['prix']
+                        ) ?>
                     </td>
 
                 </tr>
@@ -758,25 +1321,42 @@ if (isset($_GET['imprimer'])) {
         <div class="total">
 
             <div>
-                <strong>Total facture :</strong>
+
+                <strong>
+                    Total facture :
+                </strong>
+
                 <?= money($total) ?>
+
             </div>
 
             <div>
+
                 Payé :
-                <?= money($infos['PAYE'] ?? 0) ?>
+                <?= money(
+                    $infos['PAYE'] ?? 0
+                ) ?>
+
             </div>
 
             <div>
+
                 Reste :
-                <?= money($infos['RESTE'] ?? 0) ?>
+                <?= money(
+                    $infos['RESTE'] ?? 0
+                ) ?>
+
             </div>
 
             <br>
 
             <strong>
+
                 Statut :
-                <?= h($infos['STATUT'] ?? '') ?>
+                <?= h(
+                    $infos['STATUT'] ?? ''
+                ) ?>
+
             </strong>
 
         </div>
@@ -784,6 +1364,7 @@ if (isset($_GET['imprimer'])) {
     </div>
 
     </body>
+
     </html>
 
     <?php
@@ -796,351 +1377,378 @@ if (isset($_GET['imprimer'])) {
 
 <head>
 
-    <meta charset="UTF-8">
-
-    <meta name="viewport"
-          content="width=device-width, initial-scale=1.0">
-
-    <title>LAMBEMAH GESTION - Achats</title>
-
-    <style>
-
-        * {
-            box-sizing: border-box;
-        }
-
-        body {
-            margin: 0;
-            font-family: Arial, sans-serif;
-            background: #f4f7fb;
-            color: #172033;
-        }
-
-        .top {
-            background: #0f2747;
-            color: white;
-            padding: 14px 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .top strong {
-            font-size: 18px;
-        }
-
-        .top a {
-            color: white;
-            text-decoration: none;
-            margin-left: 15px;
-            font-size: 13px;
-        }
-
-        .container {
-            max-width: 1250px;
-            margin: 20px auto;
-            padding: 0 15px;
-        }
-
-        .title {
-            margin-bottom: 15px;
-        }
-
-        .title h1 {
-            margin: 0;
-            font-size: 24px;
-        }
-
-        .title p {
-            margin: 5px 0;
-            color: #64748b;
-            font-size: 13px;
-        }
-
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 12px;
-            margin-bottom: 18px;
-        }
-
-        .card {
-            background: white;
-            border-radius: 10px;
-            padding: 15px;
-            box-shadow: 0 2px 8px rgba(0,0,0,.05);
-        }
-
-        .card small {
-            color: #64748b;
-            display: block;
-            margin-bottom: 6px;
-        }
-
-        .card strong {
-            font-size: 20px;
-        }
-
-        .grid {
-            display: grid;
-            grid-template-columns: 1fr 1.4fr;
-            gap: 18px;
-            align-items: start;
-        }
-
-        .box {
-            background: white;
-            border-radius: 10px;
-            padding: 18px;
-            margin-bottom: 18px;
-            box-shadow: 0 2px 8px rgba(0,0,0,.05);
-        }
-
-        .box h2 {
-            margin: 0 0 15px;
-            font-size: 17px;
-        }
-
-        label {
-            display: block;
-            font-size: 12px;
-            font-weight: bold;
-            margin-bottom: 5px;
-        }
-
-        input,
-        select {
-            width: 100%;
-            padding: 10px;
-            border: 1px solid #d7dee8;
-            border-radius: 7px;
-            margin-bottom: 12px;
-            background: white;
-        }
-
-        button,
-        .btn {
-            border: 0;
-            background: #0f2747;
-            color: white;
-            padding: 10px 14px;
-            border-radius: 7px;
-            cursor: pointer;
-            text-decoration: none;
-            display: inline-block;
-            font-size: 12px;
-        }
-
-        button:hover,
-        .btn:hover {
-            opacity: .9;
-        }
-
-        .btn-danger {
-            background: #b42318;
-        }
-
-        .btn-success {
-            background: #16794c;
-        }
-
-        .btn-warning {
-            background: #a86400;
-        }
-
-        .message {
-            background: #e8f7ee;
-            color: #17663e;
-            padding: 12px;
-            border-radius: 7px;
-            margin-bottom: 15px;
-        }
-
-        .error {
-            background: #fff0f0;
-            color: #a11a1a;
-            padding: 12px;
-            border-radius: 7px;
-            margin-bottom: 15px;
-        }
-
-        .brouillon {
-            border: 2px solid #dbeafe;
-        }
-
-        .ligne {
-            border-bottom: 1px solid #edf1f5;
-            padding: 10px 0;
-            display: flex;
-            justify-content: space-between;
-            gap: 10px;
-            align-items: center;
-        }
-
-        .ligne:last-child {
-            border-bottom: 0;
-        }
-
-        .ligne-info {
-            flex: 1;
-        }
-
-        .ligne-info strong {
-            display: block;
-            font-size: 13px;
-        }
-
-        .ligne-info small {
-            color: #64748b;
-        }
-
-        .total-brouillon {
-            margin-top: 15px;
-            padding-top: 15px;
-            border-top: 2px solid #e5e7eb;
-            text-align: right;
-            font-size: 18px;
-        }
-
-        .facture {
-            border: 1px solid #e1e7ef;
-            border-radius: 9px;
-            margin-bottom: 10px;
-            padding: 13px;
-        }
-
-        .facture-header {
-            display: flex;
-            justify-content: space-between;
-            gap: 10px;
-            align-items: center;
-        }
-
-        .facture-header strong {
-            font-size: 13px;
-        }
-
-        .facture-info {
-            margin-top: 8px;
-            font-size: 12px;
-            color: #64748b;
-        }
-
-        .facture-actions {
-            margin-top: 10px;
-            display: flex;
-            gap: 7px;
-            flex-wrap: wrap;
-        }
-
-        .badge {
-            padding: 5px 8px;
-            border-radius: 20px;
-            font-size: 10px;
-            font-weight: bold;
-        }
-
-        .impayee {
-            background: #fee2e2;
-            color: #991b1b;
-        }
-
-        .partielle {
-            background: #fef3c7;
-            color: #92400e;
-        }
-
-        .payee {
-            background: #dcfce7;
-            color: #166534;
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-
-        th,
-        td {
-            padding: 9px;
-            border-bottom: 1px solid #edf1f5;
-            text-align: left;
-            font-size: 12px;
-        }
-
-        th {
-            color: #64748b;
-            font-size: 11px;
-        }
-
-        .stock-value {
-            text-align: right;
-            white-space: nowrap;
-        }
-
-        .mini {
-            font-size: 11px;
-            color: #64748b;
-        }
-
-        @media(max-width: 850px) {
-
-            .stats {
-                grid-template-columns: repeat(2, 1fr);
-            }
-
-            .grid {
-                grid-template-columns: 1fr;
-            }
-
-        }
-
-        @media(max-width: 550px) {
-
-            .top {
-                padding: 12px;
-            }
-
-            .top strong {
-                font-size: 15px;
-            }
-
-            .top a {
-                font-size: 11px;
-                margin-left: 8px;
-            }
-
-            .container {
-                margin-top: 12px;
-                padding: 0 9px;
-            }
-
-            .stats {
-                grid-template-columns: repeat(2, 1fr);
-                gap: 7px;
-            }
-
-            .card {
-                padding: 11px;
-            }
-
-            .card strong {
-                font-size: 16px;
-            }
-
-            .box {
-                padding: 12px;
-            }
-
-            table {
-                display: block;
-                overflow-x: auto;
-                white-space: nowrap;
-            }
-
-        }
-
-    </style>
+<meta charset="UTF-8">
+
+<meta name="viewport"
+      content="width=device-width,initial-scale=1">
+
+<title>
+LAMBEMAH GESTION - Achats
+</title>
+
+<style>
+
+* {
+    box-sizing:border-box;
+}
+
+body {
+    margin:0;
+    font-family:Arial,sans-serif;
+    background:#f4f7fb;
+    color:#172033;
+}
+
+.top {
+    background:#0f2747;
+    color:white;
+    padding:14px 20px;
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+}
+
+.top strong {
+    font-size:18px;
+}
+
+.top a {
+    color:white;
+    text-decoration:none;
+    margin-left:15px;
+    font-size:13px;
+}
+
+.container {
+    max-width:1250px;
+    margin:20px auto;
+    padding:0 15px;
+}
+
+.title {
+    margin-bottom:15px;
+}
+
+.title h1 {
+    margin:0;
+    font-size:24px;
+}
+
+.title p {
+    margin:5px 0;
+    color:#64748b;
+    font-size:13px;
+}
+
+.stats {
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:12px;
+    margin-bottom:18px;
+}
+
+.card {
+    background:white;
+    border-radius:10px;
+    padding:15px;
+    box-shadow:0 2px 8px rgba(0,0,0,.05);
+}
+
+.card small {
+    color:#64748b;
+    display:block;
+    margin-bottom:6px;
+}
+
+.card strong {
+    font-size:20px;
+}
+
+.grid {
+    display:grid;
+    grid-template-columns:1fr 1.4fr;
+    gap:18px;
+    align-items:start;
+}
+
+.box {
+    background:white;
+    border-radius:10px;
+    padding:18px;
+    margin-bottom:18px;
+    box-shadow:0 2px 8px rgba(0,0,0,.05);
+}
+
+.box h2 {
+    margin:0 0 15px;
+    font-size:17px;
+}
+
+.edit-title {
+    background:#fff7ed;
+    border:1px solid #fed7aa;
+    color:#9a3412;
+    padding:10px;
+    border-radius:8px;
+    margin-bottom:15px;
+    font-size:12px;
+    font-weight:bold;
+}
+
+label {
+    display:block;
+    font-size:12px;
+    font-weight:bold;
+    margin-bottom:5px;
+}
+
+input,
+select {
+    width:100%;
+    padding:10px;
+    border:1px solid #d7dee8;
+    border-radius:7px;
+    margin-bottom:12px;
+    background:white;
+}
+
+button,
+.btn {
+    border:0;
+    background:#0f2747;
+    color:white;
+    padding:10px 14px;
+    border-radius:7px;
+    cursor:pointer;
+    text-decoration:none;
+    display:inline-block;
+    font-size:12px;
+}
+
+button:hover,
+.btn:hover {
+    opacity:.9;
+}
+
+.btn-danger {
+    background:#b42318;
+}
+
+.btn-success {
+    background:#16794c;
+}
+
+.btn-warning {
+    background:#a86400;
+}
+
+.btn-secondary {
+    background:#64748b;
+}
+
+.message {
+    background:#e8f7ee;
+    color:#17663e;
+    padding:12px;
+    border-radius:7px;
+    margin-bottom:15px;
+}
+
+.error {
+    background:#fff0f0;
+    color:#a11a1a;
+    padding:12px;
+    border-radius:7px;
+    margin-bottom:15px;
+}
+
+.brouillon {
+    border:2px solid #dbeafe;
+}
+
+.ligne {
+    border-bottom:1px solid #edf1f5;
+    padding:10px 0;
+    display:flex;
+    justify-content:space-between;
+    gap:10px;
+    align-items:center;
+}
+
+.ligne:last-child {
+    border-bottom:0;
+}
+
+.ligne-info {
+    flex:1;
+}
+
+.ligne-info strong {
+    display:block;
+    font-size:13px;
+}
+
+.ligne-info small {
+    color:#64748b;
+}
+
+.total-brouillon {
+    margin-top:15px;
+    padding-top:15px;
+    border-top:2px solid #e5e7eb;
+    text-align:right;
+    font-size:18px;
+}
+
+.facture {
+    border:1px solid #e1e7ef;
+    border-radius:9px;
+    margin-bottom:10px;
+    padding:13px;
+}
+
+.facture-header {
+    display:flex;
+    justify-content:space-between;
+    gap:10px;
+    align-items:center;
+}
+
+.facture-header strong {
+    font-size:13px;
+}
+
+.facture-info {
+    margin-top:8px;
+    font-size:12px;
+    color:#64748b;
+}
+
+.facture-actions {
+    margin-top:10px;
+    display:flex;
+    gap:7px;
+    flex-wrap:wrap;
+}
+
+.badge {
+    padding:5px 8px;
+    border-radius:20px;
+    font-size:10px;
+    font-weight:bold;
+}
+
+.impayee {
+    background:#fee2e2;
+    color:#991b1b;
+}
+
+.partielle {
+    background:#fef3c7;
+    color:#92400e;
+}
+
+.payee {
+    background:#dcfce7;
+    color:#166534;
+}
+
+table {
+    width:100%;
+    border-collapse:collapse;
+}
+
+th,
+td {
+    padding:9px;
+    border-bottom:1px solid #edf1f5;
+    text-align:left;
+    font-size:12px;
+}
+
+th {
+    color:#64748b;
+    font-size:11px;
+}
+
+.stock-value {
+    text-align:right;
+    white-space:nowrap;
+}
+
+.mini {
+    font-size:11px;
+    color:#64748b;
+}
+
+.locked {
+    color:#166534;
+    font-size:11px;
+    font-weight:bold;
+}
+
+@media(max-width:850px) {
+
+    .stats {
+        grid-template-columns:repeat(2,1fr);
+    }
+
+    .grid {
+        grid-template-columns:1fr;
+    }
+}
+
+@media(max-width:550px) {
+
+    .top {
+        padding:12px;
+    }
+
+    .top strong {
+        font-size:15px;
+    }
+
+    .top a {
+        font-size:11px;
+        margin-left:8px;
+    }
+
+    .container {
+        margin-top:12px;
+        padding:0 9px;
+    }
+
+    .stats {
+        grid-template-columns:repeat(2,1fr);
+        gap:7px;
+    }
+
+    .card {
+        padding:11px;
+    }
+
+    .card strong {
+        font-size:16px;
+    }
+
+    .box {
+        padding:12px;
+    }
+
+    table {
+        display:block;
+        overflow-x:auto;
+        white-space:nowrap;
+    }
+
+    .facture-actions .btn,
+    .facture-actions button {
+        font-size:11px;
+        padding:9px 10px;
+    }
+}
+
+</style>
 
 </head>
 
@@ -1148,11 +1756,20 @@ if (isset($_GET['imprimer'])) {
 
 <div class="top">
 
-    <strong>💼 LAMBEMAH GESTION</strong>
+    <strong>
+        💼 LAMBEMAH GESTION
+    </strong>
 
     <div>
-        <a href="index.php">Accueil</a>
-        <a href="ventes.php">Ventes</a>
+
+        <a href="index.php">
+            Accueil
+        </a>
+
+        <a href="ventes.php">
+            Ventes
+        </a>
+
     </div>
 
 </div>
@@ -1161,7 +1778,9 @@ if (isset($_GET['imprimer'])) {
 
     <div class="title">
 
-        <h1>Achats & Stock</h1>
+        <h1>
+            Achats & Stock
+        </h1>
 
         <p>
             Création et suivi des factures d'achat
@@ -1192,23 +1811,56 @@ if (isset($_GET['imprimer'])) {
     <div class="stats">
 
         <div class="card">
-            <small>Factures d'achat</small>
-            <strong><?= $totalFactures ?></strong>
+
+            <small>
+                Factures d'achat
+            </small>
+
+            <strong>
+                <?= $totalFactures ?>
+            </strong>
+
         </div>
 
         <div class="card">
-            <small>Factures impayées</small>
-            <strong><?= $totalImpayes ?></strong>
+
+            <small>
+                Factures impayées
+            </small>
+
+            <strong>
+                <?= $totalImpayes ?>
+            </strong>
+
         </div>
 
         <div class="card">
-            <small>Articles en stock</small>
-            <strong><?= number_format($totalStock, 0, ',', ' ') ?></strong>
+
+            <small>
+                Articles en stock
+            </small>
+
+            <strong>
+                <?= number_format(
+                    $totalStock,
+                    0,
+                    ',',
+                    ' '
+                ) ?>
+            </strong>
+
         </div>
 
         <div class="card">
-            <small>Valeur du stock</small>
-            <strong><?= money($valeurStock) ?></strong>
+
+            <small>
+                Valeur du stock
+            </small>
+
+            <strong>
+                <?= money($valeurStock) ?>
+            </strong>
+
         </div>
 
     </div>
@@ -1216,44 +1868,80 @@ if (isset($_GET['imprimer'])) {
     <div class="grid">
 
         <!-- =================================================
-             NOUVEL ACHAT
+             NOUVEL ACHAT / MODIFICATION
         ================================================== -->
 
         <div>
 
             <div class="box">
 
-                <h2>🧾 Nouvelle facture d'achat</h2>
+                <?php
+                $estModification =
+                    ($brouillon['mode'] ?? 'nouveau')
+                    === 'modification';
+                ?>
+
+                <?php if ($estModification): ?>
+
+                    <div class="edit-title">
+
+                        ✏️ MODIFICATION DE FACTURE
+
+                        <br>
+
+                        <?= h(
+                            $brouillon['numero_facture']
+                        ) ?>
+
+                        <br>
+
+                        <span style="font-weight:normal;">
+                            Cette facture n'est pas encore
+                            totalement payée. Vous pouvez
+                            corriger les articles, quantités
+                            et prix.
+                        </span>
+
+                    </div>
+
+                    <h2>
+                        ✏️ Modifier la facture
+                    </h2>
+
+                <?php else: ?>
+
+                    <h2>
+                        🧾 Nouvelle facture d'achat
+                    </h2>
+
+                <?php endif; ?>
+
+                <!-- FOURNISSEUR + ARTICLE DANS LE MEME FORMULAIRE -->
 
                 <form method="post">
 
-                    <label>Fournisseur</label>
+                    <label>
+                        Fournisseur
+                    </label>
 
                     <input
                         type="text"
                         name="fournisseur"
-                        value="<?= h($brouillon['fournisseur']) ?>"
+                        value="<?= h(
+                            $brouillon['fournisseur']
+                        ) ?>"
                         placeholder="Nom du fournisseur"
                         required
                     >
 
-                    <input type="hidden"
-                           name="modifier_fournisseur"
-                           value="1">
+                    <label>
+                        Article
+                    </label>
 
-                </form>
-
-                <form method="post">
-
-                    <input
-                        type="hidden"
-                        name="fournisseur"
-                        value="<?= h($brouillon['fournisseur']) ?>"
+                    <select
+                        name="produit_id"
+                        required
                     >
-
-                    <label>Article</label>
-
-                    <select name="produit_id" required>
 
                         <option value="">
                             -- Choisir un article --
@@ -1261,7 +1949,9 @@ if (isset($_GET['imprimer'])) {
 
                         <?php foreach ($produits as $p): ?>
 
-                            <option value="<?= (int)$p['id'] ?>">
+                            <option
+                                value="<?= (int)$p['id'] ?>"
+                            >
 
                                 <?= h($p['nom']) ?>
 
@@ -1275,7 +1965,9 @@ if (isset($_GET['imprimer'])) {
 
                     </select>
 
-                    <label>Quantité achetée</label>
+                    <label>
+                        Quantité achetée
+                    </label>
 
                     <input
                         type="number"
@@ -1285,7 +1977,9 @@ if (isset($_GET['imprimer'])) {
                         required
                     >
 
-                    <label>Prix d'achat unitaire</label>
+                    <label>
+                        Prix d'achat unitaire
+                    </label>
 
                     <input
                         type="number"
@@ -1300,10 +1994,27 @@ if (isset($_GET['imprimer'])) {
                         type="submit"
                         name="ajouter_ligne"
                     >
+
                         + Ajouter l'article
+
                     </button>
 
                 </form>
+
+                <?php if ($estModification): ?>
+
+                    <br>
+
+                    <a
+                        class="btn btn-secondary"
+                        href="produits.php?annuler_modification=1"
+                    >
+
+                        ← Annuler la modification
+
+                    </a>
+
+                <?php endif; ?>
 
             </div>
 
@@ -1313,13 +2024,22 @@ if (isset($_GET['imprimer'])) {
 
             <div class="box brouillon">
 
-                <h2>📝 Facture en saisie</h2>
+                <h2>
+                    📝
+                    <?= $estModification
+                        ? 'Facture à corriger'
+                        : 'Facture en saisie'
+                    ?>
+                </h2>
 
                 <?php if (empty($brouillon['lignes'])): ?>
 
                     <div class="mini">
+
                         Aucun article ajouté.
+
                         Ajoutez les articles un par un.
+
                     </div>
 
                 <?php else: ?>
@@ -1328,9 +2048,13 @@ if (isset($_GET['imprimer'])) {
 
                     $totalBrouillon = 0;
 
-                    foreach ($brouillon['lignes'] as $i => $ligne):
+                    foreach (
+                        $brouillon['lignes']
+                        as $i => $ligne
+                    ):
 
-                        $totalBrouillon += $ligne['montant'];
+                        $totalBrouillon +=
+                            $ligne['montant'];
 
                     ?>
 
@@ -1339,26 +2063,44 @@ if (isset($_GET['imprimer'])) {
                             <div class="ligne-info">
 
                                 <strong>
-                                    <?= h($ligne['nom']) ?>
+
+                                    <?= h(
+                                        $ligne['nom']
+                                    ) ?>
+
                                 </strong>
 
                                 <small>
-                                    <?= (int)$ligne['quantite'] ?>
+
+                                    <?= (int)
+                                        $ligne['quantite']
+                                    ?>
+
                                     ×
-                                    <?= money($ligne['prix']) ?>
+
+                                    <?= money(
+                                        $ligne['prix']
+                                    ) ?>
+
                                 </small>
 
                             </div>
 
                             <strong>
-                                <?= money($ligne['montant']) ?>
+
+                                <?= money(
+                                    $ligne['montant']
+                                ) ?>
+
                             </strong>
 
                             <a
                                 class="btn btn-danger"
                                 href="produits.php?supprimer_ligne=<?= $i ?>"
                             >
+
                                 ×
+
                             </a>
 
                         </div>
@@ -1368,35 +2110,120 @@ if (isset($_GET['imprimer'])) {
                     <div class="total-brouillon">
 
                         <strong>
+
                             Total :
-                            <?= money($totalBrouillon) ?>
+
+                            <?= money(
+                                $totalBrouillon
+                            ) ?>
+
                         </strong>
 
                     </div>
 
-                    <hr style="border:0;border-top:1px solid #eee;margin:15px 0;">
+                    <hr
+                        style="
+                        border:0;
+                        border-top:1px solid #eee;
+                        margin:15px 0;
+                        "
+                    >
 
-                    <form method="post">
+                    <?php if ($estModification): ?>
 
-                        <label>Montant payé maintenant</label>
+                        <div class="mini"
+                             style="margin-bottom:10px;">
 
-                        <input
-                            type="number"
-                            name="paye"
-                            min="0"
-                            step="1"
-                            value="0"
-                        >
+                            Déjà payé :
+
+                            <strong>
+
+                                <?= money(
+                                    $brouillon[
+                                        'paye_existant'
+                                    ] ?? 0
+                                ) ?>
+
+                            </strong>
+
+                        </div>
 
                         <button
-                            type="submit"
-                            name="valider_facture"
+                            type="button"
                             class="btn-success"
+                            onclick="
+                                document
+                                .getElementById('formValidation')
+                                .submit();
+                            "
                         >
-                            ✓ Valider la facture
+
+                            ✓ Enregistrer la correction
+
                         </button>
 
-                    </form>
+                        <form
+                            method="post"
+                            id="formValidation"
+                            style="display:none;"
+                        >
+
+                            <input
+                                type="hidden"
+                                name="fournisseur"
+                                value="<?= h(
+                                    $brouillon[
+                                        'fournisseur'
+                                    ]
+                                ) ?>"
+                            >
+
+                            <button
+                                type="submit"
+                                name="valider_facture"
+                            ></button>
+
+                        </form>
+
+                    <?php else: ?>
+
+                        <form method="post">
+
+                            <input
+                                type="hidden"
+                                name="fournisseur"
+                                value="<?= h(
+                                    $brouillon[
+                                        'fournisseur'
+                                    ]
+                                ) ?>"
+                            >
+
+                            <label>
+                                Montant payé maintenant
+                            </label>
+
+                            <input
+                                type="number"
+                                name="paye"
+                                min="0"
+                                step="1"
+                                value="0"
+                            >
+
+                            <button
+                                type="submit"
+                                name="valider_facture"
+                                class="btn-success"
+                            >
+
+                                ✓ Valider la facture
+
+                            </button>
+
+                        </form>
+
+                    <?php endif; ?>
 
                     <br>
 
@@ -1407,7 +2234,9 @@ if (isset($_GET['imprimer'])) {
                             name="vider_brouillon"
                             class="btn-danger"
                         >
+
                             Vider la saisie
+
                         </button>
 
                     </form>
@@ -1426,12 +2255,16 @@ if (isset($_GET['imprimer'])) {
 
             <div class="box">
 
-                <h2>📋 Factures d'achat</h2>
+                <h2>
+                    📋 Factures d'achat
+                </h2>
 
                 <?php if (empty($factures)): ?>
 
                     <div class="mini">
+
                         Aucune facture d'achat enregistrée.
+
                     </div>
 
                 <?php else: ?>
@@ -1445,80 +2278,149 @@ if (isset($_GET['imprimer'])) {
                                 <div>
 
                                     <strong>
-                                        <?= h($f['numero']) ?>
+
+                                        <?= h(
+                                            $f['numero']
+                                        ) ?>
+
                                     </strong>
 
                                     <br>
 
                                     <span class="mini">
-                                        <?= h($f['fournisseur']) ?>
+
+                                        <?= h(
+                                            $f['fournisseur']
+                                        ) ?>
+
                                     </span>
 
                                 </div>
 
                                 <?php
 
-                                $classe = 'impayee';
+                                $classe =
+                                    'impayee';
 
-                                $texte = 'IMPAYÉE';
+                                $texte =
+                                    'IMPAYÉE';
 
-                                if ($f['statut'] === 'PARTIELLE') {
-                                    $classe = 'partielle';
-                                    $texte = 'PARTIELLEMENT PAYÉE';
+                                if (
+                                    $f['statut']
+                                    === 'PARTIELLE'
+                                ) {
+
+                                    $classe =
+                                        'partielle';
+
+                                    $texte =
+                                        'PARTIELLEMENT PAYÉE';
                                 }
 
-                                if ($f['statut'] === 'PAYEE') {
-                                    $classe = 'payee';
-                                    $texte = 'PAYÉE';
+                                if (
+                                    $f['statut']
+                                    === 'PAYEE'
+                                ) {
+
+                                    $classe =
+                                        'payee';
+
+                                    $texte =
+                                        'PAYÉE';
                                 }
 
                                 ?>
 
-                                <span class="badge <?= $classe ?>">
+                                <span
+                                    class="badge <?= $classe ?>"
+                                >
+
                                     <?= $texte ?>
+
                                 </span>
 
                             </div>
 
                             <div class="facture-info">
 
-                                <?= (int)$f['lignes'] ?>
+                                <?= (int)
+                                    $f['lignes']
+                                ?>
+
                                 article(s)
 
                                 • Total :
+
                                 <strong>
-                                    <?= money($f['total']) ?>
+
+                                    <?= money(
+                                        $f['total']
+                                    ) ?>
+
                                 </strong>
 
                                 • Payé :
-                                <?= money($f['paye']) ?>
+
+                                <?= money(
+                                    $f['paye']
+                                ) ?>
 
                                 • Reste :
+
                                 <strong>
-                                    <?= money($f['reste']) ?>
+
+                                    <?= money(
+                                        $f['reste']
+                                    ) ?>
+
                                 </strong>
 
                             </div>
 
                             <div class="facture-actions">
 
+                                <!-- IMPRIMER -->
+
                                 <a
                                     class="btn"
-                                    href="produits.php?imprimer=<?= urlencode($f['numero']) ?>"
+                                    href="produits.php?imprimer=<?= urlencode(
+                                        $f['numero']
+                                    ) ?>"
                                     target="_blank"
                                 >
+
                                     🖨️ Facture
+
                                 </a>
 
                                 <?php if ($f['reste'] > 0): ?>
 
-                                    <form method="post"
-                                          style="display:inline;">
+                                    <!-- MODIFIER -->
+
+                                    <a
+                                        class="btn btn-warning"
+                                        href="produits.php?modifier_facture=<?= urlencode(
+                                            $f['numero']
+                                        ) ?>"
+                                    >
+
+                                        ✏️ Modifier
+
+                                    </a>
+
+                                    <!-- RÉGLER -->
+
+                                    <form
+                                        method="post"
+                                        style="display:inline;"
+                                    >
 
                                         <input
                                             type="hidden"
                                             name="numero_facture"
-                                            value="<?= h($f['numero']) ?>"
+                                            value="<?= h(
+                                                $f['numero']
+                                            ) ?>"
                                         >
 
                                         <button
@@ -1526,10 +2428,21 @@ if (isset($_GET['imprimer'])) {
                                             name="regler_facture"
                                             class="btn-success"
                                         >
+
                                             💰 Régler
+
                                         </button>
 
                                     </form>
+
+                                <?php else: ?>
+
+                                    <span class="locked">
+
+                                        🔒 Facture verrouillée
+                                        — entièrement payée
+
+                                    </span>
 
                                 <?php endif; ?>
 
@@ -1553,7 +2466,9 @@ if (isset($_GET['imprimer'])) {
 
     <div class="box">
 
-        <h2>📦 Stock actuel</h2>
+        <h2>
+            📦 Stock actuel
+        </h2>
 
         <table>
 
@@ -1561,11 +2476,25 @@ if (isset($_GET['imprimer'])) {
 
             <tr>
 
-                <th>Article</th>
-                <th>Catégorie</th>
-                <th>Stock</th>
-                <th>Prix d'achat</th>
-                <th>Valeur</th>
+                <th>
+                    Article
+                </th>
+
+                <th>
+                    Catégorie
+                </th>
+
+                <th>
+                    Stock
+                </th>
+
+                <th>
+                    Prix d'achat
+                </th>
+
+                <th>
+                    Valeur
+                </th>
 
             </tr>
 
@@ -1577,34 +2506,64 @@ if (isset($_GET['imprimer'])) {
 
                 <?php
 
-                $stock = (int)($p['stock'] ?? 0);
-                $prix = (float)($p['prix_achat'] ?? 0);
-                $valeur = $stock * $prix;
+                $stock =
+                    (int)($p['stock'] ?? 0);
+
+                $prix =
+                    (float)($p['prix_achat'] ?? 0);
+
+                $valeur =
+                    $stock * $prix;
 
                 ?>
 
                 <tr>
 
                     <td>
+
                         <strong>
-                            <?= h($p['nom']) ?>
+
+                            <?= h(
+                                $p['nom']
+                            ) ?>
+
                         </strong>
+
                     </td>
 
                     <td>
-                        <?= h($p['categorie'] ?? '') ?>
+
+                        <?= h(
+                            $p['categorie'] ?? ''
+                        ) ?>
+
                     </td>
 
                     <td>
-                        <?= number_format($stock, 0, ',', ' ') ?>
+
+                        <?= number_format(
+                            $stock,
+                            0,
+                            ',',
+                            ' '
+                        ) ?>
+
                     </td>
 
                     <td>
-                        <?= money($prix) ?>
+
+                        <?= money(
+                            $prix
+                        ) ?>
+
                     </td>
 
                     <td class="stock-value">
-                        <?= money($valeur) ?>
+
+                        <?= money(
+                            $valeur
+                        ) ?>
+
                     </td>
 
                 </tr>
@@ -1620,4 +2579,5 @@ if (isset($_GET['imprimer'])) {
 </div>
 
 </body>
+
 </html>
