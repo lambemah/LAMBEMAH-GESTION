@@ -7,7 +7,7 @@ mysqli_report(MYSQLI_REPORT_OFF);
 function h($x){return htmlspecialchars((string)$x,ENT_QUOTES,'UTF-8');}
 function money($x){return number_format((float)$x,0,',',' ').' FG';}
 function parseP($s){
-    $d=['ref'=>'','client'=>'','note'=>'','lignes'=>[],'total'=>0,'a4'=>0,'cout'=>0,'benefice'=>0];
+    $d=['ref'=>'','client'=>'','note'=>'','lignes'=>[],'total'=>0,'a4'=>0,'cout'=>0,'benefice'=>0,'paid'=>0];
     if(preg_match('/REF=([^|]+)/',$s,$m))$d['ref']=$m[1];
     if(preg_match('/DATA=(.+)$/',$s,$m)){
         $j=base64_decode($m[1],true);$x=$j?json_decode($j,true):null;
@@ -15,7 +15,9 @@ function parseP($s){
     }
     if(preg_match('/Client\s*:\s*([^|]+)/i',$s,$m))$d['client']=trim($m[1]);
     if(preg_match('/Coût DTF total\s*:\s*([0-9 ]+)/i',$s,$m))$d['cout']=(float)str_replace(' ','',$m[1]);
-    if(preg_match('/Bénéfice\s*:\s*([0-9 ]+)/i',$s,$m))$d['benefice']=(float)str_replace(' ','',$m[1]);
+    if(preg_match('/Bénéfice\s*:\s*([0-9 ]]+)/i',$s,$m))$d['benefice']=(float)str_replace(' ','',$m[1]);
+    if(preg_match('/PAYE=([0-9.]+)/i',$s,$m))$d['paid']=(float)$m[1];
+    if(preg_match('/Paye\s*:\s*([0-9 ]+)/i',$s,$m))$d['paid']=(float)str_replace(' ','',$m[1]);
     return $d;
 }
 function encodeP($d,$ref){
@@ -46,14 +48,17 @@ if($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='save'){
     if(!$err&&$total<=0)$err='Le total doit être supérieur à 0.';
     if(!$err){
         $cout=$a4Total*5000;$benef=$total-$cout;
-        $data=['client'=>$client,'note'=>$note,'lignes'=>$l,'total'=>$total,'a4'=>$a4Total,'cout'=>$cout,'benefice'=>$benef];
+        $data=['client'=>$client,'note'=>$note,'lignes'=>$l,'total'=>$total,'a4'=>$a4Total,'cout'=>$cout,'benefice'=>$benef,'paid'=>0];
         $id=(int)($_POST['id']??0);$ref='';
         if($id){
             $st=$conn->prepare("SELECT description FROM recettes WHERE id=? AND libelle LIKE 'Prestation DTF%'");
             $st->bind_param('i',$id);$st->execute();$old=$st->get_result()->fetch_assoc();$st->close();
             $od=$old?parseP($old['description']):[];
+            $oldPaid=(float)($od['paid']??0);
             if(!$old||empty($od['ref']))$err='Cette ancienne prestation garde son historique mais ne peut pas être recalculée automatiquement.';
-            else $ref=$od['ref'];
+            elseif($oldPaid>0 && $oldPaid>$total+0.01)$err='Le paiement déjà reçu dépasse le nouveau total.';
+            elseif($oldPaid>=$total-0.01)$err='Cette prestation est totalement payée et verrouillée.';
+            else { $data['paid']=$oldPaid; $ref=$od['ref']; }
         }else $ref=nextRef($conn);
         if(!$err){
             $desc=encodeP($data,$ref);$lib='Prestation DTF - '.$client;
@@ -80,7 +85,7 @@ if($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='save'){
 }
 if($editId&&!$err){
     $st=$conn->prepare("SELECT id,libelle,montant,description,date_recette FROM recettes WHERE id=? LIMIT 1");$st->bind_param('i',$editId);$st->execute();$edit=$st->get_result()->fetch_assoc();$st->close();
-    if($edit&&stripos($edit['libelle'],'Prestation DTF')!==false)$edit['data']=parseP($edit['description']);else $edit=null;
+    if($edit&&stripos($edit['libelle'],'Prestation DTF')!==false){$edit['data']=parseP($edit['description']); if(($edit['data']['paid']??0)>=(float)$edit['montant']-0.01){$edit=null;$err='Cette prestation est totalement payée et verrouillée.';}}else $edit=null;
 }
 
 $nb=0;$total=0;$couts=0;
@@ -91,7 +96,7 @@ $r=$conn->query("SELECT id,libelle,montant,description,date_recette FROM recette
 ?>
 <!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Prestations</title>
 <style>
-*{box-sizing:border-box}body{margin:0;background:#f4f7fb;font-family:Arial;color:#163047}.wrap{max-width:1200px;margin:auto;padding:15px}.top{display:flex;justify-content:space-between;align-items:center}.top h1{font-size:21px;margin:0}.top p{font-size:10px;color:#83909c}.btn{background:#1769e8;color:#fff;border:0;border-radius:8px;padding:9px 12px;font-size:10px;font-weight:bold;text-decoration:none;cursor:pointer}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin:12px 0}.card,.box{background:#fff;border:1px solid #e1e9f0;border-radius:13px}.card{padding:12px}.card small{font-size:9px;color:#8795a1}.card b{display:block;margin-top:4px;font-size:16px}.grid{display:grid;grid-template-columns:400px 1fr;gap:12px}.box{padding:14px}.box h2{font-size:14px;margin:0 0 11px}.group{margin-bottom:9px}.label{display:block;font-size:9px;font-weight:bold;color:#627381;margin-bottom:4px}input,textarea{width:100%;padding:8px;border:1px solid #dce5ec;border-radius:7px;font-size:10px}textarea{min-height:50px}.line{display:grid;grid-template-columns:1.5fr .5fr .8fr .6fr 22px;gap:4px;margin-bottom:5px}.line input{padding:7px}.head{font-size:8px;color:#82909b}.x{border:0;border-radius:6px;background:#eef2f5;color:#d33}.tot{background:#eef8ff;border-radius:8px;padding:8px;font-size:10px;line-height:1.8;margin:9px 0}.tot b{font-size:12px}.actions{display:flex;gap:5px}.actions>*{flex:1;text-align:center}table{width:100%;border-collapse:collapse}th{font-size:8px;color:#778692;text-align:left;background:#f6f9fb;padding:8px}td{font-size:9px;padding:8px;border-bottom:1px solid #edf1f4}.green{color:#15935a}.blue{color:#1769e8}.warn,.msg{font-size:9px;padding:8px;border-radius:8px;margin:8px 0}.warn{background:#fff8df;color:#786100}.ok{background:#eaf8ef;color:#187244}.err{background:#fff0f0;color:#b52d2d}.table{overflow:auto}
+*{box-sizing:border-box}body{margin:0;background:#f4f7fb;font-family:Arial;color:#163047}.wrap{max-width:1200px;margin:auto;padding:15px}.top{display:flex;justify-content:space-between;align-items:center}.top h1{font-size:21px;margin:0}.top p{font-size:10px;color:#83909c}.btn{background:#1769e8;color:#fff;border:0;border-radius:8px;padding:9px 12px;font-size:10px;font-weight:bold;text-decoration:none;cursor:pointer}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin:12px 0}.card,.box{background:#fff;border:1px solid #e1e9f0;border-radius:13px}.card{padding:12px}.card small{font-size:9px;color:#8795a1}.card b{display:block;margin-top:4px;font-size:16px}.grid{display:grid;grid-template-columns:400px 1fr;gap:12px}.box{padding:14px}.box h2{font-size:14px;margin:0 0 11px}.group{margin-bottom:9px}.label{display:block;font-size:9px;font-weight:bold;color:#627381;margin-bottom:4px}input,textarea{width:100%;padding:8px;border:1px solid #dce5ec;border-radius:7px;font-size:10px}textarea{min-height:50px}.line{display:grid;grid-template-columns:1.5fr .5fr .8fr .6fr 22px;gap:4px;margin-bottom:5px}.line input{padding:7px}.head{font-size:8px;color:#82909b}.x{border:0;border-radius:6px;background:#eef2f5;color:#d33}.tot{background:#eef8ff;border-radius:8px;padding:8px;font-size:10px;line-height:1.8;margin:9px 0}.tot b{font-size:12px}.actions{display:flex;gap:5px}.actions>*{flex:1;text-align:center}table{width:100%;border-collapse:collapse}th{font-size:8px;color:#778692;text-align:left;background:#f6f9fb;padding:8px}td{font-size:9px;padding:8px;border-bottom:1px solid #edf1f4}.green{color:#15935a}.blue{color:#1769e8}.modal{display:none;position:fixed;inset:0;background:#0005;align-items:center;justify-content:center}.modalbox{background:#fff;border-radius:13px;padding:16px;width:min(340px,92%)}.modalbox h3{font-size:14px;margin:0 0 10px}.warn,.msg{font-size:9px;padding:8px;border-radius:8px;margin:8px 0}.warn{background:#fff8df;color:#786100}.ok{background:#eaf8ef;color:#187244}.err{background:#fff0f0;color:#b52d2d}.table{overflow:auto}
 @media(max-width:850px){.grid{grid-template-columns:1fr}.cards{grid-template-columns:1fr 1fr}}@media(max-width:600px){.wrap{padding:9px}.card{padding:10px}.grid{gap:9px}.box{padding:11px}.table table{min-width:650px}}
 </style></head><body><div class="wrap">
 <div class="top"><div><h1>Prestations</h1><p>Articles client • DTF • bénéfice</p></div><a class="btn" href="index.php">Accueil</a></div>
@@ -107,10 +112,13 @@ $r=$conn->query("SELECT id,libelle,montant,description,date_recette FROM recette
 <div class="actions"><?php if($edit):?><a class="btn" style="background:#edf1f4;color:#536575" href="prestations.php">Annuler</a><?php endif;?><button class="btn" type="submit"><?= $edit?'Enregistrer':'Valider'?></button></div>
 <p style="font-size:8px;color:#8996a0">DTF = 5 000 FG/A4 • grand : 1 A4 ou + • enfant/képi : 0,5 A4/u si 2 designs sur 1 A4.</p>
 </form></div>
-<div class="box"><h2>Historique</h2><div class="table"><table><thead><tr><th>Client</th><th>Articles</th><th>Total</th><th>DTF</th><th>Bénéfice</th><th>Date</th><th></th></tr></thead><tbody>
-<?php foreach($items as $p):$d=parseP($p['description']);$new=!empty($d['ref']);?><tr><td><b><?=h($d['client']?:preg_replace('/^Prestation DTF\s*-\s*/i','',$p['libelle']))?></b></td><td><?=$new?count($d['lignes']).' ligne(s) • '.$d['a4'].' A4':'Ancien format'?></td><td class="blue"><b><?=money($p['montant'])?></b></td><td><?=$new?money($d['cout']):'—'?></td><td class="green"><?=$new?money($d['benefice']):'—'?></td><td><?=h(date('d/m/Y',strtotime($p['date_recette']??'now')))?></td><td><?php if($new):?><a class="btn" href="?edit=<?=$p['id']?>">Modifier</a><?php endif;?></td></tr><?php endforeach;?>
+<div class="box"><h2>Historique</h2><div class="table"><table><thead><tr><th>Client</th><th>Articles</th><th>Total</th><th>Payé</th><th>Reste</th><th>État</th><th></th></tr></thead><tbody>
+<?php foreach($items as $p):$d=parseP($p['description']);$new=!empty($d['ref']);$paid=(float)($d['paid']??0);$reste=max(0,(float)$p['montant']-$paid);$status=$reste<=0.01?'TOUT PAYÉ':($paid>0?'AVANCE':'NON PAYÉ');?><tr><td><b><?=h($d['client']?:preg_replace('/^Prestation DTF\s*-\s*/i','',$p['libelle']))?></b></td><td><?=$new?count($d['lignes']).' ligne(s) • '.$d['a4'].' A4':'Ancien format'?></td><td class="blue"><b><?=money($p['montant'])?></b></td><td><?=money($paid)?></td><td class="<?= $reste>0.01?'':'green' ?>"><b><?=money($reste)?></b></td><td><b><?=$status?></b></td><td><div style="display:flex;gap:4px;flex-wrap:wrap"><?php if($reste>0.01):?><button type="button" class="btn" onclick="openPay(<?=$p['id']?>,<?=json_encode($reste)?>)">Avance</button><form method="post" style="display:inline"><input type="hidden" name="action" value="pay"><input type="hidden" name="id" value="<?=$p['id']?>"><input type="hidden" name="mode" value="total"><button class="btn" type="submit">Tout payé</button></form><?php if($new):?><a class="btn" style="background:#edf1f4;color:#536575" href="?edit=<?=$p['id']?>">Modifier</a><?php endif;?><?php else:?><span class="green">✓</span><?php endif;?></div></td></tr><?php endforeach;?>
 <?php if(!$items):?><tr><td colspan="7">Aucune prestation.</td></tr><?php endif;?></tbody></table></div></div></div></div>
+<div class="modal" id="payModal"><div class="modalbox"><h3>Avance</h3><form method="post"><input type="hidden" name="action" value="pay"><input type="hidden" name="id" id="payId"><label class="label">Montant</label><input type="number" name="montant" id="payAmount" min="1" step="500" required><div class="actions" style="margin-top:10px"><button type="button" class="btn" style="background:#edf1f4;color:#536575" onclick="closePay()">Annuler</button><button class="btn" type="submit">Enregistrer</button></div></form></div></div>
 <script>
+function openPay(id,reste){document.getElementById("payId").value=id;document.getElementById("payAmount").value=Math.round(reste);document.getElementById("payAmount").max=Math.round(reste);document.getElementById("payModal").style.display="flex"}
+function closePay(){document.getElementById("payModal").style.display="none"}
 const f=n=>new Intl.NumberFormat('fr-FR').format(Math.round(n))+' FG';
 function calc(){let t=0,a=0;document.querySelectorAll('#lines .line').forEach(r=>{let q=+r.querySelector('[name="qty[]"]').value||0,p=+r.querySelector('[name="prix[]"]').value||0,u=+r.querySelector('[name="a4[]"]').value||0;t+=q*p;a+=q*u});total.textContent=f(t);a4.textContent=a;cout.textContent=f(a*5000);benef.textContent=f(t-a*5000)}
 function add(){let d=document.createElement('div');d.className='line';d.innerHTML='<input name="article[]" placeholder="Article"><input type="number" name="qty[]" min="1" value="1"><input type="number" name="prix[]" min="0" step="500" value="0"><input type="number" name="a4[]" min="0" step=".5" value="1"><button type="button" class="x">×</button>';d.querySelector('.x').onclick=()=>{d.remove();calc()};d.querySelectorAll('input').forEach(x=>x.oninput=calc);lines.appendChild(d);calc()}
