@@ -83,6 +83,69 @@ if($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='save'){
         }
     }
 }
+
+/* Paiements : avance ou solde total */
+if($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='pay'){
+    $id=(int)($_POST['id']??0);
+    $mode=$_POST['mode']??'advance';
+    $montant=(float)($_POST['montant']??0);
+
+    $st=$conn->prepare("SELECT id,libelle,montant,description FROM recettes WHERE id=? AND libelle LIKE 'Prestation DTF%' LIMIT 1");
+    $st->bind_param('i',$id);
+    $st->execute();
+    $p=$st->get_result()->fetch_assoc();
+    $st->close();
+
+    if(!$p){
+        $err='Prestation introuvable.';
+    }else{
+        $d=parseP($p['description']);
+        $total=(float)$p['montant'];
+        $paid=(float)($d['paid']??0);
+        $reste=max(0,$total-$paid);
+
+        if($reste<=0.01){
+            $err='Cette prestation est déjà totalement payée.';
+        }else{
+            if($mode==='total'){
+                $nouveauPaye=$total;
+            }else{
+                if($montant<=0){
+                    $err='Indique le montant de l’avance.';
+                    $nouveauPaye=$paid;
+                }elseif($montant>$reste+0.01){
+                    $err='L’avance dépasse le reste à payer.';
+                    $nouveauPaye=$paid;
+                }else{
+                    $nouveauPaye=min($total,$paid+$montant);
+                }
+            }
+
+            if(!$err){
+                $d['paid']=$nouveauPaye;
+                $d['total']=$total;
+                $d['ref']=$d['ref'] ?: 'PREST-'.date('Y').'-'.$id;
+                $desc=encodeP($d,$d['ref']);
+
+                $st=$conn->prepare("UPDATE recettes SET description=? WHERE id=?");
+                $st->bind_param('si',$desc,$id);
+
+                if($st->execute()){
+                    $st->close();
+                    if($nouveauPaye >= $total-0.01){
+                        $msg='Prestation totalement payée.';
+                    }else{
+                        $msg='Avance enregistrée. Reste : '.money($total-$nouveauPaye).'.';
+                    }
+                }else{
+                    $err='Paiement impossible.';
+                    $st->close();
+                }
+            }
+        }
+    }
+}
+
 if($editId&&!$err){
     $st=$conn->prepare("SELECT id,libelle,montant,description,date_recette FROM recettes WHERE id=? LIMIT 1");$st->bind_param('i',$editId);$st->execute();$edit=$st->get_result()->fetch_assoc();$st->close();
     if($edit&&stripos($edit['libelle'],'Prestation DTF')!==false){$edit['data']=parseP($edit['description']); if(($edit['data']['paid']??0)>=(float)$edit['montant']-0.01){$edit=null;$err='Cette prestation est totalement payée et verrouillée.';}}else $edit=null;
