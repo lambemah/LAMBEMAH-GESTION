@@ -1,4 +1,4 @@
-<?php
+²7i4o6⁸<?php
 session_start();
 require_once __DIR__ . '/config.php';
 
