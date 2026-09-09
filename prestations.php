@@ -151,6 +151,37 @@ if($editId&&!$err){
     if($edit&&stripos($edit['libelle'],'Prestation DTF')!==false){$edit['data']=parseP($edit['description']); if(($edit['data']['paid']??0)>=(float)$edit['montant']-0.01){$edit=null;$err='Cette prestation est totalement payée et verrouillée.';}}else $edit=null;
 }
 
+/* Impression d'une prestation */
+if(isset($_GET['imprimer'])){
+    $iid=(int)$_GET['imprimer'];
+    $st=$conn->prepare("SELECT id,libelle,montant,description,date_recette FROM recettes WHERE id=? AND libelle LIKE 'Prestation DTF%' LIMIT 1");
+    $st->bind_param('i',$iid);$st->execute();$print=$st->get_result()->fetch_assoc();$st->close();
+    if(!$print){die('Prestation introuvable.');}
+    $pd=parseP($print['description']);
+    $paid=(float)($pd['paid']??0);$reste=max(0,(float)$print['montant']-$paid);
+    $client=$pd['client']??preg_replace('/^Prestation DTF\s*-\s*/i','',$print['libelle']);
+    $lignes=$pd['lignes']??[];
+    ?>
+    <!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Prestation <?=h($pd['ref']??'')?></title>
+    <style>
+    *{box-sizing:border-box}body{margin:0;background:#eef2f6;font-family:Arial;color:#152b40}.paper{width:210mm;min-height:297mm;margin:20px auto;background:#fff;padding:18mm;box-shadow:0 2px 14px #0001}.head{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #1769e8;padding-bottom:12px}.logo{width:125px;max-height:70px;object-fit:contain}.brand{text-align:right;font-size:10px;line-height:1.7;color:#536575}.brand b{font-size:18px;color:#142b40}.title{margin:22px 0 12px;display:flex;justify-content:space-between}.title h1{font-size:22px;margin:0}.meta{font-size:10px;line-height:1.7}.client{background:#f5f8fb;border-radius:8px;padding:10px;margin-bottom:15px;font-size:11px}.client b{font-size:13px}.table{width:100%;border-collapse:collapse}.table th{font-size:9px;background:#edf3f8;padding:9px;text-align:left}.table td{font-size:10px;padding:9px;border-bottom:1px solid #e8edf1}.right{text-align:right}.totals{margin-top:15px;margin-left:auto;width:270px;font-size:11px;line-height:2}.total{font-size:15px;font-weight:bold;border-top:2px solid #17324a;padding-top:5px}.note{margin-top:20px;font-size:10px;background:#f7f9fb;padding:10px;border-radius:8px}.signature{margin-top:45px;display:flex;justify-content:flex-end}.sigbox{width:220px;text-align:center}.space{height:65px}.space img{max-width:170px;max-height:60px;object-fit:contain}.sigline{border-top:1px solid #34495e;padding-top:6px;font-size:10px}.hidden{display:none}.printbar{width:210mm;margin:12px auto;display:flex;justify-content:space-between;align-items:center}.printbar button{background:#1769e8;color:white;border:0;border-radius:7px;padding:10px 14px;font-weight:bold}.printbar label{font-size:11px}@media print{body{background:#fff}.paper{margin:0;box-shadow:none;width:auto;min-height:auto}.printbar{display:none}}
+    </style></head><body>
+    <div class="printbar"><label><input type="checkbox" id="addSignature"> Ajouter la signature</label><button onclick="window.print()">🖨️ Imprimer / PDF</button></div>
+    <div class="paper">
+      <div class="head"><div><img class="logo" src="assets/logo.png" alt="LAMBEMAH"></div><div class="brand"><b>LAMBEMAH GESTION</b><br>GESTION • PRESTATION<br>+224 611752767 / 622595362<br>konatelambetenin@gmail.com<br>KM 36</div></div>
+      <div class="title"><h1>FACTURE DE PRESTATION</h1><div class="meta"><b><?=h($pd['ref']??'PRESTATION')?></b><br><?=h(date('d/m/Y',strtotime($print['date_recette']??'now')))?></div></div>
+      <div class="client"><b>Client : <?=h($client)?></b></div>
+      <table class="table"><thead><tr><th>Article</th><th>Qté</th><th>Prix/u</th><th>A4/u</th><th class="right">Montant</th></tr></thead><tbody>
+      <?php foreach($lignes as $li):?><tr><td><?=h($li['article']??'')?></td><td><?=h($li['qty']??0)?></td><td><?=money($li['prix']??0)?></td><td><?=h($li['a4']??0)?></td><td class="right"><?=money($li['montant']??0)?></td></tr><?php endforeach;?>
+      </tbody></table>
+      <div class="totals"><div>Total : <b><?=money($print['montant'])?></b></div><div>Payé : <b><?=money($paid)?></b></div><div>Reste : <b><?=money($reste)?></b></div><div class="total">Net à payer : <?=money($print['montant'])?></div></div>
+      <?php if(!empty($pd['note'])):?><div class="note"><b>Note :</b> <?=h($pd['note'])?></div><?php endif;?>
+      <div class="signature"><div class="sigbox"><div class="space"><img id="signatureImg" class="hidden" src="assets/signature.png" alt="Signature"></div><div class="sigline">Responsable</div></div></div>
+    </div>
+    <script>const c=document.getElementById('addSignature'),img=document.getElementById('signatureImg');c.addEventListener('change',()=>img.classList.toggle('hidden',!c.checked));</script>
+    </body></html><?php exit;
+}
+
 $nb=0;$total=0;$couts=0;
 $r=$conn->query("SELECT COUNT(*) n,COALESCE(SUM(montant),0) t FROM recettes WHERE libelle LIKE 'Prestation DTF%'");if($r){$x=$r->fetch_assoc();$nb=(int)$x['n'];$total=(float)$x['t'];}
 $r=$conn->query("SELECT COALESCE(SUM(montant),0) t FROM depenses WHERE libelle LIKE 'DTF fournisseur - %'");if($r)$couts=(float)$r->fetch_assoc()['t'];
@@ -176,7 +207,7 @@ $r=$conn->query("SELECT id,libelle,montant,description,date_recette FROM recette
 <p style="font-size:8px;color:#8996a0">DTF = 5 000 FG/A4 • grand : 1 A4 ou + • enfant/képi : 0,5 A4/u si 2 designs sur 1 A4.</p>
 </form></div>
 <div class="box"><h2>Historique</h2><div class="table"><table><thead><tr><th>Client</th><th>Articles</th><th>Total</th><th>Payé</th><th>Reste</th><th>État</th><th></th></tr></thead><tbody>
-<?php foreach($items as $p):$d=parseP($p['description']);$new=!empty($d['ref']);$paid=(float)($d['paid']??0);$reste=max(0,(float)$p['montant']-$paid);$status=$reste<=0.01?'TOUT PAYÉ':($paid>0?'AVANCE':'NON PAYÉ');?><tr><td><b><?=h($d['client']?:preg_replace('/^Prestation DTF\s*-\s*/i','',$p['libelle']))?></b></td><td><?=$new?count($d['lignes']).' ligne(s) • '.$d['a4'].' A4':'Ancien format'?></td><td class="blue"><b><?=money($p['montant'])?></b></td><td><?=money($paid)?></td><td class="<?= $reste>0.01?'':'green' ?>"><b><?=money($reste)?></b></td><td><b><?=$status?></b></td><td><div style="display:flex;gap:4px;flex-wrap:wrap"><?php if($reste>0.01):?><button type="button" class="btn" onclick="openPay(<?=$p['id']?>,<?=json_encode($reste)?>)">Avance</button><form method="post" style="display:inline"><input type="hidden" name="action" value="pay"><input type="hidden" name="id" value="<?=$p['id']?>"><input type="hidden" name="mode" value="total"><button class="btn" type="submit">Tout payé</button></form><?php if($new):?><a class="btn" style="background:#edf1f4;color:#536575" href="?edit=<?=$p['id']?>">Modifier</a><?php endif;?><?php else:?><span class="green">✓</span><?php endif;?></div></td></tr><?php endforeach;?>
+<?php foreach($items as $p):$d=parseP($p['description']);$new=!empty($d['ref']);$paid=(float)($d['paid']??0);$reste=max(0,(float)$p['montant']-$paid);$status=$reste<=0.01?'TOUT PAYÉ':($paid>0?'AVANCE':'NON PAYÉ');?><tr><td><b><?=h($d['client']?:preg_replace('/^Prestation DTF\s*-\s*/i','',$p['libelle']))?></b></td><td><?=$new?count($d['lignes']).' ligne(s) • '.$d['a4'].' A4':'Ancien format'?></td><td class="blue"><b><?=money($p['montant'])?></b></td><td><?=money($paid)?></td><td class="<?= $reste>0.01?'':'green' ?>"><b><?=money($reste)?></b></td><td><b><?=$status?></b></td><td><div style="display:flex;gap:4px;flex-wrap:wrap"><a class="btn" style="background:#eef5ff;color:#1769e8" href="?imprimer=<?=$p['id']?>">Imprimer</a><?php if($reste>0.01):?><button type="button" class="btn" onclick="openPay(<?=$p['id']?>,<?=json_encode($reste)?>)">Avance</button><form method="post" style="display:inline"><input type="hidden" name="action" value="pay"><input type="hidden" name="id" value="<?=$p['id']?>"><input type="hidden" name="mode" value="total"><button class="btn" type="submit">Tout payé</button></form><?php if($new):?><a class="btn" style="background:#edf1f4;color:#536575" href="?edit=<?=$p['id']?>">Modifier</a><?php endif;?><?php else:?><span class="green">✓</span><?php endif;?></div></td></tr><?php endforeach;?>
 <?php if(!$items):?><tr><td colspan="7">Aucune prestation.</td></tr><?php endif;?></tbody></table></div></div></div></div>
 <div class="modal" id="payModal"><div class="modalbox"><h3>Avance</h3><form method="post"><input type="hidden" name="action" value="pay"><input type="hidden" name="id" id="payId"><label class="label">Montant</label><input type="number" name="montant" id="payAmount" min="1" step="500" required><div class="actions" style="margin-top:10px"><button type="button" class="btn" style="background:#edf1f4;color:#536575" onclick="closePay()">Annuler</button><button class="btn" type="submit">Enregistrer</button></div></form></div></div>
 <script>
