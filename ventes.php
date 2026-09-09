@@ -1,273 +1,436 @@
 <?php
+error_reporting(E_ALL);
+ini_set('display_errors', '1');
+ini_set('display_startup_errors', '1');
+
 session_start();
 require_once __DIR__ . '/config.php';
 
 if (!isset($conn) || !($conn instanceof mysqli)) {
-    die('Connexion à la base de données impossible.');
+    die("Connexion à la base de données impossible.");
 }
 
-$conn->set_charset('utf8mb4');
+$conn->set_charset("utf8mb4");
 
-function h($v){
+/* =========================================================
+   OUTILS
+========================================================= */
+
+function h($v) {
     return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
 }
 
-function money($v){
+function money($v) {
     return number_format((float)$v, 0, ',', ' ') . ' FG';
 }
 
-function cleanText($v){
+function cleanText($v) {
     return trim(preg_replace('/[|\r\n]+/', ' ', (string)$v));
 }
 
 function nextId(mysqli $conn, string $table): int {
-    if (!in_array($table, ['produits','mouvements','ventes'], true)) {
+
+    $tables = ['produits', 'ventes', 'mouvements'];
+
+    if (!in_array($table, $tables, true)) {
         return 1;
     }
 
-    $r = $conn->query("SELECT COALESCE(MAX(id),0)+1 n FROM `$table`");
-    return (int)($r->fetch_assoc()['n'] ?? 1);
+    $sql = "SELECT COALESCE(MAX(id),0)+1 AS prochain FROM `$table`";
+    $res = $conn->query($sql);
+
+    if (!$res) {
+        throw new Exception("Impossible de générer un nouvel ID pour $table.");
+    }
+
+    $row = $res->fetch_assoc();
+
+    return (int)($row['prochain'] ?? 1);
 }
 
-function parseMeta(string $desc): array {
-    $o = [];
+function parseMeta(string $description): array {
 
-    foreach (explode('|', $desc) as $p) {
-        if (strpos($p, '=') !== false) {
-            [$k, $v] = explode('=', $p, 2);
-            $o[$k] = trim($v);
+    $data = [];
+
+    foreach (explode('|', $description) as $part) {
+
+        if (strpos($part, '=') !== false) {
+
+            [$key, $value] = explode('=', $part, 2);
+
+            $data[trim($key)] = trim($value);
         }
     }
 
-    return $o;
+    return $data;
 }
 
-function invoiceRows(mysqli $conn, string $ref): array {
+function flash($type, $message) {
+
+    $_SESSION['flash'] = [
+        'type' => $type,
+        'message' => $message
+    ];
+}
+
+function getInvoiceRows(mysqli $conn, string $ref): array {
+
     $rows = [];
+
     $safe = $conn->real_escape_string($ref);
 
-    $q = $conn->query("
-        SELECT v.*, p.nom, p.categorie
+    $sql = "
+        SELECT
+            v.id,
+            v.produit_id,
+            v.quantite,
+            v.prix_unitaire,
+            v.montant,
+            v.description,
+            v.date_vente,
+            p.nom,
+            p.categorie,
+            p.stock
         FROM ventes v
-        LEFT JOIN produits p ON p.id = v.produit_id
+        LEFT JOIN produits p
+            ON p.id = v.produit_id
         WHERE v.description LIKE '%FACTURE=$safe|%'
         ORDER BY v.id ASC
-    ");
+    ";
 
-    while ($q && ($r = $q->fetch_assoc())) {
-        $rows[] = $r;
+    $result = $conn->query($sql);
+
+    if ($result) {
+
+        while ($row = $result->fetch_assoc()) {
+            $rows[] = $row;
+        }
     }
 
     return $rows;
 }
 
-function flash($t, $m){
-    $_SESSION['flash'] = [
-        'type' => $t,
-        'msg'  => $m
-    ];
+function invoiceTotal(array $rows): float {
+
+    $total = 0;
+
+    foreach ($rows as $row) {
+
+        $total +=
+            (float)$row['quantite'] *
+            (float)$row['prix_unitaire'];
+    }
+
+    return $total;
 }
 
+function invoicePaid(array $rows): float {
+
+    if (!$rows) {
+        return 0;
+    }
+
+    $meta = parseMeta($rows[0]['description']);
+
+    return (float)($meta['PAYE'] ?? 0);
+}
+
+function invoiceClient(array $rows): string {
+
+    if (!$rows) {
+        return 'Client comptant';
+    }
+
+    $meta = parseMeta($rows[0]['description']);
+
+    return $meta['CLIENT'] ?? 'Client comptant';
+}
+
+function invoiceStatus(float $total, float $paid): string {
+
+    if ($paid <= 0.01) {
+        return 'Non payée';
+    }
+
+    if ($paid >= $total - 0.01) {
+        return 'Payée';
+    }
+
+    return 'Partiellement payée';
+}
 
 /* =========================================================
-   IMPRESSION
+   IMPRESSION FACTURE
 ========================================================= */
 
 if (isset($_GET['imprimer'])) {
 
     $ref = cleanText($_GET['imprimer']);
-    $rows = invoiceRows($conn, $ref);
+
+    $rows = getInvoiceRows($conn, $ref);
 
     if (!$rows) {
-        die('Facture introuvable.');
+        die("Facture introuvable.");
     }
 
-    $meta = parseMeta($rows[0]['description']);
-
-    $total = 0;
-
-    foreach ($rows as $r) {
-        $total += (float)$r['quantite'] * (float)$r['prix_unitaire'];
-    }
-
-    $paid = (float)($meta['PAYE'] ?? 0);
+    $total = invoiceTotal($rows);
+    $paid = invoicePaid($rows);
     $rest = max(0, $total - $paid);
-
-    $status = $paid <= 0
-        ? 'Non payée'
-        : ($rest <= 0 ? 'Payée' : 'Partiellement payée');
+    $client = invoiceClient($rows);
+    $status = invoiceStatus($total, $paid);
 
     ?>
-<!doctype html>
+
+<!DOCTYPE html>
 <html lang="fr">
+
 <head>
-<meta charset="utf-8">
-<title><?=h($ref)?></title>
+
+<meta charset="UTF-8">
+
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
+
+<title><?= h($ref) ?></title>
 
 <style>
-*{box-sizing:border-box}
 
-body{
-    margin:0;
-    background:#f3f6fa;
-    font-family:Arial,sans-serif;
-    color:#1d2d3d;
+* {
+    box-sizing: border-box;
 }
 
-.paper{
-    width:850px;
-    max-width:95%;
-    margin:30px auto;
-    background:#fff;
-    padding:35px;
-    border-radius:10px;
-    box-shadow:0 5px 25px rgba(0,0,0,.08);
+body {
+    margin: 0;
+    background: #eef6ff;
+    color: #172033;
+    font-family: Arial, sans-serif;
 }
 
-.top{
-    display:flex;
-    justify-content:space-between;
-    align-items:flex-start;
-    border-bottom:2px solid #123451;
-    padding-bottom:18px;
+.facture {
+    width: 850px;
+    max-width: 95%;
+    margin: 30px auto;
+    background: white;
+    padding: 35px;
+    border-radius: 18px;
+    box-shadow: 0 10px 35px rgba(20, 60, 100, .12);
 }
 
-.brand{
-    font-size:26px;
-    font-weight:800;
-    color:#123451;
+.entete {
+    display: flex;
+    justify-content: space-between;
+    gap: 20px;
+    padding-bottom: 20px;
+    border-bottom: 3px solid #1677ff;
 }
 
-.title{
-    text-align:right;
-    font-size:18px;
-    font-weight:800;
+.logo {
+    font-size: 28px;
+    font-weight: 900;
+    color: #1261c9;
 }
 
-.title small{
-    font-size:13px;
-    color:#555;
+.sous-logo {
+    color: #607089;
+    margin-top: 4px;
 }
 
-.info{
-    display:grid;
-    grid-template-columns:1fr 1fr;
-    gap:15px;
-    margin:20px 0;
+.titre {
+    text-align: right;
+    font-size: 20px;
+    font-weight: 800;
+    color: #162a49;
 }
 
-.box{
-    border:1px solid #dce5ee;
-    padding:12px;
-    border-radius:7px;
+.titre small {
+    display: block;
+    margin-top: 7px;
+    color: #1677ff;
+    font-size: 13px;
 }
 
-table{
-    width:100%;
-    border-collapse:collapse;
+.infos {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 15px;
+    margin: 25px 0;
 }
 
-th,td{
-    padding:11px 8px;
-    border-bottom:1px solid #e4eaf0;
+.info {
+    border: 1px solid #dbe9f8;
+    border-radius: 12px;
+    padding: 14px;
+    background: #f8fbff;
 }
 
-th{
-    background:#f4f7fa;
-    text-align:left;
-    font-size:12px;
+table {
+    width: 100%;
+    border-collapse: collapse;
 }
 
-.num{
-    text-align:right;
+th {
+    background: #edf6ff;
+    color: #174a82;
+    padding: 12px 8px;
+    text-align: left;
+    font-size: 13px;
 }
 
-.totals{
-    width:320px;
-    margin-left:auto;
-    margin-top:20px;
+td {
+    padding: 11px 8px;
+    border-bottom: 1px solid #e6edf5;
 }
 
-.totals .line{
-    display:flex;
-    justify-content:space-between;
-    padding:7px 0;
+.num {
+    text-align: right;
 }
 
-.grand{
-    border-top:2px solid #123451;
-    font-size:17px;
-    font-weight:800;
+.total {
+    width: 350px;
+    max-width: 100%;
+    margin-left: auto;
+    margin-top: 25px;
 }
 
-.status{
-    padding:5px 9px;
-    border-radius:20px;
-    background:#eef3f8;
+.ligne-total {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0;
 }
 
-.actions{
-    margin-top:25px;
-    text-align:center;
+.grand-total {
+    border-top: 2px solid #1677ff;
+    margin-top: 7px;
+    padding-top: 12px;
+    font-size: 18px;
+    font-weight: 900;
 }
 
-.actions button{
-    border:0;
-    background:#2563eb;
-    color:#fff;
-    padding:11px 18px;
-    border-radius:8px;
-    cursor:pointer;
-    font-weight:700;
+.statut {
+    display: inline-block;
+    padding: 6px 12px;
+    border-radius: 30px;
+    background: #eaf4ff;
+    color: #1261c9;
+    font-weight: 700;
 }
 
-@media print{
-    body{
-        background:#fff;
+.imprimer {
+    margin-top: 30px;
+    text-align: center;
+}
+
+.imprimer button {
+    border: 0;
+    background: #1677ff;
+    color: white;
+    padding: 13px 22px;
+    border-radius: 10px;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+@media print {
+
+    body {
+        background: white;
     }
 
-    .paper{
-        width:100%;
-        max-width:none;
-        margin:0;
-        box-shadow:none;
+    .facture {
+        width: 100%;
+        max-width: none;
+        margin: 0;
+        box-shadow: none;
     }
 
-    .actions{
-        display:none;
+    .imprimer {
+        display: none;
     }
 }
+
+@media(max-width:600px) {
+
+    .facture {
+        padding: 18px;
+    }
+
+    .entete {
+        flex-direction: column;
+    }
+
+    .titre {
+        text-align: left;
+    }
+
+    .infos {
+        grid-template-columns: 1fr;
+    }
+
+    table {
+        font-size: 12px;
+    }
+
+    th,
+    td {
+        padding: 8px 5px;
+    }
+}
+
 </style>
+
 </head>
 
 <body>
 
-<div class="paper">
+<div class="facture">
 
-    <div class="top">
+    <div class="entete">
 
         <div>
-            <div class="brand">LAMBEMAH</div>
-            <div>GESTION • VENTES</div>
+            <div class="logo">
+                LAMBEMAH GESTION
+            </div>
+
+            <div class="sous-logo">
+                Gestion des ventes
+            </div>
         </div>
 
-        <div class="title">
-            FACTURE DE VENTE<br>
-            <small><?=h($ref)?></small>
+        <div class="titre">
+            FACTURE DE VENTE
+
+            <small>
+                <?= h($ref) ?>
+            </small>
         </div>
 
     </div>
 
-    <div class="info">
+    <div class="infos">
 
-        <div class="box">
-            <b>Client</b><br>
-            <?=h($meta['CLIENT'] ?? 'Client comptant')?>
+        <div class="info">
+
+            <strong>Client</strong>
+
+            <br>
+
+            <?= h($client) ?>
+
         </div>
 
-        <div class="box">
-            <b>Date</b><br>
-            <?=h(date('d/m/Y H:i', strtotime($rows[0]['date_vente'] ?? 'now')))?>
+        <div class="info">
+
+            <strong>Date</strong>
+
+            <br>
+
+            <?= h(
+                date(
+                    'd/m/Y H:i',
+                    strtotime($rows[0]['date_vente'] ?? 'now')
+                )
+            ) ?>
+
         </div>
 
     </div>
@@ -275,34 +438,54 @@ th{
     <table>
 
         <thead>
+
             <tr>
-                <th>Désignation</th>
+
+                <th>Article</th>
+
                 <th>Catégorie</th>
+
                 <th class="num">Qté</th>
-                <th class="num">PVU</th>
+
+                <th class="num">Prix</th>
+
                 <th class="num">Montant</th>
+
             </tr>
+
         </thead>
 
         <tbody>
 
-        <?php foreach($rows as $r):
+        <?php foreach ($rows as $row): ?>
 
-            $m = (float)$r['quantite'] * (float)$r['prix_unitaire'];
-
-        ?>
+            <?php
+            $montant =
+                (float)$row['quantite'] *
+                (float)$row['prix_unitaire'];
+            ?>
 
             <tr>
 
-                <td><?=h($r['nom'] ?? 'Article')?></td>
+                <td>
+                    <?= h($row['nom'] ?? 'Article') ?>
+                </td>
 
-                <td><?=h($r['categorie'] ?? '')?></td>
+                <td>
+                    <?= h($row['categorie'] ?? '') ?>
+                </td>
 
-                <td class="num"><?=h($r['quantite'])?></td>
+                <td class="num">
+                    <?= h($row['quantite']) ?>
+                </td>
 
-                <td class="num"><?=money($r['prix_unitaire'])?></td>
+                <td class="num">
+                    <?= money($row['prix_unitaire']) ?>
+                </td>
 
-                <td class="num"><?=money($m)?></td>
+                <td class="num">
+                    <?= money($montant) ?>
+                </td>
 
             </tr>
 
@@ -312,45 +495,50 @@ th{
 
     </table>
 
-    <div class="totals">
+    <div class="total">
 
-        <div class="line">
-            <span>Total facture</span>
-            <b><?=money($total)?></b>
+        <div class="ligne-total">
+            <span>Total</span>
+            <strong><?= money($total) ?></strong>
         </div>
 
-        <div class="line">
-            <span>Déjà encaissé</span>
-            <b><?=money($paid)?></b>
+        <div class="ligne-total">
+            <span>Déjà payé</span>
+            <strong><?= money($paid) ?></strong>
         </div>
 
-        <div class="line">
-            <span>Reste client</span>
-            <b><?=money($rest)?></b>
+        <div class="ligne-total">
+            <span>Reste</span>
+            <strong><?= money($rest) ?></strong>
         </div>
 
-        <div class="line grand">
+        <div class="ligne-total grand-total">
             <span>Statut</span>
-            <span class="status"><?=h($status)?></span>
+
+            <span class="statut">
+                <?= h($status) ?>
+            </span>
         </div>
 
     </div>
 
-    <div class="actions">
+    <div class="imprimer">
+
         <button onclick="window.print()">
             🖨️ Imprimer / Enregistrer en PDF
         </button>
+
     </div>
 
 </div>
 
 </body>
+
 </html>
 
 <?php
-    exit;
+exit;
 }
-
 
 /* =========================================================
    TRAITEMENTS POST
@@ -361,16 +549,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
 
         /* =====================================================
-           ENREGISTRER / MODIFIER UNE FACTURE
+           NOUVELLE FACTURE / MODIFICATION
         ===================================================== */
 
         if (isset($_POST['save_vente'])) {
 
-            $client  = cleanText($_POST['client'] ?? 'Client comptant');
-            $editRef = cleanText($_POST['edit_ref'] ?? '');
+            $client = cleanText(
+                $_POST['client'] ?? 'Client comptant'
+            );
 
-            $ids    = $_POST['produit_id'] ?? [];
-            $qtys   = $_POST['quantite'] ?? [];
+            if ($client === '') {
+                $client = 'Client comptant';
+            }
+
+            $editRef = cleanText(
+                $_POST['edit_ref'] ?? ''
+            );
+
+            $ids = $_POST['produit_id'] ?? [];
+            $qtys = $_POST['quantite'] ?? [];
             $prices = $_POST['prix_unitaire'] ?? [];
 
             $lines = [];
@@ -378,228 +575,249 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             for ($i = 0; $i < count($ids); $i++) {
 
                 $pid = (int)($ids[$i] ?? 0);
-                $q   = (int)($qtys[$i] ?? 0);
-                $p   = (float)($prices[$i] ?? 0);
+                $qty = (int)($qtys[$i] ?? 0);
+                $price = (float)($prices[$i] ?? 0);
 
-                if ($pid > 0 && $q > 0 && $p > 0) {
+                if (
+                    $pid > 0 &&
+                    $qty > 0 &&
+                    $price > 0
+                ) {
 
                     $lines[] = [
                         'pid' => $pid,
-                        'q'   => $q,
-                        'p'   => $p
+                        'qty' => $qty,
+                        'price' => $price
                     ];
-
                 }
             }
 
             if (!$lines) {
-                throw new Exception('Ajoutez au moins un article.');
+                throw new Exception(
+                    "Ajoutez au moins un article."
+                );
             }
-
-
-            /* =================================================
-               CALCUL DU NOUVEAU TOTAL
-            ================================================= */
 
             $newTotal = 0;
 
-            foreach ($lines as $l) {
-                $newTotal += $l['q'] * $l['p'];
+            foreach ($lines as $line) {
+
+                $newTotal +=
+                    $line['qty'] *
+                    $line['price'];
             }
 
-
             /* =================================================
-               MODIFICATION D'UNE FACTURE EXISTANTE
+               MODIFICATION
             ================================================= */
 
             if ($editRef !== '') {
 
-                $old = invoiceRows($conn, $editRef);
+                $oldRows = getInvoiceRows(
+                    $conn,
+                    $editRef
+                );
 
-                if (!$old) {
-                    throw new Exception('Facture à modifier introuvable.');
+                if (!$oldRows) {
+                    throw new Exception(
+                        "Facture introuvable."
+                    );
                 }
 
-                $oldMeta = parseMeta($old[0]['description']);
+                $oldTotal = invoiceTotal(
+                    $oldRows
+                );
 
-                $oldPaid = (float)($oldMeta['PAYE'] ?? 0);
+                $oldPaid = invoicePaid(
+                    $oldRows
+                );
 
-
-                /* ---------------------------------------------
-                   UNE FACTURE TOTALLEMENT PAYÉE EST VERROUILLÉE
-                --------------------------------------------- */
-
-                $oldTotal = 0;
-
-                foreach ($old as $r) {
-                    $oldTotal +=
-                        (float)$r['quantite'] *
-                        (float)$r['prix_unitaire'];
-                }
+                /*
+                 * Facture totalement payée =
+                 * verrouillée.
+                 */
 
                 if ($oldPaid >= $oldTotal - 0.01) {
 
                     throw new Exception(
-                        'Cette facture est totalement payée et ne peut plus être modifiée.'
+                        "Cette facture est totalement payée et verrouillée."
                     );
-
                 }
 
-
-                /* ---------------------------------------------
-                   LE NOUVEAU TOTAL NE PEUT PAS ÊTRE INFÉRIEUR
-                   AU MONTANT DÉJÀ ENCAISSÉ
-                --------------------------------------------- */
+                /*
+                 * On ne peut pas mettre le total
+                 * sous le montant déjà payé.
+                 */
 
                 if ($newTotal < $oldPaid - 0.01) {
 
                     throw new Exception(
-                        'Impossible de modifier cette facture : '
-                        . 'le nouveau total ('.money($newTotal).') '
-                        . 'est inférieur au montant déjà encaissé ('
-                        .money($oldPaid).').'
+                        "Le nouveau total ne peut pas être inférieur au montant déjà payé."
                     );
-
                 }
-
 
                 $conn->begin_transaction();
 
                 try {
 
                     /*
-                     * 1. RESTAURER LE STOCK DES ANCIENS ARTICLES
+                     * 1. Restaurer ancien stock
                      */
 
-                    foreach ($old as $r) {
+                    foreach ($oldRows as $old) {
 
-                        $pid = (int)$r['produit_id'];
-                        $q   = (int)$r['quantite'];
+                        $pid = (int)$old['produit_id'];
+                        $qty = (int)$old['quantite'];
 
-                        $stmtStock = $conn->prepare(
+                        $stmt = $conn->prepare(
                             "UPDATE produits
                              SET stock = stock + ?
                              WHERE id = ?"
                         );
 
-                        if (!$stmtStock) {
+                        if (!$stmt) {
                             throw new Exception(
-                                'Erreur lors de la restauration du stock.'
+                                "Erreur restauration stock."
                             );
                         }
 
-                        $stmtStock->bind_param(
-                            'ii',
-                            $q,
+                        $stmt->bind_param(
+                            "ii",
+                            $qty,
                             $pid
                         );
 
-                        $stmtStock->execute();
-                        $stmtStock->close();
+                        $stmt->execute();
+                        $stmt->close();
                     }
 
-
                     /*
-                     * 2. SUPPRIMER LES ANCIENNES LIGNES
+                     * 2. Supprimer anciennes lignes
                      */
 
-                    $safeRef = $conn->real_escape_string($editRef);
+                    $safeRef =
+                        $conn->real_escape_string(
+                            $editRef
+                        );
 
                     $conn->query(
                         "DELETE FROM ventes
-                         WHERE description LIKE '%FACTURE=$safeRef|%'"
+                         WHERE description LIKE
+                         '%FACTURE=$safeRef|%'"
                     );
 
                     $conn->query(
                         "DELETE FROM mouvements
                          WHERE type='SORTIE'
-                         AND description LIKE '%FACTURE=$safeRef|%'"
+                         AND description LIKE
+                         '%FACTURE=$safeRef|%'"
                     );
 
-
                     /*
-                     * 3. RECRÉER LES LIGNES AVEC LES NOUVELLES
-                     *    QUANTITÉS / PRIX
+                     * 3. Recréer les nouvelles lignes
                      */
 
-                    $date = date('Y-m-d H:i:s');
+                    $date = date(
+                        'Y-m-d H:i:s'
+                    );
 
-                    $reste = max(0, $newTotal - $oldPaid);
+                    $newRest =
+                        max(
+                            0,
+                            $newTotal - $oldPaid
+                        );
 
-                    $clientSafe = cleanText($client);
+                    foreach ($lines as $line) {
 
-                    foreach ($lines as $l) {
+                        $pid =
+                            (int)$line['pid'];
 
-                        $pid = (int)$l['pid'];
-                        $q   = (int)$l['q'];
-                        $p   = (float)$l['p'];
+                        $qty =
+                            (int)$line['qty'];
+
+                        $price =
+                            (float)$line['price'];
 
                         /*
-                         * Vérification article
+                         * Vérifier produit
                          */
 
-                        $stmtProd = $conn->prepare(
+                        $stmt = $conn->prepare(
                             "SELECT id, nom, stock
                              FROM produits
                              WHERE id = ?"
                         );
 
-                        if (!$stmtProd) {
+                        if (!$stmt) {
                             throw new Exception(
-                                'Erreur lors de la vérification du produit.'
+                                "Erreur vérification produit."
                             );
                         }
 
-                        $stmtProd->bind_param('i', $pid);
-                        $stmtProd->execute();
+                        $stmt->bind_param(
+                            "i",
+                            $pid
+                        );
 
-                        $resProd = $stmtProd->get_result();
+                        $stmt->execute();
 
-                        if (!$resProd || !$resProd->num_rows) {
-                            $stmtProd->close();
+                        $result =
+                            $stmt->get_result();
+
+                        if (
+                            !$result ||
+                            !$result->num_rows
+                        ) {
+
+                            $stmt->close();
 
                             throw new Exception(
-                                'Article introuvable.'
+                                "Produit introuvable."
                             );
                         }
 
-                        $prod = $resProd->fetch_assoc();
+                        $product =
+                            $result->fetch_assoc();
 
-                        $stmtProd->close();
+                        $stmt->close();
 
-
-                        /*
-                         * Vérification stock
-                         */
-
-                        if ((int)$prod['stock'] < $q) {
+                        if (
+                            (int)$product['stock']
+                            < $qty
+                        ) {
 
                             throw new Exception(
-                                'Stock insuffisant pour '
-                                .$prod['nom']
-                                .' (stock : '
-                                .$prod['stock']
-                                .').'
+                                "Stock insuffisant pour "
+                                .$product['nom']
+                                ." (stock disponible : "
+                                .$product['stock']
+                                .")."
                             );
-
                         }
 
+                        $vid =
+                            nextId(
+                                $conn,
+                                'ventes'
+                            );
+
+                        $montant =
+                            $qty * $price;
+
+                        $description =
+                            "FACTURE="
+                            .$editRef
+                            ."|CLIENT="
+                            .$client
+                            ."|PAYE="
+                            .$oldPaid
+                            ."|RESTE="
+                            .$newRest
+                            ."|VENTE";
 
                         /*
                          * Vente
                          */
-
-                        $vid = nextId($conn, 'ventes');
-
-                        $montant = $q * $p;
-
-                        $desc =
-                            "FACTURE=".$editRef
-                            ."|CLIENT=".$clientSafe
-                            ."|PAYE=".$oldPaid
-                            ."|RESTE=".$reste
-                            ."|VENTE";
-
 
                         $stmt = $conn->prepare(
                             "INSERT INTO ventes
@@ -612,43 +830,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 description,
                                 date_vente
                             )
-                            VALUES (?,?,?,?,?,?,?)"
+                            VALUES
+                            (?,?,?,?,?,?,?)"
                         );
 
                         if (!$stmt) {
                             throw new Exception(
-                                'Erreur lors de l’enregistrement de la vente.'
+                                "Erreur insertion vente."
                             );
                         }
 
                         $stmt->bind_param(
-                            'iiiddss',
+                            "iiiddss",
                             $vid,
                             $pid,
-                            $q,
-                            $p,
+                            $qty,
+                            $price,
                             $montant,
-                            $desc,
+                            $description,
                             $date
                         );
 
                         $stmt->execute();
                         $stmt->close();
 
-
                         /*
-                         * Mouvement de stock
+                         * Mouvement stock
                          */
 
-                        $mid = nextId($conn, 'mouvements');
+                        $mid =
+                            nextId(
+                                $conn,
+                                'mouvements'
+                            );
 
-                        $md =
-                            "FACTURE=".$editRef
-                            ."|CLIENT=".$clientSafe
+                        $movementDescription =
+                            "FACTURE="
+                            .$editRef
+                            ."|CLIENT="
+                            .$client
                             ."|SORTIE VENTE";
 
-
-                        $stmt2 = $conn->prepare(
+                        $stmt = $conn->prepare(
                             "INSERT INTO mouvements
                             (
                                 id,
@@ -659,65 +882,64 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 description,
                                 date_mouvement
                             )
-                            VALUES (?,?,'SORTIE',?,?,?,?)"
+                            VALUES
+                            (?,?,'SORTIE',?,?,?,?)"
                         );
 
-                        if (!$stmt2) {
+                        if (!$stmt) {
                             throw new Exception(
-                                'Erreur lors de l’enregistrement du mouvement.'
+                                "Erreur mouvement stock."
                             );
                         }
 
-                        $stmt2->bind_param(
-                            'iiidss',
+                        $stmt->bind_param(
+                            "iiidss",
                             $mid,
                             $pid,
-                            $q,
-                            $p,
-                            $md,
+                            $qty,
+                            $price,
+                            $movementDescription,
                             $date
                         );
 
-                        $stmt2->execute();
-                        $stmt2->close();
-
+                        $stmt->execute();
+                        $stmt->close();
 
                         /*
-                         * Déduire le nouveau stock
+                         * Nouveau stock
                          */
 
-                        $stmtStock2 = $conn->prepare(
+                        $stmt = $conn->prepare(
                             "UPDATE produits
                              SET stock = stock - ?
                              WHERE id = ?"
                         );
 
-                        if (!$stmtStock2) {
+                        if (!$stmt) {
                             throw new Exception(
-                                'Erreur lors de la mise à jour du stock.'
+                                "Erreur mise à jour stock."
                             );
                         }
 
-                        $stmtStock2->bind_param(
-                            'ii',
-                            $q,
+                        $stmt->bind_param(
+                            "ii",
+                            $qty,
                             $pid
                         );
 
-                        $stmtStock2->execute();
-                        $stmtStock2->close();
+                        $stmt->execute();
+                        $stmt->close();
                     }
-
 
                     $conn->commit();
 
                     flash(
-                        'ok',
-                        'Facture '.$editRef.' modifiée avec succès.'
+                        'success',
+                        "Facture $editRef modifiée avec succès."
                     );
 
                     header(
-                        'Location: ventes.php?facture='
+                        "Location: ventes.php?facture="
                         .urlencode($editRef)
                     );
 
@@ -729,230 +951,256 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     throw $e;
                 }
-
+            }
 
             /* =================================================
                NOUVELLE FACTURE
             ================================================= */
 
-            } else {
+            $ref =
+                "VEN-"
+                .date('Ymd-His')
+                ."-"
+                .nextId(
+                    $conn,
+                    'ventes'
+                );
 
-                $ref =
-                    'VEN-'
-                    .date('Ymd-His')
-                    .'-'
-                    .nextId($conn, 'ventes');
+            $conn->begin_transaction();
 
+            try {
 
-                $conn->begin_transaction();
+                $date =
+                    date('Y-m-d H:i:s');
 
-                try {
+                foreach ($lines as $line) {
 
-                    $date = date('Y-m-d H:i:s');
+                    $pid =
+                        (int)$line['pid'];
 
-                    foreach ($lines as $l) {
+                    $qty =
+                        (int)$line['qty'];
 
-                        $pid = (int)$l['pid'];
-                        $q   = (int)$l['q'];
-                        $p   = (float)$l['p'];
+                    $price =
+                        (float)$line['price'];
 
+                    /*
+                     * Vérification produit
+                     */
 
-                        /*
-                         * Vérifier produit et stock
-                         */
-
-                        $stmtProd = $conn->prepare(
-                            "SELECT id, nom, stock
-                             FROM produits
-                             WHERE id = ?"
-                        );
-
-                        if (!$stmtProd) {
-                            throw new Exception(
-                                'Erreur lors de la vérification du produit.'
-                            );
-                        }
-
-                        $stmtProd->bind_param('i', $pid);
-                        $stmtProd->execute();
-
-                        $resProd = $stmtProd->get_result();
-
-                        if (!$resProd || !$resProd->num_rows) {
-
-                            $stmtProd->close();
-
-                            throw new Exception(
-                                'Article introuvable.'
-                            );
-                        }
-
-                        $prod = $resProd->fetch_assoc();
-
-                        $stmtProd->close();
-
-
-                        if ((int)$prod['stock'] < $q) {
-
-                            throw new Exception(
-                                'Stock insuffisant pour '
-                                .$prod['nom']
-                                .' (stock : '
-                                .$prod['stock']
-                                .').'
-                            );
-
-                        }
-
-
-                        /*
-                         * Vente
-                         */
-
-                        $vid = nextId($conn, 'ventes');
-
-                        $montant = $q * $p;
-
-                        $desc =
-                            "FACTURE=".$ref
-                            ."|CLIENT=".$client
-                            ."|PAYE=0"
-                            ."|RESTE=0"
-                            ."|VENTE";
-
-
-                        $stmt = $conn->prepare(
-                            "INSERT INTO ventes
-                            (
-                                id,
-                                produit_id,
-                                quantite,
-                                prix_unitaire,
-                                montant,
-                                description,
-                                date_vente
-                            )
-                            VALUES (?,?,?,?,?,?,?)"
-                        );
-
-                        if (!$stmt) {
-                            throw new Exception(
-                                'Erreur lors de l’enregistrement de la vente.'
-                            );
-                        }
-
-                        $stmt->bind_param(
-                            'iiiddss',
-                            $vid,
-                            $pid,
-                            $q,
-                            $p,
-                            $montant,
-                            $desc,
-                            $date
-                        );
-
-                        $stmt->execute();
-                        $stmt->close();
-
-
-                        /*
-                         * Mouvement
-                         */
-
-                        $mid = nextId($conn, 'mouvements');
-
-                        $md =
-                            "FACTURE=".$ref
-                            ."|CLIENT=".$client
-                            ."|SORTIE VENTE";
-
-
-                        $stmt2 = $conn->prepare(
-                            "INSERT INTO mouvements
-                            (
-                                id,
-                                produit_id,
-                                type,
-                                quantite,
-                                prix,
-                                description,
-                                date_mouvement
-                            )
-                            VALUES (?,?,'SORTIE',?,?,?,?)"
-                        );
-
-                        if (!$stmt2) {
-                            throw new Exception(
-                                'Erreur lors du mouvement de stock.'
-                            );
-                        }
-
-                        $stmt2->bind_param(
-                            'iiidss',
-                            $mid,
-                            $pid,
-                            $q,
-                            $p,
-                            $md,
-                            $date
-                        );
-
-                        $stmt2->execute();
-                        $stmt2->close();
-
-
-                        /*
-                         * Déduire stock
-                         */
-
-                        $stmtStock = $conn->prepare(
-                            "UPDATE produits
-                             SET stock = stock - ?
-                             WHERE id = ?"
-                        );
-
-                        if (!$stmtStock) {
-                            throw new Exception(
-                                'Erreur lors de la mise à jour du stock.'
-                            );
-                        }
-
-                        $stmtStock->bind_param(
-                            'ii',
-                            $q,
-                            $pid
-                        );
-
-                        $stmtStock->execute();
-                        $stmtStock->close();
-                    }
-
-
-                    $conn->commit();
-
-                    flash(
-                        'ok',
-                        'Facture '.$ref.' enregistrée avec succès.'
+                    $stmt = $conn->prepare(
+                        "SELECT id, nom, stock
+                         FROM produits
+                         WHERE id = ?"
                     );
 
-                } catch (Throwable $e) {
+                    if (!$stmt) {
+                        throw new Exception(
+                            "Erreur vérification produit."
+                        );
+                    }
 
-                    $conn->rollback();
+                    $stmt->bind_param(
+                        "i",
+                        $pid
+                    );
 
-                    throw $e;
+                    $stmt->execute();
+
+                    $result =
+                        $stmt->get_result();
+
+                    if (
+                        !$result ||
+                        !$result->num_rows
+                    ) {
+
+                        $stmt->close();
+
+                        throw new Exception(
+                            "Produit introuvable."
+                        );
+                    }
+
+                    $product =
+                        $result->fetch_assoc();
+
+                    $stmt->close();
+
+                    /*
+                     * Vérification stock
+                     */
+
+                    if (
+                        (int)$product['stock']
+                        < $qty
+                    ) {
+
+                        throw new Exception(
+                            "Stock insuffisant pour "
+                            .$product['nom']
+                            ." (stock : "
+                            .$product['stock']
+                            ")."
+                        );
+                    }
+
+                    $vid =
+                        nextId(
+                            $conn,
+                            'ventes'
+                        );
+
+                    $montant =
+                        $qty * $price;
+
+                    $description =
+                        "FACTURE="
+                        .$ref
+                        ."|CLIENT="
+                        .$client
+                        ."|PAYE=0"
+                        ."|RESTE="
+                        .$newTotal
+                        ."|VENTE";
+
+                    /*
+                     * Vente
+                     */
+
+                    $stmt = $conn->prepare(
+                        "INSERT INTO ventes
+                        (
+                            id,
+                            produit_id,
+                            quantite,
+                            prix_unitaire,
+                            montant,
+                            description,
+                            date_vente
+                        )
+                        VALUES
+                        (?,?,?,?,?,?,?)"
+                    );
+
+                    if (!$stmt) {
+                        throw new Exception(
+                            "Erreur insertion vente."
+                        );
+                    }
+
+                    $stmt->bind_param(
+                        "iiiddss",
+                        $vid,
+                        $pid,
+                        $qty,
+                        $price,
+                        $montant,
+                        $description,
+                        $date
+                    );
+
+                    $stmt->execute();
+                    $stmt->close();
+
+                    /*
+                     * Mouvement
+                     */
+
+                    $mid =
+                        nextId(
+                            $conn,
+                            'mouvements'
+                        );
+
+                    $movementDescription =
+                        "FACTURE="
+                        .$ref
+                        ."|CLIENT="
+                        .$client
+                        ."|SORTIE VENTE";
+
+                    $stmt = $conn->prepare(
+                        "INSERT INTO mouvements
+                        (
+                            id,
+                            produit_id,
+                            type,
+                            quantite,
+                            prix,
+                            description,
+                            date_mouvement
+                        )
+                        VALUES
+                        (?,?,'SORTIE',?,?,?,?)"
+                    );
+
+                    if (!$stmt) {
+                        throw new Exception(
+                            "Erreur mouvement."
+                        );
+                    }
+
+                    $stmt->bind_param(
+                        "iiidss",
+                        $mid,
+                        $pid,
+                        $qty,
+                        $price,
+                        $movementDescription,
+                        $date
+                    );
+
+                    $stmt->execute();
+                    $stmt->close();
+
+                    /*
+                     * Déduire stock
+                     */
+
+                    $stmt = $conn->prepare(
+                        "UPDATE produits
+                         SET stock = stock - ?
+                         WHERE id = ?"
+                    );
+
+                    if (!$stmt) {
+                        throw new Exception(
+                            "Erreur mise à jour stock."
+                        );
+                    }
+
+                    $stmt->bind_param(
+                        "ii",
+                        $qty,
+                        $pid
+                    );
+
+                    $stmt->execute();
+                    $stmt->close();
                 }
 
+                $conn->commit();
+
+                flash(
+                    'success',
+                    "Facture $ref enregistrée avec succès."
+                );
 
                 header(
-                    'Location: ventes.php?facture='
+                    "Location: ventes.php?facture="
                     .urlencode($ref)
                 );
 
                 exit;
+
+            } catch (Throwable $e) {
+
+                $conn->rollback();
+
+                throw $e;
             }
         }
-
 
         /* =====================================================
            ENCAISSEMENT
@@ -960,224 +1208,228 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if (isset($_POST['encaisser_facture'])) {
 
-            $ref     = cleanText($_POST['ref'] ?? '');
-            $montant = (float)($_POST['montant'] ?? 0);
-
-            $rows = invoiceRows($conn, $ref);
-
-            if (!$rows) {
-                throw new Exception('Facture introuvable.');
-            }
-
-            $meta = parseMeta($rows[0]['description']);
-
-            $total = 0;
-
-            foreach ($rows as $r) {
-
-                $total +=
-                    (float)$r['quantite'] *
-                    (float)$r['prix_unitaire'];
-            }
-
-            $oldPaid = (float)($meta['PAYE'] ?? 0);
-
-            $restAvant = max(0, $total - $oldPaid);
-
-            /*
-             * La facture est déjà réglée
-             */
-
-            if ($restAvant <= 0.01) {
-
-                throw new Exception(
-                    'Cette facture est déjà totalement payée.'
+            $ref =
+                cleanText(
+                    $_POST['ref'] ?? ''
                 );
-            }
 
+            $montant =
+                (float)(
+                    $_POST['montant'] ?? 0
+                );
 
             if ($montant <= 0) {
 
                 throw new Exception(
-                    'Montant d’encaissement invalide.'
+                    "Entrez un montant valide."
                 );
             }
 
+            $rows =
+                getInvoiceRows(
+                    $conn,
+                    $ref
+                );
 
-            if ($montant > $restAvant + 0.01) {
+            if (!$rows) {
 
                 throw new Exception(
-                    'Le montant encaissé ne peut pas dépasser le reste de la facture.'
+                    "Facture introuvable."
                 );
             }
 
+            $total =
+                invoiceTotal($rows);
 
-            $newPaid = $oldPaid + $montant;
+            $oldPaid =
+                invoicePaid($rows);
 
-            $newRest = max(0, $total - $newPaid);
+            $reste =
+                max(
+                    0,
+                    $total - $oldPaid
+                );
+
+            if ($reste <= 0.01) {
+
+                throw new Exception(
+                    "Cette facture est déjà totalement payée."
+                );
+            }
+
+            if ($montant > $reste + 0.01) {
+
+                throw new Exception(
+                    "Le paiement dépasse le reste de la facture."
+                );
+            }
+
+            $newPaid =
+                $oldPaid + $montant;
+
+            $newRest =
+                max(
+                    0,
+                    $total - $newPaid
+                );
 
             $client =
-                cleanText(
-                    $meta['CLIENT'] ?? 'Client comptant'
-                );
-
+                invoiceClient($rows);
 
             $safeRef =
-                $conn->real_escape_string($ref);
+                $conn->real_escape_string(
+                    $ref
+                );
 
-            $safeClient =
-                $conn->real_escape_string($client);
-
-
-            $newDescription =
-                "FACTURE=".$safeRef
-                ."|CLIENT=".$safeClient
-                ."|PAYE=".$newPaid
-                ."|RESTE=".$newRest
+            $description =
+                "FACTURE="
+                .$ref
+                ."|CLIENT="
+                .$client
+                ."|PAYE="
+                .$newPaid
+                ."|RESTE="
+                .$newRest
                 ."|VENTE";
 
+            $stmt = $conn->prepare(
+                "UPDATE ventes
+                 SET description = ?
+                 WHERE description LIKE ?"
+            );
 
-            $conn->begin_transaction();
+            if (!$stmt) {
 
-            try {
-
-                $stmt = $conn->prepare(
-                    "UPDATE ventes
-                     SET description = ?
-                     WHERE description LIKE ?"
+                throw new Exception(
+                    "Erreur paiement."
                 );
-
-                $like = "%FACTURE=".$safeRef."|%";
-
-                $stmt->bind_param(
-                    'ss',
-                    $newDescription,
-                    $like
-                );
-
-                $stmt->execute();
-                $stmt->close();
-
-
-                $conn->commit();
-
-            } catch (Throwable $e) {
-
-                $conn->rollback();
-
-                throw $e;
             }
 
+            $like =
+                "%FACTURE="
+                .$safeRef
+                ."|%";
+
+            $stmt->bind_param(
+                "ss",
+                $description,
+                $like
+            );
+
+            $stmt->execute();
+            $stmt->close();
 
             flash(
-                'ok',
-                'Encaissement de '.money($montant).' enregistré.'
+                'success',
+                "Paiement enregistré : "
+                .money($montant)
             );
 
             header(
-                'Location: ventes.php?facture='
+                "Location: ventes.php?facture="
                 .urlencode($ref)
             );
 
             exit;
         }
 
-
         /* =====================================================
-           SUPPRIMER UNE FACTURE
+           SUPPRESSION FACTURE
         ===================================================== */
 
         if (isset($_POST['supprimer_facture'])) {
 
-            $ref = cleanText($_POST['ref'] ?? '');
+            $ref =
+                cleanText(
+                    $_POST['ref'] ?? ''
+                );
 
-            $rows = invoiceRows($conn, $ref);
+            $rows =
+                getInvoiceRows(
+                    $conn,
+                    $ref
+                );
 
             if (!$rows) {
+
                 throw new Exception(
-                    'Facture introuvable.'
+                    "Facture introuvable."
                 );
             }
-
-            $meta = parseMeta(
-                $rows[0]['description']
-            );
 
             $paid =
-                (float)($meta['PAYE'] ?? 0);
+                invoicePaid($rows);
 
-
-            /*
-             * Une facture ayant reçu un paiement
-             * ne peut pas être supprimée.
-             */
-
-            if ($paid > 0) {
+            if ($paid > 0.01) {
 
                 throw new Exception(
-                    'Impossible de supprimer une facture ayant déjà reçu un paiement.'
+                    "Impossible de supprimer une facture ayant déjà reçu un paiement."
                 );
             }
-
 
             $conn->begin_transaction();
 
             try {
 
                 /*
-                 * Restaurer le stock
+                 * Restaurer stock
                  */
 
-                foreach ($rows as $r) {
+                foreach ($rows as $row) {
 
                     $pid =
-                        (int)$r['produit_id'];
+                        (int)$row['produit_id'];
 
-                    $q =
-                        (int)$r['quantite'];
+                    $qty =
+                        (int)$row['quantite'];
 
-
-                    $stmtStock = $conn->prepare(
-                        "UPDATE produits
-                         SET stock = stock + ?
-                         WHERE id = ?"
-                    );
-
-                    if (!$stmtStock) {
-                        throw new Exception(
-                            'Erreur lors de la restauration du stock.'
+                    $stmt =
+                        $conn->prepare(
+                            "UPDATE produits
+                             SET stock = stock + ?
+                             WHERE id = ?"
                         );
-                    }
 
-                    $stmtStock->bind_param(
-                        'ii',
-                        $q,
+                    $stmt->bind_param(
+                        "ii",
+                        $qty,
                         $pid
                     );
 
-                    $stmtStock->execute();
-                    $stmtStock->close();
+                    $stmt->execute();
+                    $stmt->close();
                 }
 
-
                 $safeRef =
-                    $conn->real_escape_string($ref);
-
+                    $conn->real_escape_string(
+                        $ref
+                    );
 
                 $conn->query(
                     "DELETE FROM ventes
-                     WHERE description LIKE '%FACTURE=$safeRef|%'"
+                     WHERE description LIKE
+                     '%FACTURE=$safeRef|%'"
                 );
-
 
                 $conn->query(
                     "DELETE FROM mouvements
                      WHERE type='SORTIE'
-                     AND description LIKE '%FACTURE=$safeRef|%'"
+                     AND description LIKE
+                     '%FACTURE=$safeRef|%'"
                 );
 
-
                 $conn->commit();
+
+                flash(
+                    'success',
+                    "Facture supprimée."
+                );
+
+                header(
+                    "Location: ventes.php"
+                );
+
+                exit;
 
             } catch (Throwable $e) {
 
@@ -1185,486 +1437,2125 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 throw $e;
             }
-
-
-            flash(
-                'ok',
-                'Facture supprimée avec succès.'
-            );
-
-            header(
-                'Location: ventes.php'
-            );
-
-            exit;
         }
 
     } catch (Throwable $e) {
 
         flash(
-            'err',
+            'danger',
             $e->getMessage()
         );
 
         header(
-            'Location: ventes.php'
+            "Location: ventes.php"
         );
 
         exit;
     }
 }
 
-
 /* =========================================================
-   DONNÉES
+   FLASH
 ========================================================= */
 
 $flash =
-    $_SESSION['flash'] ?? null;
+    $_SESSION['flash']
+    ?? null;
 
-unset($_SESSION['flash']);
+unset(
+    $_SESSION['flash']
+);
 
+/* =========================================================
+   PRODUITS
+========================================================= */
+
+$produits = [];
+
+$result =
+    $conn->query(
+        "SELECT id, nom, categorie,
+                prix_vente, stock
+         FROM produits
+         ORDER BY nom ASC"
+    );
+
+if ($result) {
+
+    while ($row = $result->fetch_assoc()) {
+
+        $produits[] = $row;
+    }
+}
+
+/* =========================================================
+   FACTURE À AFFICHER
+========================================================= */
+
+$currentRef =
+    cleanText(
+        $_GET['facture'] ?? ''
+    );
+
+$currentRows = [];
+
+if ($currentRef !== '') {
+
+    $currentRows =
+        getInvoiceRows(
+            $conn,
+            $currentRef
+        );
+}
+
+/* =========================================================
+   FACTURE À MODIFIER
+========================================================= */
 
 $editRef =
     cleanText(
         $_GET['modifier'] ?? ''
     );
 
-$selectedRef =
-    cleanText(
-        $_GET['facture'] ?? ''
-    );
+$editRows = [];
 
+if ($editRef !== '') {
 
-$editRows =
-    $editRef
-    ? invoiceRows($conn, $editRef)
-    : [];
+    $editRows =
+        getInvoiceRows(
+            $conn,
+            $editRef
+        );
 
+    if ($editRows) {
 
-$detailRows =
-    $selectedRef
-    ? invoiceRows($conn, $selectedRef)
-    : [];
+        $editTotal =
+            invoiceTotal(
+                $editRows
+            );
 
+        $editPaid =
+            invoicePaid(
+                $editRows
+            );
+
+        /*
+         * Une facture totalement payée
+         * ne peut pas être modifiée.
+         */
+
+        if (
+            $editPaid >=
+            $editTotal - 0.01
+        ) {
+
+            $editRows = [];
+
+            flash(
+                'danger',
+                "Cette facture est totalement payée et verrouillée."
+            );
+
+            header(
+                "Location: ventes.php?facture="
+                .urlencode($editRef)
+            );
+
+            exit;
+        }
+    }
+}
 
 /* =========================================================
-   LISTE FACTURES
+   LISTE DES FACTURES
 ========================================================= */
 
 $factures = [];
 
-$q = $conn->query(
-    "SELECT v.*, p.nom
-     FROM ventes v
-     LEFT JOIN produits p ON p.id=v.produit_id
-     ORDER BY v.id DESC"
-);
-
-while ($q && ($r = $q->fetch_assoc())) {
-
-    $m =
-        parseMeta(
-            $r['description']
-        );
-
-    $ref =
-        $m['FACTURE']
-        ?? ('ANCIEN-'.$r['id']);
-
-
-    if (!isset($factures[$ref])) {
-
-        $factures[$ref] = [
-            'ref'      => $ref,
-            'client'   => $m['CLIENT']
-                ?? 'Client comptant',
-            'date'     => $r['date_vente']
-                ?? '',
-            'total'    => 0,
-            'paye'     => (float)(
-                $m['PAYE'] ?? 0
+$sqlFactures = "
+    SELECT
+        v.description,
+        MIN(v.date_vente) AS date_vente
+    FROM ventes v
+    WHERE v.description LIKE '%FACTURE=%'
+    GROUP BY
+        SUBSTRING_INDEX(
+            SUBSTRING_INDEX(
+                v.description,
+                'FACTURE=',
+                -1
             ),
-            'articles' => 0
+            '|',
+            1
+        )
+    ORDER BY MIN(v.date_vente) DESC
+";
+
+$result =
+    $conn->query(
+        $sqlFactures
+    );
+
+if ($result) {
+
+    while ($row =
+        $result->fetch_assoc()
+    ) {
+
+        $meta =
+            parseMeta(
+                $row['description']
+            );
+
+        $ref =
+            $meta['FACTURE']
+            ?? '';
+
+        if ($ref === '') {
+            continue;
+        }
+
+        $rows =
+            getInvoiceRows(
+                $conn,
+                $ref
+            );
+
+        if (!$rows) {
+            continue;
+        }
+
+        $total =
+            invoiceTotal(
+                $rows
+            );
+
+        $paid =
+            invoicePaid(
+                $rows
+            );
+
+        $rest =
+            max(
+                0,
+                $total - $paid
+            );
+
+        $factures[] = [
+            'ref' => $ref,
+            'client' =>
+                invoiceClient($rows),
+            'date' =>
+                $row['date_vente'],
+            'total' => $total,
+            'paid' => $paid,
+            'rest' => $rest,
+            'status' =>
+                invoiceStatus(
+                    $total,
+                    $paid
+                ),
+            'count' =>
+                count($rows)
         ];
     }
-
-
-    $factures[$ref]['total'] +=
-        (float)$r['quantite'] *
-        (float)$r['prix_unitaire'];
-
-
-    $factures[$ref]['articles']++;
 }
 
+?>
+
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
+
+<title>LAMBEMAH GESTION - Ventes</title>
+
+<style>
+
+/* =========================================================
+   DESIGN
+========================================================= */
+
+:root {
+
+    --primary: #1677ff;
+    --primary-dark: #0d4ea6;
+    --primary-light: #eaf4ff;
+
+    --bg: #f3f8ff;
+    --white: #ffffff;
+
+    --text: #172033;
+    --muted: #6d7b91;
+
+    --border: #dce8f5;
+
+    --success: #159447;
+    --success-bg: #e9f9ef;
+
+    --danger: #dc3545;
+    --danger-bg: #fff0f1;
+
+    --warning: #d58b00;
+    --warning-bg: #fff8df;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+
+    margin: 0;
+
+    background:
+        linear-gradient(
+            135deg,
+            #edf7ff,
+            #f8fbff
+        );
+
+    color: var(--text);
+
+    font-family:
+        Inter,
+        Arial,
+        Helvetica,
+        sans-serif;
+}
+
+a {
+    text-decoration: none;
+}
+
+.container {
+
+    width: 100%;
+    max-width: 1250px;
+
+    margin: auto;
+
+    padding: 22px;
+}
+
+/* =========================================================
+   HEADER
+========================================================= */
+
+.header {
+
+    display: flex;
+
+    justify-content: space-between;
+
+    align-items: center;
+
+    gap: 15px;
+
+    background: white;
+
+    border: 1px solid var(--border);
+
+    border-radius: 20px;
+
+    padding: 18px 22px;
+
+    box-shadow:
+        0 8px 30px
+        rgba(32, 92, 150, .08);
+
+    margin-bottom: 20px;
+}
+
+.brand {
+
+    display: flex;
+
+    align-items: center;
+
+    gap: 12px;
+}
+
+.brand-icon {
+
+    width: 48px;
+    height: 48px;
+
+    display: flex;
+
+    align-items: center;
+    justify-content: center;
+
+    background:
+        linear-gradient(
+            135deg,
+            #1677ff,
+            #0d4ea6
+        );
+
+    color: white;
+
+    border-radius: 14px;
+
+    font-size: 22px;
+}
+
+.brand h1 {
+
+    margin: 0;
+
+    font-size: 21px;
+
+    color: #123c70;
+}
+
+.brand p {
+
+    margin: 3px 0 0;
+
+    color: var(--muted);
+
+    font-size: 13px;
+}
+
+/* =========================================================
+   BUTTONS
+========================================================= */
+
+.btn {
+
+    border: 0;
+
+    border-radius: 10px;
+
+    padding: 10px 15px;
+
+    cursor: pointer;
+
+    font-weight: 800;
+
+    display: inline-flex;
+
+    align-items: center;
+
+    justify-content: center;
+
+    gap: 7px;
+}
+
+.btn-primary {
+
+    color: white;
+
+    background:
+        linear-gradient(
+            135deg,
+            #1677ff,
+            #0d62d1
+        );
+}
+
+.btn-primary:hover {
+
+    background:
+        linear-gradient(
+            135deg,
+            #0d62d1,
+            #094caa
+        );
+}
+
+.btn-light {
+
+    background: #edf6ff;
+
+    color: #1261c9;
+}
+
+.btn-success {
+
+    background: var(--success);
+
+    color: white;
+}
+
+.btn-danger {
+
+    background: var(--danger);
+
+    color: white;
+}
+
+.btn-warning {
+
+    background: #f5b400;
+
+    color: white;
+}
+
+.btn-small {
+
+    padding: 8px 11px;
+
+    font-size: 12px;
+}
+
+/* =========================================================
+   FLASH
+========================================================= */
+
+.alert {
+
+    padding: 14px 17px;
+
+    border-radius: 12px;
+
+    margin-bottom: 18px;
+
+    font-weight: 700;
+}
+
+.alert-success {
+
+    background: var(--success-bg);
+
+    color: #11753a;
+
+    border: 1px solid #bfe8cc;
+}
+
+.alert-danger {
+
+    background: var(--danger-bg);
+
+    color: #a91d2b;
+
+    border: 1px solid #f2bdc3;
+}
+
+/* =========================================================
+   GRID
+========================================================= */
+
+.grid {
+
+    display: grid;
+
+    grid-template-columns:
+        minmax(0, 1.4fr)
+        minmax(330px, .8fr);
+
+    gap: 20px;
+}
+
+.card {
+
+    background: white;
+
+    border: 1px solid var(--border);
+
+    border-radius: 18px;
+
+    padding: 20px;
+
+    box-shadow:
+        0 8px 30px
+        rgba(32, 92, 150, .07);
+}
+
+.card-title {
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: space-between;
+
+    gap: 10px;
+
+    margin-bottom: 18px;
+}
+
+.card-title h2 {
+
+    margin: 0;
+
+    color: #123c70;
+
+    font-size: 18px;
+}
+
+/* =========================================================
+   FORM
+========================================================= */
+
+.form-group {
+
+    margin-bottom: 15px;
+}
+
+label {
+
+    display: block;
+
+    margin-bottom: 7px;
+
+    color: #43546d;
+
+    font-size: 13px;
+
+    font-weight: 800;
+}
+
+input,
+select {
+
+    width: 100%;
+
+    border: 1px solid #d6e3f1;
+
+    background: #fbfdff;
+
+    color: #172033;
+
+    padding: 11px 12px;
+
+    border-radius: 10px;
+
+    outline: none;
+
+    font-size: 14px;
+}
+
+input:focus,
+select:focus {
+
+    border-color: var(--primary);
+
+    box-shadow:
+        0 0 0 3px
+        rgba(22,119,255,.10);
+
+    background: white;
+}
+
+.form-grid {
+
+    display: grid;
+
+    grid-template-columns:
+        1fr 1fr;
+
+    gap: 15px;
+}
+
+/* =========================================================
+   LIGNES FACTURE
+========================================================= */
+
+.line-head {
+
+    display: grid;
+
+    grid-template-columns:
+        2fr
+        .7fr
+        1fr
+        auto;
+
+    gap: 8px;
+
+    color: var(--muted);
+
+    font-size: 12px;
+
+    font-weight: 800;
+
+    margin-bottom: 7px;
+}
+
+.article-line {
+
+    display: grid;
+
+    grid-template-columns:
+        2fr
+        .7fr
+        1fr
+        auto;
+
+    gap: 8px;
+
+    align-items: center;
+
+    margin-bottom: 9px;
+
+    padding: 9px;
+
+    border-radius: 12px;
+
+    background: #f7fbff;
+
+    border: 1px solid #e1edf8;
+}
+
+.line-total {
+
+    font-size: 13px;
+
+    font-weight: 800;
+
+    color: #175da8;
+
+    text-align: right;
+}
+
+.remove-line {
+
+    width: 36px;
+    height: 36px;
+
+    border: 0;
+
+    border-radius: 9px;
+
+    background: #fff0f1;
+
+    color: #d52c3c;
+
+    cursor: pointer;
+
+    font-weight: 900;
+}
+
+/* =========================================================
+   TOTAL
+========================================================= */
+
+.total-box {
+
+    background:
+        linear-gradient(
+            135deg,
+            #edf7ff,
+            #f7fbff
+        );
+
+    border: 1px solid #cfe5fb;
+
+    border-radius: 14px;
+
+    padding: 15px;
+
+    margin-top: 15px;
+}
+
+.total-row {
+
+    display: flex;
+
+    justify-content: space-between;
+
+    align-items: center;
+
+    padding: 5px 0;
+}
+
+.total-final {
+
+    font-size: 21px;
+
+    color: #0d4ea6;
+
+    font-weight: 900;
+
+    border-top: 2px solid #b8d8f7;
+
+    margin-top: 7px;
+
+    padding-top: 11px;
+}
+
+/* =========================================================
+   FACTURES
+========================================================= */
+
+.facture-list {
+
+    display: flex;
+
+    flex-direction: column;
+
+    gap: 10px;
+}
+
+.facture-item {
+
+    border: 1px solid var(--border);
+
+    border-radius: 13px;
+
+    padding: 13px;
+
+    background: #fbfdff;
+}
+
+.facture-top {
+
+    display: flex;
+
+    justify-content: space-between;
+
+    gap: 10px;
+}
+
+.facture-ref {
+
+    color: #125db5;
+
+    font-weight: 900;
+
+    font-size: 14px;
+}
+
+.facture-client {
+
+    color: #66758a;
+
+    font-size: 12px;
+
+    margin-top: 4px;
+}
+
+.facture-money {
+
+    display: flex;
+
+    justify-content: space-between;
+
+    gap: 10px;
+
+    margin-top: 10px;
+
+    font-size: 13px;
+}
+
+.status {
+
+    display: inline-block;
+
+    padding: 5px 9px;
+
+    border-radius: 30px;
+
+    font-size: 11px;
+
+    font-weight: 900;
+}
+
+.status-paid {
+
+    background: #e8f8ee;
+
+    color: #168442;
+}
+
+.status-partial {
+
+    background: #fff5d9;
+
+    color: #a46b00;
+}
+
+.status-unpaid {
+
+    background: #edf5ff;
+
+    color: #1762b5;
+}
+
+.facture-actions {
+
+    display: flex;
+
+    flex-wrap: wrap;
+
+    gap: 7px;
+
+    margin-top: 11px;
+}
+
+/* =========================================================
+   DETAIL
+========================================================= */
+
+.detail-table {
+
+    width: 100%;
+
+    border-collapse: collapse;
+
+    margin-top: 12px;
+}
+
+.detail-table th {
+
+    background: #edf6ff;
+
+    color: #19558e;
+
+    padding: 10px;
+
+    text-align: left;
+}
+
+.detail-table td {
+
+    padding: 10px;
+
+    border-bottom: 1px solid #e7eef5;
+}
+
+.detail-right {
+
+    text-align: right;
+}
+
+.locked {
+
+    margin-top: 15px;
+
+    background: #edf8ff;
+
+    border: 1px solid #cbe6fa;
+
+    color: #145a91;
+
+    padding: 13px;
+
+    border-radius: 12px;
+
+    font-weight: 700;
+}
+
+/* =========================================================
+   PAIEMENT
+========================================================= */
+
+.payment-box {
+
+    margin-top: 18px;
+
+    padding: 15px;
+
+    border-radius: 14px;
+
+    background: #f7fbff;
+
+    border: 1px solid var(--border);
+}
+
+.payment-form {
+
+    display: grid;
+
+    grid-template-columns:
+        1fr auto;
+
+    gap: 9px;
+
+    margin-top: 10px;
+}
+
+/* =========================================================
+   RESPONSIVE
+========================================================= */
+
+@media(max-width:900px) {
+
+    .grid {
+
+        grid-template-columns: 1fr;
+    }
+}
+
+@media(max-width:650px) {
+
+    .container {
+
+        padding: 10px;
+    }
+
+    .header {
+
+        padding: 14px;
+
+        border-radius: 15px;
+
+        align-items: flex-start;
+
+        flex-direction: column;
+    }
+
+    .form-grid {
+
+        grid-template-columns: 1fr;
+    }
+
+    .line-head {
+
+        display: none;
+    }
+
+    .article-line {
+
+        grid-template-columns: 1fr 80px 100px 36px;
+    }
+
+    .card {
+
+        padding: 14px;
+
+        border-radius: 15px;
+    }
+
+    .brand h1 {
+
+        font-size: 18px;
+    }
+
+    .article-line select {
+
+        min-width: 0;
+    }
+
+    .payment-form {
+
+        grid-template-columns: 1fr;
+    }
+
+    .detail-table {
+
+        font-size: 12px;
+    }
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="container">
+
+    <!-- =====================================================
+         HEADER
+    ====================================================== -->
+
+    <div class="header">
+
+        <div class="brand">
+
+            <div class="brand-icon">
+                🛍️
+            </div>
+
+            <div>
+
+                <h1>
+                    LAMBEMAH GESTION
+                </h1>
+
+                <p>
+                    Gestion des ventes et factures
+                </p>
+
+            </div>
+
+        </div>
+
+        <a
+            href="index.php"
+            class="btn btn-light"
+        >
+            🏠 Accueil
+        </a>
+
+    </div>
+
+
+    <!-- =====================================================
+         MESSAGE
+    ====================================================== -->
+
+    <?php if ($flash): ?>
+
+        <div
+            class="alert
+            <?= $flash['type'] === 'success'
+                ? 'alert-success'
+                : 'alert-danger'
+            ?>"
+        >
+
+            <?= h($flash['message']) ?>
+
+        </div>
+
+    <?php endif; ?>
+
+
+    <!-- =====================================================
+         DETAIL FACTURE
+    ====================================================== -->
+
+    <?php if ($currentRows): ?>
+
+        <?php
+
+        $detailTotal =
+            invoiceTotal(
+                $currentRows
+            );
+
+        $detailPaid =
+            invoicePaid(
+                $currentRows
+            );
+
+        $detailRest =
+            max(
+                0,
+                $detailTotal - $detailPaid
+            );
+
+        $detailClient =
+            invoiceClient(
+                $currentRows
+            );
+
+        $detailStatus =
+            invoiceStatus(
+                $detailTotal,
+                $detailPaid
+            );
+
+        ?>
+
+        <div class="card">
+
+            <div class="card-title">
+
+                <div>
+
+                    <h2>
+                        📄 Facture
+                        <?= h($currentRef) ?>
+                    </h2>
+
+                    <div
+                        style="
+                        margin-top:5px;
+                        color:#6d7b91;
+                        font-size:13px;
+                        "
+                    >
+                        Client :
+                        <strong>
+                            <?= h($detailClient) ?>
+                        </strong>
+                    </div>
+
+                </div>
+
+                <span
+                    class="status
+                    <?=
+                    $detailStatus === 'Payée'
+                    ? 'status-paid'
+                    : (
+                        $detailStatus ===
+                        'Partiellement payée'
+                        ? 'status-partial'
+                        : 'status-unpaid'
+                    )
+                    ?>"
+                >
+                    <?= h($detailStatus) ?>
+                </span>
+
+            </div>
+
+
+            <table class="detail-table">
+
+                <thead>
+
+                    <tr>
+
+                        <th>
+                            Article
+                        </th>
+
+                        <th>
+                            Qté
+                        </th>
+
+                        <th>
+                            Prix
+                        </th>
+
+                        <th class="detail-right">
+                            Montant
+                        </th>
+
+                    </tr>
+
+                </thead>
+
+                <tbody>
+
+                <?php foreach (
+                    $currentRows as $row
+                ): ?>
+
+                    <tr>
+
+                        <td>
+                            <?= h(
+                                $row['nom']
+                                ?? 'Article'
+                            ) ?>
+                        </td>
+
+                        <td>
+                            <?= h(
+                                $row['quantite']
+                            ) ?>
+                        </td>
+
+                        <td>
+                            <?= money(
+                                $row['prix_unitaire']
+                            ) ?>
+                        </td>
+
+                        <td class="detail-right">
+
+                            <?= money(
+                                $row['quantite']
+                                *
+                                $row['prix_unitaire']
+                            ) ?>
+
+                        </td>
+
+                    </tr>
+
+                <?php endforeach; ?>
+
+                </tbody>
+
+            </table>
+
+
+            <div class="total-box">
+
+                <div class="total-row">
+
+                    <span>
+                        Total facture
+                    </span>
+
+                    <strong>
+                        <?= money($detailTotal) ?>
+                    </strong>
+
+                </div>
+
+                <div class="total-row">
+
+                    <span>
+                        Déjà payé
+                    </span>
+
+                    <strong>
+                        <?= money($detailPaid) ?>
+                    </strong>
+
+                </div>
+
+                <div class="total-row total-final">
+
+                    <span>
+                        Reste
+                    </span>
+
+                    <strong>
+                        <?= money($detailRest) ?>
+                    </strong>
+
+                </div>
+
+            </div>
+
+
+            <div class="facture-actions">
+
+                <a
+                    href="ventes.php"
+                    class="btn btn-light"
+                >
+                    ← Retour
+                </a>
+
+                <a
+                    href="ventes.php?imprimer=<?= urlencode($currentRef) ?>"
+                    target="_blank"
+                    class="btn btn-primary"
+                >
+                    🖨️ Imprimer
+                </a>
+
+                <?php if ($detailRest > 0.01): ?>
+
+                    <a
+                        href="ventes.php?modifier=<?= urlencode($currentRef) ?>"
+                        class="btn btn-warning"
+                    >
+                        ✏️ Modifier
+                    </a>
+
+                <?php endif; ?>
+
+                <?php if ($detailPaid <= 0.01): ?>
+
+                    <form
+                        method="post"
+                        onsubmit="
+                            return confirm(
+                                'Supprimer définitivement cette facture ?'
+                            );
+                        "
+                    >
+
+                        <input
+                            type="hidden"
+                            name="ref"
+                            value="<?= h($currentRef) ?>"
+                        >
+
+                        <button
+                            type="submit"
+                            name="supprimer_facture"
+                            class="btn btn-danger"
+                        >
+                            🗑️ Supprimer
+                        </button>
+
+                    </form>
+
+                <?php endif; ?>
+
+            </div>
+
+
+            <?php if ($detailRest > 0.01): ?>
+
+                <div class="payment-box">
+
+                    <strong>
+                        💰 Enregistrer un paiement
+                    </strong>
+
+                    <form
+                        method="post"
+                        class="payment-form"
+                    >
+
+                        <input
+                            type="hidden"
+                            name="ref"
+                            value="<?= h($currentRef) ?>"
+                        >
+
+                        <input
+                            type="number"
+                            name="montant"
+                            min="1"
+                            step="1"
+                            max="<?= h($detailRest) ?>"
+                            placeholder="Montant payé en FG"
+                            required
+                        >
+
+                        <button
+                            type="submit"
+                            name="encaisser_facture"
+                            class="btn btn-success"
+                        >
+                            💵 Encaisser
+                        </button>
+
+                    </form>
+
+                </div>
+
+            <?php else: ?>
+
+                <div class="locked">
+
+                    🔒 Cette facture est totalement payée.
+                    Elle est maintenant verrouillée.
+
+                </div>
+
+            <?php endif; ?>
+
+        </div>
+
+        <br>
+
+    <?php endif; ?>
+
+
+    <!-- =====================================================
+         NOUVELLE / MODIFICATION
+    ====================================================== -->
+
+    <?php if ($editRows): ?>
+
+        <?php
+        $editClient =
+            invoiceClient(
+                $editRows
+            );
+        ?>
+
+        <div class="card">
+
+            <div class="card-title">
+
+                <h2>
+                    ✏️ Modifier la facture
+                    <?= h($editRef) ?>
+                </h2>
+
+                <a
+                    href="ventes.php"
+                    class="btn btn-light btn-small"
+                >
+                    Annuler
+                </a>
+
+            </div>
+
+    <?php else: ?>
+
+        <div class="grid">
+
+        <div class="card">
+
+            <div class="card-title">
+
+                <h2>
+                    🧾 Nouvelle vente
+                </h2>
+
+            </div>
+
+    <?php endif; ?>
+
+
+            <form
+                method="post"
+                id="venteForm"
+            >
+
+                <?php if ($editRows): ?>
+
+                    <input
+                        type="hidden"
+                        name="edit_ref"
+                        value="<?= h($editRef) ?>"
+                    >
+
+                <?php endif; ?>
+
+
+                <div class="form-group">
+
+                    <label>
+                        Nom du client
+                    </label>
+
+                    <input
+                        type="text"
+                        name="client"
+                        value="<?=
+                            h(
+                                $editRows
+                                ? $editClient
+                                : ''
+                            )
+                        ?>"
+                        placeholder="Client comptant"
+                    >
+
+                </div>
+
+
+                <div class="line-head">
+
+                    <span>
+                        Article
+                    </span>
+
+                    <span>
+                        Quantité
+                    </span>
+
+                    <span>
+                        Prix unitaire
+                    </span>
+
+                    <span></span>
+
+                </div>
+
+
+                <div id="lines">
+
+                    <?php if ($editRows): ?>
+
+                        <?php foreach (
+                            $editRows as $row
+                        ): ?>
+
+                            <div
+                                class="article-line"
+                            >
+
+                                <select
+                                    name="produit_id[]"
+                                    class="product"
+                                    required
+                                >
+
+                                    <option value="">
+                                        Choisir...
+                                    </option>
+
+                                    <?php foreach (
+                                        $produits
+                                        as $p
+                                    ): ?>
+
+                                        <option
+                                            value="<?= $p['id'] ?>"
+                                            data-price="<?= h($p['prix_vente']) ?>"
+                                            <?= (int)$p['id'] ===
+                                                (int)$row['produit_id']
+                                                ? 'selected'
+                                                : ''
+                                            ?>
+                                        >
+                                            <?= h($p['nom']) ?>
+                                            —
+                                            Stock :
+                                            <?= h($p['stock']) ?>
+                                        </option>
+
+                                    <?php endforeach; ?>
+
+                                </select>
+
+
+                                <input
+                                    type="number"
+                                    name="quantite[]"
+                                    class="qty"
+                                    min="1"
+                                    value="<?= h($row['quantite']) ?>"
+                                    required
+                                >
+
+
+                                <input
+                                    type="number"
+                                    name="prix_unitaire[]"
+                                    class="price"
+                                    min="1"
+                                    step="1"
+                                    value="<?= h($row['prix_unitaire']) ?>"
+                                    required
+                                >
+
+
+                                <button
+                                    type="button"
+                                    class="remove-line"
+                                    onclick="removeLine(this)"
+                                >
+                                    ×
+                                </button>
+
+                            </div>
+
+                        <?php endforeach; ?>
+
+                    <?php else: ?>
+
+                        <div class="article-line">
+
+                            <select
+                                name="produit_id[]"
+                                class="product"
+                                required
+                            >
+
+                                <option value="">
+                                    Choisir un article...
+                                </option>
+
+                                <?php foreach (
+                                    $produits
+                                    as $p
+                                ): ?>
+
+                                    <option
+                                        value="<?= $p['id'] ?>"
+                                        data-price="<?= h($p['prix_vente']) ?>"
+                                    >
+                                        <?= h($p['nom']) ?>
+                                        —
+                                        Stock :
+                                        <?= h($p['stock']) ?>
+                                    </option>
+
+                                <?php endforeach; ?>
+
+                            </select>
+
+
+                            <input
+                                type="number"
+                                name="quantite[]"
+                                class="qty"
+                                min="1"
+                                value="1"
+                                required
+                            >
+
+
+                            <input
+                                type="number"
+                                name="prix_unitaire[]"
+                                class="price"
+                                min="1"
+                                step="1"
+                                placeholder="Prix"
+                                required
+                            >
+
+
+                            <button
+                                type="button"
+                                class="remove-line"
+                                onclick="removeLine(this)"
+                            >
+                                ×
+                            </button>
+
+                        </div>
+
+                    <?php endif; ?>
+
+                </div>
+
+
+                <button
+                    type="button"
+                    class="btn btn-light"
+                    onclick="addLine()"
+                    style="margin-top:8px;"
+                >
+                    ➕ Ajouter un article
+                </button>
+
+
+                <div class="total-box">
+
+                    <div class="total-row total-final">
+
+                        <span>
+                            TOTAL
+                        </span>
+
+                        <strong id="grandTotal">
+                            0 FG
+                        </strong>
+
+                    </div>
+
+                </div>
+
+
+                <button
+                    type="submit"
+                    name="save_vente"
+                    class="btn btn-primary"
+                    style="
+                    width:100%;
+                    margin-top:15px;
+                    padding:13px;
+                    "
+                >
+
+                    <?=
+                    $editRows
+                    ? '💾 Enregistrer les modifications'
+                    : '✅ Enregistrer la facture'
+                    ?>
+
+                </button>
+
+            </form>
+
+        </div>
+
+
+        <?php if (!$editRows): ?>
+
+        <!-- =================================================
+             LISTE FACTURES
+        ================================================== -->
+
+        <div class="card">
+
+            <div class="card-title">
+
+                <h2>
+                    📋 Factures récentes
+                </h2>
+
+            </div>
+
+            <?php if (!$factures): ?>
+
+                <div
+                    style="
+                    text-align:center;
+                    color:#75849a;
+                    padding:25px 10px;
+                    "
+                >
+                    Aucune facture enregistrée.
+                </div>
+
+            <?php else: ?>
+
+                <div class="facture-list">
+
+                    <?php foreach (
+                        array_slice(
+                            $factures,
+                            0,
+                            30
+                        )
+                        as $f
+                    ): ?>
+
+                        <div
+                            class="facture-item"
+                        >
+
+                            <div class="facture-top">
+
+                                <div>
+
+                                    <div class="facture-ref">
+
+                                        <?= h(
+                                            $f['ref']
+                                        ) ?>
+
+                                    </div>
+
+                                    <div
+                                        class="facture-client"
+                                    >
+
+                                        <?= h(
+                                            $f['client']
+                                        ) ?>
+
+                                    </div>
+
+                                </div>
+
+                                <span
+                                    class="status
+                                    <?=
+                                    $f['status']
+                                    === 'Payée'
+                                    ? 'status-paid'
+                                    : (
+                                        $f['status']
+                                        ===
+                                        'Partiellement payée'
+                                        ? 'status-partial'
+                                        : 'status-unpaid'
+                                    )
+                                    ?>"
+                                >
+                                    <?= h(
+                                        $f['status']
+                                    ) ?>
+                                </span>
+
+                            </div>
+
+
+                            <div class="facture-money">
+
+                                <span>
+                                    Total :
+                                    <strong>
+                                        <?= money(
+                                            $f['total']
+                                        ) ?>
+                                    </strong>
+                                </span>
+
+                                <span>
+                                    Reste :
+                                    <strong>
+                                        <?= money(
+                                            $f['rest']
+                                        ) ?>
+                                    </strong>
+                                </span>
+
+                            </div>
+
+
+                            <div class="facture-actions">
+
+                                <a
+                                    href="ventes.php?facture=<?= urlencode($f['ref']) ?>"
+                                    class="btn btn-light btn-small"
+                                >
+                                    👁️ Voir
+                                </a>
+
+                                <a
+                                    href="ventes.php?imprimer=<?= urlencode($f['ref']) ?>"
+                                    target="_blank"
+                                    class="btn btn-light btn-small"
+                                >
+                                    🖨️ PDF
+                                </a>
+
+                                <?php if (
+                                    $f['rest'] > 0.01
+                                ): ?>
+
+                                    <a
+                                        href="ventes.php?modifier=<?= urlencode($f['ref']) ?>"
+                                        class="btn btn-warning btn-small"
+                                    >
+                                        ✏️ Modifier
+                                    </a>
+
+                                <?php else: ?>
+
+                                    <span
+                                        class="btn btn-light btn-small"
+                                        style="
+                                        cursor:default;
+                                        "
+                                    >
+                                        🔒 Verrouillée
+                                    </span>
+
+                                <?php endif; ?>
+
+                            </div>
+
+                        </div>
+
+                    <?php endforeach; ?>
+
+                </div>
+
+            <?php endif; ?>
+
+        </div>
+
+        <?php endif; ?>
+
+        </div>
+
+    <?php endif; ?>
+
+</div>
+
+
+<script>
 
 /* =========================================================
    PRODUITS
 ========================================================= */
 
-$products = [];
+const productOptions = `
 
-$q = $conn->query(
-    "SELECT id,nom,categorie,prix_achat,stock
-     FROM produits
-     ORDER BY nom ASC"
+<option value="">
+    Choisir un article...
+</option>
+
+<?php foreach ($produits as $p): ?>
+
+<option
+    value="<?= $p['id'] ?>"
+    data-price="<?= h($p['prix_vente']) ?>"
+>
+    <?= h($p['nom']) ?>
+    — Stock : <?= h($p['stock']) ?>
+</option>
+
+<?php endforeach; ?>
+
+`;
+
+
+/* =========================================================
+   AJOUTER UNE LIGNE
+========================================================= */
+
+function addLine() {
+
+    const container =
+        document.getElementById('lines');
+
+    if (!container) {
+        return;
+    }
+
+    const div =
+        document.createElement('div');
+
+    div.className =
+        'article-line';
+
+    div.innerHTML = `
+
+        <select
+            name="produit_id[]"
+            class="product"
+            required
+        >
+            ${productOptions}
+        </select>
+
+        <input
+            type="number"
+            name="quantite[]"
+            class="qty"
+            min="1"
+            value="1"
+            required
+        >
+
+        <input
+            type="number"
+            name="prix_unitaire[]"
+            class="price"
+            min="1"
+            step="1"
+            placeholder="Prix"
+            required
+        >
+
+        <button
+            type="button"
+            class="remove-line"
+            onclick="removeLine(this)"
+        >
+            ×
+        </button>
+    `;
+
+    container.appendChild(div);
+
+    attachProductEvents();
+
+    calculateTotal();
+}
+
+
+/* =========================================================
+   SUPPRIMER UNE LIGNE
+========================================================= */
+
+function removeLine(button) {
+
+    const container =
+        document.getElementById('lines');
+
+    if (!container) {
+        return;
+    }
+
+    const lines =
+        container.querySelectorAll(
+            '.article-line'
+        );
+
+    if (lines.length <= 1) {
+
+        alert(
+            "Il faut garder au moins un article."
+        );
+
+        return;
+    }
+
+    button
+        .closest('.article-line')
+        .remove();
+
+    calculateTotal();
+}
+
+
+/* =========================================================
+   PRIX AUTOMATIQUE
+========================================================= */
+
+function attachProductEvents() {
+
+    document
+        .querySelectorAll('.product')
+        .forEach(select => {
+
+            select.onchange = function() {
+
+                const option =
+                    this.options[
+                        this.selectedIndex
+                    ];
+
+                const price =
+                    option.dataset.price
+                    || '';
+
+                const row =
+                    this.closest(
+                        '.article-line'
+                    );
+
+                const input =
+                    row.querySelector(
+                        '.price'
+                    );
+
+                if (
+                    input &&
+                    (!input.value ||
+                     input.dataset.auto === '1')
+                ) {
+
+                    input.value = price;
+
+                    input.dataset.auto = '1';
+                }
+
+                calculateTotal();
+            };
+        });
+
+    document
+        .querySelectorAll('.qty, .price')
+        .forEach(input => {
+
+            input.oninput =
+                calculateTotal;
+        });
+}
+
+
+/* =========================================================
+   CALCUL TOTAL
+========================================================= */
+
+function calculateTotal() {
+
+    let total = 0;
+
+    document
+        .querySelectorAll(
+            '.article-line'
+        )
+        .forEach(row => {
+
+            const qty =
+                parseFloat(
+                    row.querySelector(
+                        '.qty'
+                    )?.value
+                    || 0
+                );
+
+            const price =
+                parseFloat(
+                    row.querySelector(
+                        '.price'
+                    )?.value
+                    || 0
+                );
+
+            total +=
+                qty * price;
+        });
+
+    const target =
+        document.getElementById(
+            'grandTotal'
+        );
+
+    if (target) {
+
+        target.textContent =
+            new Intl.NumberFormat(
+                'fr-FR'
+            ).format(total)
+            + ' FG';
+    }
+}
+
+
+/* =========================================================
+   INITIALISATION
+========================================================= */
+
+document.addEventListener(
+    'DOMContentLoaded',
+    function() {
+
+        attachProductEvents();
+
+        calculateTotal();
+    }
 );
 
-while ($q && ($r = $q->fetch_assoc())) {
-    $products[] = $r;
-}
+</script>
 
-?>
-<!doctype html>
+</body>
 
-<html lang="fr">
-
-<head>
-
-<meta charset="utf-8">
-
-<meta name="viewport"
-      content="width=device-width,initial-scale=1">
-
-<title>Ventes — LAMBEMAH</title>
-
-<style>
-
-:root{
-    --blue:#2563eb;
-    --navy:#102f4b;
-    --sky:#eef5ff;
-    --green:#059669;
-    --red:#dc2626;
-}
-
-*{
-    box-sizing:border-box;
-}
-
-body{
-    margin:0;
-    font-family:Inter,Arial,sans-serif;
-    background:#f4f8fd;
-    color:#14283d;
-}
-
-.layout{
-    display:flex;
-    min-height:100vh;
-}
-
-.side{
-    width:270px;
-    background:linear-gradient(
-        180deg,
-        #103454,
-        #0b2840
-    );
-    color:#fff;
-    padding:28px 20px;
-    position:fixed;
-    inset:0 auto 0 0;
-}
-
-.brand{
-    font-size:29px;
-    font-weight:800;
-}
-
-.sub{
-    margin-top:7px;
-    color:#d8e7f6;
-}
-
-.nav{
-    margin-top:40px;
-}
-
-.nav a{
-    display:block;
-    color:#fff;
-    text-decoration:none;
-    padding:14px 16px;
-    border-radius:13px;
-    margin:7px 0;
-    font-size:17px;
-}
-
-.nav a.active,
-.nav a:hover{
-    background:#2563eb;
-}
-
-.main{
-    margin-left:270px;
-    width:calc(100% - 270px);
-    padding:30px;
-}
-
-.head{
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    gap:20px;
-}
-
-.head h1{
-    margin:0;
-    font-size:30px;
-}
-
-.head p{
-    color:#647589;
-}
-
-.btn{
-    border:0;
-    border-radius:10px;
-    padding:11px 15px;
-    background:var(--blue);
-    color:#fff;
-    font-weight:700;
-    cursor:pointer;
-    text-decoration:none;
-    display:inline-block;
-}
-
-.btn.secondary{
-    background:#e8f0fb;
-    color:var(--navy);
-}
-
-.btn.danger{
-    background:#fee2e2;
-    color:#991b1b;
-}
-
-.btn.green{
-    background:var(--green);
-}
-
-.card{
-    background:#fff;
-    border:1px solid #e1eaf5;
-    border-radius:18px;
-    padding:22px;
-    margin-top:22px;
-    box-shadow:0 7px 25px #1e3a5f0a;
-}
-
-.stats{
-    display:grid;
-    grid-template-columns:repeat(3,1fr);
-    gap:15px;
-}
-
-.stat{
-    background:linear-gradient(
-        135deg,
-        #fff,
-        #f1f7ff
-    );
-    border:1px solid #dfebfa;
-    border-radius:16px;
-    padding:18px;
-}
-
-.stat b{
-    font-size:25px;
-    display:block;
-    margin-top:7px;
-}
-
-.tablewrap{
-    overflow:auto;
-}
-
-table{
-    width:100%;
-    border-collapse:collapse;
-    min-width:780px;
-}
-
-th,
-td{
-    padding:14px 12px;
-    border-bottom:1px solid #e5edf6;
-    text-align:left;
-}
-
-th{
-    background:#f3f7fc;
-    color:#49627a;
-    font-size:13px;
-    text-transform:uppercase;
-}
-
-.money{
-    font-weight:800;
-}
-
-.status{
-    padding:7px 10px;
-    border-radius:999px;
-    font-size:12px;
-    font-weight:800;
-}
-
-.paid{
-    background:#dcfce7;
-    color:#166534;
-}
-
-.partial{
-    background:#fff7ed;
-    color:#9a3412;
-}
-
-.unpaid{
-    background:#fee2e2;
-    color:#991b1b;
-}
-
-.locked{
-    background:#e5e7eb;
-    color:#374151;
-}
-
-.actions{
-    display:flex;
-    gap:7px;
-    flex-wrap:wrap;
-}
-
-.flash{
-    padding:13px 16px;
-    border-radius:12px;
-    margin:16px 0;
-}
-
-.ok{
-    background:#dcfce7;
-    color:#166534;
-}
-
-.err{
-    background:#fee2e2;
-    color:#991b1b;
-}
-
-.formgrid{
-    display:grid;
-    grid-template-columns:1.2fr 1fr;
-    gap:10px;
-}
-
-.field label{
-    display:block;
-    font-weight:700;
-    font-size:13px;
-    margin-bottom:6px;
-}
-
-.field input,
-.field select{
-    width:100%;
-    padding:11px;
-    border:1px solid #cbd8e7;
-    border-radius:9px;
-    background:#fff;
-}
-
-.line{
-    display:grid;
-    grid-template-columns:2fr 1fr 1fr 1fr auto;
-    gap:8px;
-    align-items:end;
-    margin-bottom:9px;
-}
-
-.totalbox{
-    display:flex;
-    justify-content:flex-end;
-    font-size:22px;
-    font-weight:800;
-    padding-top:12px;
-}
-
-.detailhead{
-    display:flex;
-    justify-content:space-between;
-    gap:20px;
-    align-items:flex-start;
-}
-
-.paybox{
-    background:#f1f7ff;
-    border:1px solid #d5e5fb;
-    padding:18px;
-    border-radius:14px;
-    margin-top:18px;
-}
-
-.mobile{
-    display:none;
-}
-
-.notice{
-    background:#fff7ed;
-    border:1px solid #fed7aa;
-    color:#9a3412;
-    padding:12px;
-    border-radius:10px;
-    margin-top:15px;
-}
-
-.locknotice{
-    background:#f1f5f9;
-    border:1px solid #cbd5e1;
-    color:#334155;
-    padding:12px;
-    border-radius:10px;
-    margin-top:15px;
-}
-
-@media(max-width:850px){
-
-    .side{
-        display:none;
-    }
-
-    .main{
-        margin:0;
-        width:100%;
-        padding:16px;
-    }
-
-    .mobile{
-        display:block;
-        margin-bottom:12px;
-    }
-
-    .head{
-        display:block;
-    }
-
-    .head h1{
-        font-size:22px;
-    }
-
-    .head .btn{
-        margin-top:10px;
-    }
-
-    .stats{
-        grid-template-columns:1fr;
-    }
-
-    .formgrid{
-        grid-template-columns:1fr;
-    }
-
-    .line{
-        grid-template-columns:1fr 1fr
+</html>
