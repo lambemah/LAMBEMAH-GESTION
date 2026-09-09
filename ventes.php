@@ -1,1373 +1,164 @@
 <?php
-error_reporting(E_ALL);
-ini_set('display_errors', '1');
-ini_set('display_startup_errors', '1');
-
 session_start();
-
 require_once __DIR__ . '/config.php';
 
+if (!isset($conn) || !($conn instanceof mysqli)) {
+    die("Connexion à la base de données impossible.");
+}
+
+$conn->set_charset("utf8mb4");
 mysqli_report(MYSQLI_REPORT_OFF);
 
-$conn = $conn ?? ($mysqli ?? null);
-
-if (!$conn || !($conn instanceof mysqli)) {
-    die("Erreur : connexion à la base de données introuvable.");
+function h($v){
+    return htmlspecialchars((string)$v,ENT_QUOTES,'UTF-8');
 }
 
-$conn->set_charset('utf8mb4');
-
-
-/* =========================================================
-   FONCTIONS
-   ========================================================= */
-
-function h($v)
-{
-    return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+function money($v){
+    return number_format((float)$v,0,',',' ').' FG';
 }
 
-function money($v)
-{
-    return number_format((float)$v, 0, ',', ' ') . ' FG';
+function cleanText($v){
+    return trim(preg_replace('/[|\r\n]+/',' ',(string)$v));
 }
 
+function nextId(mysqli $conn,string $table):int{
 
-/*
- * Génère :
- * FAC-2026-0001
- * FAC-2026-0002
- * FAC-2026-0003
- */
-function nextInvoiceNumber(mysqli $conn): string
-{
-    $year = date('Y');
-
-    $result = $conn->query("
-        SELECT description
-        FROM ventes
-        WHERE description LIKE 'FACTURE=FAC-$year-%|%'
-        ORDER BY id DESC
-    ");
-
-    if (!$result) {
-        throw new Exception(
-            "Erreur recherche numéro facture : " . $conn->error
-        );
+    if(!in_array($table,['produits','mouvements','ventes'],true)){
+        return 1;
     }
 
-    $max = 0;
+    $q=$conn->query("
+        SELECT COALESCE(MAX(id),0)+1 AS n
+        FROM `$table`
+    ");
 
-    while ($row = $result->fetch_assoc()) {
+    return (int)($q->fetch_assoc()['n']??1);
+}
 
-        $description = (string)$row['description'];
+function parseMeta(string $desc):array{
 
-        if (preg_match(
-            '/FACTURE=FAC-' . preg_quote($year, '/') . '-(\d{4})\|/',
-            $description,
-            $matches
-        )) {
-            $numero = (int)$matches[1];
+    $out=[];
 
-            if ($numero > $max) {
-                $max = $numero;
+    foreach(explode('|',$desc) as $part){
+
+        if(strpos($part,'=')!==false){
+
+            [$k,$v]=explode('=',$part,2);
+
+            $out[trim($k)]=trim($v);
+        }
+    }
+
+    return $out;
+}
+
+function invoiceRows(mysqli $conn,string $ref):array{
+
+    $rows=[];
+
+    $safe=$conn->real_escape_string($ref);
+
+    $q=$conn->query("
+        SELECT v.*,p.nom,p.categorie
+        FROM ventes v
+        LEFT JOIN produits p ON p.id=v.produit_id
+        WHERE v.description LIKE '%FACTURE=$safe|%'
+        ORDER BY v.id ASC
+    ");
+
+    while($q && ($r=$q->fetch_assoc())){
+        $rows[]=$r;
+    }
+
+    return $rows;
+}
+
+function flash($type,$msg){
+
+    $_SESSION['flash']=[
+        'type'=>$type,
+        'msg'=>$msg
+    ];
+}
+
+function nextSaleNumber(mysqli $conn):string{
+
+    $year=date('Y');
+
+    $max=0;
+
+    $q=$conn->query("
+        SELECT description
+        FROM ventes
+        WHERE description LIKE '%FACTURE=VEN-$year-%'
+    ");
+
+    while($q && ($r=$q->fetch_assoc())){
+
+        if(
+            preg_match(
+                '/FACTURE=VEN-'.$year.'-(\d+)/',
+                $r['description'],
+                $m
+            )
+        ){
+
+            $n=(int)$m[1];
+
+            if($n>$max){
+                $max=$n;
             }
         }
     }
 
-    $max++;
-
-    return 'FAC-' . $year . '-' . str_pad(
-        (string)$max,
+    return 'VEN-'.$year.'-'.str_pad(
+        $max+1,
         4,
         '0',
         STR_PAD_LEFT
     );
 }
 
+/*
+|--------------------------------------------------------------------------
+| IMPRESSION
+|--------------------------------------------------------------------------
+*/
 
-function nextId(mysqli $conn, string $table): int
-{
-    $allowed = [
-        'produits',
-        'ventes',
-        'mouvements'
-    ];
+if(isset($_GET['imprimer'])){
 
-    if (!in_array($table, $allowed, true)) {
-        throw new Exception("Table non autorisée.");
+    $ref=cleanText($_GET['imprimer']);
+
+    $rows=invoiceRows($conn,$ref);
+
+    if(!$rows){
+        die("Facture introuvable.");
     }
 
-    $result = $conn->query(
-        "SELECT COALESCE(MAX(id),0)+1 AS prochain FROM `$table`"
-    );
+    $meta=parseMeta($rows[0]['description']);
 
-    if (!$result) {
-        throw new Exception(
-            "Erreur génération ID ($table) : " . $conn->error
-        );
+    $total=0;
+
+    foreach($rows as $r){
+
+        $total +=
+            (float)$r['quantite'] *
+            (float)$r['prix_unitaire'];
     }
 
-    $row = $result->fetch_assoc();
+    $paid=(float)($meta['PAYE']??0);
 
-    return (int)($row['prochain'] ?? 1);
-}
+    $rest=max(0,$total-$paid);
 
+    $signature=
+        isset($_GET['signature'])
+        && $_GET['signature']=='1';
 
-function parseMeta($description): array
-{
-    $meta = [];
+    $status=$paid<=0
+        ? 'Non payée'
+        : ($rest<=0 ? 'Payée' : 'Partiellement payée');
 
-    foreach (explode('|', (string)$description) as $part) {
-
-        if (strpos($part, '=') === false) {
-            continue;
-        }
-
-        [$key, $value] = explode('=', $part, 2);
-
-        $key = trim($key);
-
-        if ($key !== '') {
-            $meta[$key] = trim($value);
-        }
-    }
-
-    return $meta;
-}
-
-
-function buildDescription(
-    string $facture,
-    string $client,
-    string $statut,
-    float $paye,
-    float $reste
-): string {
-
-    return
-        'FACTURE=' . $facture .
-        '|CLIENT=' . str_replace('|', '/', $client) .
-        '|STATUT=' . $statut .
-        '|PAYE=' . $paye .
-        '|RESTE=' . $reste;
-}
-
-
-function getInvoiceRows(
-    mysqli $conn,
-    string $facture
-): array {
-
-    $safe = $conn->real_escape_string($facture);
-
-    $sql = "
-        SELECT
-            v.id,
-            v.produit_id,
-            v.quantite,
-            v.prix_unitaire,
-            v.montant,
-            v.description,
-            v.date_vente,
-            p.nom,
-            p.categorie,
-            p.prix_vente,
-            p.stock
-        FROM ventes v
-        LEFT JOIN produits p
-            ON p.id = v.produit_id
-        WHERE v.description LIKE '%FACTURE=$safe|%'
-        ORDER BY v.id ASC
-    ";
-
-    $result = $conn->query($sql);
-
-    if (!$result) {
-        throw new Exception(
-            "Erreur récupération facture : " . $conn->error
-        );
-    }
-
-    $rows = [];
-
-    while ($row = $result->fetch_assoc()) {
-        $rows[] = $row;
-    }
-
-    return $rows;
-}
-
-
-function invoiceTotal(array $rows): float
-{
-    $total = 0;
-
-    foreach ($rows as $row) {
-        $total += (float)$row['montant'];
-    }
-
-    return $total;
-}
-
-
-function invoicePaid(array $rows): float
-{
-    if (!$rows) {
-        return 0;
-    }
-
-    $meta = parseMeta(
-        $rows[0]['description'] ?? ''
-    );
-
-    return (float)($meta['PAYE'] ?? 0);
-}
-
-
-function invoiceClient(array $rows): string
-{
-    if (!$rows) {
-        return '';
-    }
-
-    $meta = parseMeta(
-        $rows[0]['description'] ?? ''
-    );
-
-    return $meta['CLIENT'] ?? '';
-}
-
-
-function invoiceStatus(
-    float $total,
-    float $paid
-): string {
-
-    if ($paid <= 0) {
-        return 'IMPAYEE';
-    }
-
-    if ($paid >= $total) {
-        return 'PAYEE';
-    }
-
-    return 'PARTIEL';
-}
-
-
-function redirectPage()
-{
-    header('Location: ventes.php');
-    exit;
-}
-
-
-/* =========================================================
-   VARIABLES
-   ========================================================= */
-
-$error = '';
-
-$editFacture = trim(
-    $_GET['modifier'] ?? ''
-);
-
-$printFacture = trim(
-    $_GET['imprimer'] ?? ''
-);
-
-$editRows = [];
-
-$editMeta = [];
-
-$produits = [];
-
-$factures = [];
-
-
-/* =========================================================
-   CHARGER LES PRODUITS
-   ========================================================= */
-
-$resultProduits = $conn->query("
-    SELECT
-        id,
-        nom,
-        categorie,
-        prix_vente,
-        stock
-    FROM produits
-    ORDER BY nom ASC
-");
-
-if (!$resultProduits) {
-
-    die(
-        '<h3>Erreur SQL produits</h3>' .
-        '<p>' . h($conn->error) . '</p>'
-    );
-}
-
-while ($row = $resultProduits->fetch_assoc()) {
-    $produits[] = $row;
-}
-
-
-/* =========================================================
-   FORMULAIRES
-   ========================================================= */
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-
-    $action = $_POST['action'] ?? '';
-
-    try {
-
-        /* =================================================
-           ENREGISTRER / MODIFIER FACTURE
-           ================================================= */
-
-        if ($action === 'save_invoice') {
-
-            $facture = trim(
-                $_POST['facture'] ?? ''
-            );
-
-            $client = trim(
-                $_POST['client'] ?? ''
-            );
-
-            $date = trim(
-                $_POST['date_vente'] ?? ''
-            );
-
-            $produitIds =
-                $_POST['produit_id'] ?? [];
-
-            $quantites =
-                $_POST['quantite'] ?? [];
-
-            $prixUnitaires =
-                $_POST['prix_unitaire'] ?? [];
-
-
-            if ($facture === '') {
-                throw new Exception(
-                    "La référence de facture est obligatoire."
-                );
-            }
-
-
-            if ($date === '') {
-                $date = date('Y-m-d');
-            }
-
-
-            /*
-             * Ancienne facture si modification
-             */
-            $anciennesLignes =
-                getInvoiceRows(
-                    $conn,
-                    $facture
-                );
-
-
-            $ancienTotal =
-                invoiceTotal(
-                    $anciennesLignes
-                );
-
-
-            $ancienPaye =
-                invoicePaid(
-                    $anciennesLignes
-                );
-
-
-            /*
-             * Facture payée = verrouillée
-             */
-            if (
-                $anciennesLignes &&
-                $ancienPaye >= $ancienTotal
-            ) {
-
-                throw new Exception(
-                    "Cette facture est totalement payée. Elle est verrouillée."
-                );
-            }
-
-
-            /*
-             * Nouvelles lignes
-             */
-            $nouvellesLignes = [];
-
-            $nombre = max(
-                count($produitIds),
-                count($quantites),
-                count($prixUnitaires)
-            );
-
-
-            for ($i = 0; $i < $nombre; $i++) {
-
-                $produitId =
-                    (int)($produitIds[$i] ?? 0);
-
-                $quantite =
-                    (int)($quantites[$i] ?? 0);
-
-                $prix =
-                    (float)($prixUnitaires[$i] ?? 0);
-
-
-                if (
-                    $produitId <= 0 ||
-                    $quantite <= 0
-                ) {
-                    continue;
-                }
-
-
-                if ($prix < 0) {
-                    $prix = 0;
-                }
-
-
-                /*
-                 * Vérifier produit
-                 */
-                $stmt =
-                    $conn->prepare("
-                        SELECT id, nom, stock
-                        FROM produits
-                        WHERE id = ?
-                        LIMIT 1
-                    ");
-
-
-                if (!$stmt) {
-                    throw new Exception(
-                        "Erreur produit : " . $conn->error
-                    );
-                }
-
-
-                $stmt->bind_param(
-                    'i',
-                    $produitId
-                );
-
-
-                if (!$stmt->execute()) {
-
-                    throw new Exception(
-                        "Erreur produit : " .
-                        $stmt->error
-                    );
-                }
-
-
-                $res =
-                    $stmt->get_result();
-
-                $produit =
-                    $res->fetch_assoc();
-
-
-                $stmt->close();
-
-
-                if (!$produit) {
-
-                    throw new Exception(
-                        "Le produit sélectionné n'existe pas."
-                    );
-                }
-
-
-                $montant =
-                    $quantite * $prix;
-
-
-                $nouvellesLignes[] = [
-
-                    'produit_id' =>
-                        $produitId,
-
-                    'quantite' =>
-                        $quantite,
-
-                    'prix_unitaire' =>
-                        $prix,
-
-                    'montant' =>
-                        $montant
-                ];
-            }
-
-
-            if (!$nouvellesLignes) {
-
-                throw new Exception(
-                    "Ajoute au moins un article."
-                );
-            }
-
-
-            /*
-             * Nouveau total
-             */
-            $nouveauTotal = 0;
-
-            foreach ($nouvellesLignes as $ligne) {
-
-                $nouveauTotal +=
-                    $ligne['montant'];
-            }
-
-
-            /*
-             * Le paiement existant est conservé
-             */
-            if ($ancienPaye > $nouveauTotal) {
-
-                throw new Exception(
-                    "Le montant déjà payé (" .
-                    money($ancienPaye) .
-                    ") dépasse le nouveau total (" .
-                    money($nouveauTotal) .
-                    ")."
-                );
-            }
-
-
-            $nouveauReste =
-                $nouveauTotal -
-                $ancienPaye;
-
-
-            $nouveauStatut =
-                invoiceStatus(
-                    $nouveauTotal,
-                    $ancienPaye
-                );
-
-
-            /*
-             * TRANSACTION
-             */
-            $conn->begin_transaction();
-
-
-            /*
-             * Restaurer ancien stock
-             */
-            foreach ($anciennesLignes as $ancienne) {
-
-                $produitId =
-                    (int)$ancienne['produit_id'];
-
-                $quantite =
-                    (int)$ancienne['quantite'];
-
-
-                $stmt =
-                    $conn->prepare("
-                        UPDATE produits
-                        SET stock = stock + ?
-                        WHERE id = ?
-                    ");
-
-
-                if (!$stmt) {
-                    throw new Exception(
-                        "Erreur stock : " .
-                        $conn->error
-                    );
-                }
-
-
-                $stmt->bind_param(
-                    'ii',
-                    $quantite,
-                    $produitId
-                );
-
-
-                if (!$stmt->execute()) {
-
-                    throw new Exception(
-                        "Erreur restauration stock : " .
-                        $stmt->error
-                    );
-                }
-
-
-                $stmt->close();
-            }
-
-
-            /*
-             * Supprimer anciennes ventes
-             */
-            if ($anciennesLignes) {
-
-                $safe =
-                    $conn->real_escape_string(
-                        $facture
-                    );
-
-
-                if (!$conn->query("
-                    DELETE FROM ventes
-                    WHERE description LIKE '%FACTURE=$safe|%'
-                ")) {
-
-                    throw new Exception(
-                        "Erreur suppression ancienne facture : " .
-                        $conn->error
-                    );
-                }
-            }
-
-
-            /*
-             * Insérer nouvelles ventes
-             */
-            foreach ($nouvellesLignes as $ligne) {
-
-                $venteId =
-                    nextId(
-                        $conn,
-                        'ventes'
-                    );
-
-
-                $description =
-                    buildDescription(
-                        $facture,
-                        $client,
-                        $nouveauStatut,
-                        $ancienPaye,
-                        $nouveauReste
-                    );
-
-
-                $stmt =
-                    $conn->prepare("
-                        INSERT INTO ventes
-                        (
-                            id,
-                            produit_id,
-                            quantite,
-                            prix_unitaire,
-                            montant,
-                            description,
-                            date_vente
-                        )
-                        VALUES
-                        (
-                            ?,
-                            ?,
-                            ?,
-                            ?,
-                            ?,
-                            ?,
-                            ?
-                        )
-                    ");
-
-
-                if (!$stmt) {
-
-                    throw new Exception(
-                        "Erreur vente : " .
-                        $conn->error
-                    );
-                }
-
-
-                $stmt->bind_param(
-                    'iiiddss',
-                    $venteId,
-                    $ligne['produit_id'],
-                    $ligne['quantite'],
-                    $ligne['prix_unitaire'],
-                    $ligne['montant'],
-                    $description,
-                    $date
-                );
-
-
-                if (!$stmt->execute()) {
-
-                    throw new Exception(
-                        "Erreur enregistrement vente : " .
-                        $stmt->error
-                    );
-                }
-
-
-                $stmt->close();
-
-
-                /*
-                 * Diminuer stock
-                 */
-                $stmt =
-                    $conn->prepare("
-                        UPDATE produits
-                        SET stock = stock - ?
-                        WHERE id = ?
-                    ");
-
-
-                if (!$stmt) {
-
-                    throw new Exception(
-                        "Erreur stock : " .
-                        $conn->error
-                    );
-                }
-
-
-                $stmt->bind_param(
-                    'ii',
-                    $ligne['quantite'],
-                    $ligne['produit_id']
-                );
-
-
-                if (!$stmt->execute()) {
-
-                    throw new Exception(
-                        "Erreur diminution stock : " .
-                        $stmt->error
-                    );
-                }
-
-
-                $stmt->close();
-            }
-
-
-            /*
-             * Mouvements SORTIE
-             */
-            foreach ($nouvellesLignes as $ligne) {
-
-                $mouvementId =
-                    nextId(
-                        $conn,
-                        'mouvements'
-                    );
-
-
-                $descriptionMouvement =
-                    'FACTURE=' .
-                    $facture .
-                    '|CLIENT=' .
-                    str_replace(
-                        '|',
-                        '/',
-                        $client
-                    );
-
-
-                $stmt =
-                    $conn->prepare("
-                        INSERT INTO mouvements
-                        (
-                            id,
-                            produit_id,
-                            type,
-                            quantite,
-                            prix,
-                            description,
-                            date_mouvement
-                        )
-                        VALUES
-                        (
-                            ?,
-                            ?,
-                            'SORTIE',
-                            ?,
-                            ?,
-                            ?,
-                            ?
-                        )
-                    ");
-
-
-                /*
-                 * Si la structure mouvements ne permet pas
-                 * l'insertion, on ne bloque pas la vente.
-                 */
-                if ($stmt) {
-
-                    $stmt->bind_param(
-                        'iiidss',
-                        $mouvementId,
-                        $ligne['produit_id'],
-                        $ligne['quantite'],
-                        $ligne['prix_unitaire'],
-                        $descriptionMouvement,
-                        $date
-                    );
-
-                    $stmt->execute();
-
-                    $stmt->close();
-                }
-            }
-
-
-            $conn->commit();
-
-            redirectPage();
-        }
-
-
-        /* =================================================
-           PAIEMENT
-           ================================================= */
-
-        if ($action === 'pay_invoice') {
-
-            $facture =
-                trim(
-                    $_POST['facture'] ?? ''
-                );
-
-
-            $montant =
-                (float)(
-                    $_POST['montant_paiement'] ?? 0
-                );
-
-
-            if ($facture === '') {
-                throw new Exception(
-                    "Facture introuvable."
-                );
-            }
-
-
-            if ($montant <= 0) {
-                throw new Exception(
-                    "Le montant doit être supérieur à zéro."
-                );
-            }
-
-
-            $rows =
-                getInvoiceRows(
-                    $conn,
-                    $facture
-                );
-
-
-            if (!$rows) {
-                throw new Exception(
-                    "Cette facture n'existe pas."
-                );
-            }
-
-
-            $total =
-                invoiceTotal($rows);
-
-
-            $paye =
-                invoicePaid($rows);
-
-
-            $reste =
-                max(
-                    0,
-                    $total - $paye
-                );
-
-
-            if ($paye >= $total) {
-                throw new Exception(
-                    "Cette facture est déjà totalement payée."
-                );
-            }
-
-
-            if ($montant > $reste) {
-                throw new Exception(
-                    "Le paiement dépasse le reste à payer : " .
-                    money($reste)
-                );
-            }
-
-
-            $nouveauPaye =
-                $paye + $montant;
-
-
-            $nouveauReste =
-                max(
-                    0,
-                    $total - $nouveauPaye
-                );
-
-
-            $statut =
-                invoiceStatus(
-                    $total,
-                    $nouveauPaye
-                );
-
-
-            $safe =
-                $conn->real_escape_string(
-                    $facture
-                );
-
-
-            $result =
-                $conn->query("
-                    SELECT id, description
-                    FROM ventes
-                    WHERE description LIKE '%FACTURE=$safe|%'
-                    ORDER BY id ASC
-                ");
-
-
-            if (!$result) {
-                throw new Exception(
-                    "Erreur paiement : " .
-                    $conn->error
-                );
-            }
-
-
-            while ($row = $result->fetch_assoc()) {
-
-                $id =
-                    (int)$row['id'];
-
-
-                $meta =
-                    parseMeta(
-                        $row['description']
-                    );
-
-
-                $client =
-                    $meta['CLIENT'] ?? '';
-
-
-                $description =
-                    buildDescription(
-                        $facture,
-                        $client,
-                        $statut,
-                        $nouveauPaye,
-                        $nouveauReste
-                    );
-
-
-                $stmt =
-                    $conn->prepare("
-                        UPDATE ventes
-                        SET description = ?
-                        WHERE id = ?
-                    ");
-
-
-                if (!$stmt) {
-                    throw new Exception(
-                        "Erreur mise à jour paiement : " .
-                        $conn->error
-                    );
-                }
-
-
-                $stmt->bind_param(
-                    'si',
-                    $description,
-                    $id
-                );
-
-
-                if (!$stmt->execute()) {
-                    throw new Exception(
-                        "Erreur paiement : " .
-                        $stmt->error
-                    );
-                }
-
-
-                $stmt->close();
-            }
-
-
-            redirectPage();
-        }
-
-
-        /* =================================================
-           SUPPRIMER FACTURE
-           ================================================= */
-
-        if ($action === 'delete_invoice') {
-
-            $facture =
-                trim(
-                    $_POST['facture'] ?? ''
-                );
-
-
-            if ($facture === '') {
-                throw new Exception(
-                    "Facture introuvable."
-                );
-            }
-
-
-            $rows =
-                getInvoiceRows(
-                    $conn,
-                    $facture
-                );
-
-
-            if (!$rows) {
-                throw new Exception(
-                    "Facture introuvable."
-                );
-            }
-
-
-            $paye =
-                invoicePaid($rows);
-
-
-            if ($paye > 0) {
-                throw new Exception(
-                    "Une facture ayant reçu un paiement ne peut pas être supprimée."
-                );
-            }
-
-
-            $conn->begin_transaction();
-
-
-            /*
-             * Restaurer stock
-             */
-            foreach ($rows as $row) {
-
-                $produitId =
-                    (int)$row['produit_id'];
-
-                $quantite =
-                    (int)$row['quantite'];
-
-
-                $stmt =
-                    $conn->prepare("
-                        UPDATE produits
-                        SET stock = stock + ?
-                        WHERE id = ?
-                    ");
-
-
-                if (!$stmt) {
-                    throw new Exception(
-                        "Erreur stock : " .
-                        $conn->error
-                    );
-                }
-
-
-                $stmt->bind_param(
-                    'ii',
-                    $quantite,
-                    $produitId
-                );
-
-
-                if (!$stmt->execute()) {
-                    throw new Exception(
-                        "Erreur stock : " .
-                        $stmt->error
-                    );
-                }
-
-
-                $stmt->close();
-            }
-
-
-            $safe =
-                $conn->real_escape_string(
-                    $facture
-                );
-
-
-            if (!$conn->query("
-                DELETE FROM ventes
-                WHERE description LIKE '%FACTURE=$safe|%'
-            ")) {
-
-                throw new Exception(
-                    "Erreur suppression : " .
-                    $conn->error
-                );
-            }
-
-
-            /*
-             * Nettoyage mouvements associés
-             */
-            $conn->query("
-                DELETE FROM mouvements
-                WHERE description LIKE '%FACTURE=$safe|%'
-            ");
-
-
-            $conn->commit();
-
-            redirectPage();
-        }
-
-    } catch (Throwable $e) {
-
-        try {
-            $conn->rollback();
-        } catch (Throwable $ignore) {
-        }
-
-        $error =
-            $e->getMessage();
-    }
-}
-
-
-/* =========================================================
-   CHARGER FACTURE À MODIFIER
-   ========================================================= */
-
-if ($editFacture !== '') {
-
-    try {
-
-        $editRows =
-            getInvoiceRows(
-                $conn,
-                $editFacture
-            );
-
-
-        if (!$editRows) {
-
-            $error =
-                "Cette facture n'existe pas.";
-
-        } else {
-
-            $editMeta =
-                parseMeta(
-                    $editRows[0]['description']
-                );
-
-
-            $total =
-                invoiceTotal(
-                    $editRows
-                );
-
-
-            $paye =
-                invoicePaid(
-                    $editRows
-                );
-
-
-            if ($paye >= $total) {
-
-                $error =
-                    "Cette facture est totalement payée. Elle est verrouillée.";
-
-                $editRows = [];
-            }
-        }
-
-    } catch (Throwable $e) {
-
-        $error =
-            $e->getMessage();
-    }
-}
-
-
-/* =========================================================
-   LISTE FACTURES
-   ========================================================= */
-
-try {
-
-    $result =
-        $conn->query("
-            SELECT
-                id,
-                description,
-                date_vente
-            FROM ventes
-            WHERE description LIKE '%FACTURE=%'
-            ORDER BY date_vente DESC, id DESC
-        ");
-
-
-    if (!$result) {
-        throw new Exception(
-            "Erreur SQL factures : " .
-            $conn->error
-        );
-    }
-
-
-    $dejaVues = [];
-
-
-    while ($row = $result->fetch_assoc()) {
-
-        $meta =
-            parseMeta(
-                $row['description']
-            );
-
-
-        $ref =
-            $meta['FACTURE'] ?? '';
-
-
-        if ($ref === '') {
-            continue;
-        }
-
-
-        if (isset($dejaVues[$ref])) {
-            continue;
-        }
-
-
-        $dejaVues[$ref] = true;
-
-
-        $rows =
-            getInvoiceRows(
-                $conn,
-                $ref
-            );
-
-
-        if (!$rows) {
-            continue;
-        }
-
-
-        $total =
-            invoiceTotal($rows);
-
-
-        $paid =
-            invoicePaid($rows);
-
-
-        $rest =
-            max(
-                0,
-                $total - $paid
-            );
-
-
-        $factures[] = [
-
-            'ref' =>
-                $ref,
-
-            'client' =>
-                invoiceClient($rows),
-
-            'date' =>
-                $row['date_vente'],
-
-            'total' =>
-                $total,
-
-            'paid' =>
-                $paid,
-
-            'rest' =>
-                $rest,
-
-            'status' =>
-                invoiceStatus(
-                    $total,
-                    $paid
-                ),
-
-            'count' =>
-                count($rows)
-        ];
-    }
-
-} catch (Throwable $e) {
-
-    $error =
-        $e->getMessage();
-}
-
-
-/* =========================================================
-   IMPRESSION
-   ========================================================= */
-
-if ($printFacture !== '') {
-
-    try {
-
-        $rows =
-            getInvoiceRows(
-                $conn,
-                $printFacture
-            );
-
-
-        if (!$rows) {
-            die("Facture introuvable.");
-        }
-
-
-        $total =
-            invoiceTotal($rows);
-
-
-        $paid =
-            invoicePaid($rows);
-
-
-        $rest =
-            max(
-                0,
-                $total - $paid
-            );
-
-
-        $client =
-            invoiceClient($rows);
-
-?>
+    ?>
 
 <!DOCTYPE html>
 <html lang="fr">
@@ -1375,75 +166,256 @@ if ($printFacture !== '') {
 <head>
 
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 
-<meta
-    name="viewport"
-    content="width=device-width,initial-scale=1"
->
-
-<title>
-    <?= h($printFacture) ?>
-</title>
+<title><?=h($ref)?></title>
 
 <style>
 
+*{box-sizing:border-box}
+
 body{
-    font-family:Arial,sans-serif;
     margin:0;
-    padding:30px;
+    background:#eef2f7;
+    font-family:Arial,Helvetica,sans-serif;
     color:#172033;
 }
 
-.facture{
-    max-width:800px;
-    margin:auto;
+.toolbar{
+    background:#102f4b;
+    color:white;
+    padding:14px;
+    display:flex;
+    justify-content:center;
+    gap:10px;
+    position:sticky;
+    top:0;
+    z-index:10;
 }
 
-.headerPrint{
+.toolbar label{
+    background:white;
+    color:#102f4b;
+    padding:9px 13px;
+    border-radius:8px;
+    font-weight:bold;
+    cursor:pointer;
+}
+
+.toolbar button{
+    background:#2563eb;
+    border:0;
+    color:white;
+    padding:9px 15px;
+    border-radius:8px;
+    font-weight:bold;
+    cursor:pointer;
+}
+
+.paper{
+    width:210mm;
+    min-height:297mm;
+    background:white;
+    margin:20px auto;
+    padding:18mm;
+    box-shadow:0 4px 20px #0002;
+}
+
+.header{
     display:flex;
     justify-content:space-between;
-    gap:20px;
-    border-bottom:3px solid #1677ff;
-    padding-bottom:20px;
+    align-items:flex-start;
+    border-bottom:3px solid #102f4b;
+    padding-bottom:15px;
 }
 
-.headerPrint h1{
-    color:#1677ff;
+.logo{
+    width:115px;
+    object-fit:contain;
+}
+
+.company{
+    flex:1;
+    margin-left:15px;
+}
+
+.company h1{
     margin:0;
+    color:#102f4b;
+    font-size:25px;
+}
+
+.company strong{
+    color:#b8860b;
+}
+
+.company p{
+    font-size:12px;
+    line-height:1.5;
+}
+
+.invoice-title{
+    text-align:right;
+}
+
+.invoice-title h2{
+    margin:0;
+    color:#102f4b;
+}
+
+.invoice-title strong{
+    color:#b8860b;
+}
+
+.info{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:15px;
+    margin:20px 0;
+}
+
+.info-box{
+    border:1px solid #dce4ed;
+    padding:12px;
+    border-radius:8px;
 }
 
 table{
     width:100%;
     border-collapse:collapse;
-    margin-top:25px;
-}
-
-th,td{
-    border:1px solid #ddd;
-    padding:12px;
 }
 
 th{
-    background:#eaf4ff;
-    color:#0d4ea6;
+    background:#102f4b;
+    color:white;
+    padding:10px;
+    text-align:left;
 }
 
-.total{
+td{
+    padding:9px;
+    border-bottom:1px solid #ddd;
+}
+
+.num{
     text-align:right;
-    margin-top:25px;
 }
 
-.total strong{
-    font-size:22px;
+.total-area{
+    width:45%;
+    margin-left:auto;
+    margin-top:20px;
+}
+
+.total-line{
+    display:flex;
+    justify-content:space-between;
+    padding:7px 0;
+}
+
+.total-final{
+    border-top:2px solid #102f4b;
+    padding-top:10px;
+    font-size:18px;
+    font-weight:bold;
+}
+
+.status{
+    padding:5px 9px;
+    border-radius:20px;
+    font-size:11px;
+}
+
+.paid{
+    background:#dcfce7;
+    color:#166534;
+}
+
+.partial{
+    background:#fff3cd;
+    color:#92400e;
+}
+
+.unpaid{
+    background:#fee2e2;
+    color:#991b1b;
+}
+
+.signature-area{
+    margin-top:55px;
+    display:flex;
+    justify-content:flex-end;
+}
+
+.signature-box{
+    width:220px;
+    text-align:center;
+}
+
+.signature-img{
+    width:170px;
+    max-height:90px;
+    object-fit:contain;
+    margin:auto;
+}
+
+.signature-line{
+    height:80px;
+    border-bottom:1px solid #333;
+    margin-bottom:8px;
+}
+
+.footer{
+    margin-top:45px;
+    border-top:1px solid #ddd;
+    padding-top:12px;
+    text-align:center;
+    font-size:11px;
+    color:#667085;
+}
+
+@media(max-width:800px){
+
+    .paper{
+        width:100%;
+        margin:0;
+        padding:20px;
+        box-shadow:none;
+    }
+
+    .header{
+        display:block;
+    }
+
+    .invoice-title{
+        text-align:left;
+        margin-top:15px;
+    }
+
+    .info{
+        grid-template-columns:1fr;
+    }
+
+    .total-area{
+        width:100%;
+    }
 }
 
 @media print{
-    .no-print{
+
+    body{
+        background:white;
+    }
+
+    .toolbar{
         display:none;
     }
 
-    body{
-        padding:0;
+    .paper{
+        margin:0;
+        width:210mm;
+        min-height:297mm;
+        box-shadow:none;
     }
 }
 
@@ -1453,53 +425,97 @@ th{
 
 <body>
 
-<div class="facture">
+<div class="toolbar">
 
-<div class="headerPrint">
+<label>
 
-<div>
+<input
+type="checkbox"
+id="signatureCheck"
+<?=$signature?'checked':''?>>
+
+Ajouter la signature
+
+</label>
+
+<button onclick="window.print()">
+🖨️ Imprimer / PDF
+</button>
+
+</div>
+
+<div class="paper">
+
+<div class="header">
+
+<div style="display:flex">
+
+<img
+src="assets/logo.png"
+class="logo"
+onerror="this.style.display='none'">
+
+<div class="company">
 
 <h1>
-LAMBEMAH GESTION
+LAMBEMAH <strong>GESTION</strong>
 </h1>
 
 <p>
-Gestion commerciale
-</p>
 
-</div>
+<strong>Ventes & Gestion commerciale</strong><br>
 
-<div>
+Téléphone : +224 611752767 / 622595362<br>
 
-<strong>
-FACTURE
-</strong>
+Email : konatelambetenin@gmail.com<br>
 
-<br>
-
-<?= h($printFacture) ?>
-
-<br>
-
-<?= h($rows[0]['date_vente']) ?>
-
-</div>
-
-</div>
-
-
-<p>
-
-<strong>
-Client :
-</strong>
-
-<?= h(
-    $client ?: 'Client comptant'
-) ?>
+Adresse : KM 36
 
 </p>
 
+</div>
+
+</div>
+
+<div class="invoice-title">
+
+<h2>FACTURE DE VENTE</h2>
+
+<strong><?=h($ref)?></strong>
+
+</div>
+
+</div>
+
+<div class="info">
+
+<div class="info-box">
+
+<strong>Client</strong><br>
+
+<?=h(
+    $meta['CLIENT'] ??
+    'Client comptant'
+)?>
+
+</div>
+
+<div class="info-box">
+
+<strong>Date</strong><br>
+
+<?=h(
+    date(
+        'd/m/Y H:i',
+        strtotime(
+            $rows[0]['date_vente'] ?? 'now'
+        )
+    )
+)?>
+
+</div>
+
+</div>
 
 <table>
 
@@ -1507,21 +523,11 @@ Client :
 
 <tr>
 
-<th>
-Article
-</th>
-
-<th>
-Qté
-</th>
-
-<th>
-Prix unitaire
-</th>
-
-<th>
-Montant
-</th>
+<th>Désignation</th>
+<th>Catégorie</th>
+<th class="num">Qté</th>
+<th class="num">Prix unitaire</th>
+<th class="num">Montant</th>
 
 </tr>
 
@@ -1529,31 +535,25 @@ Montant
 
 <tbody>
 
-<?php foreach ($rows as $row): ?>
+<?php foreach($rows as $r):
+
+$m=
+    (float)$r['quantite'] *
+    (float)$r['prix_unitaire'];
+
+?>
 
 <tr>
 
-<td>
-<?= h(
-    $row['nom'] ?? 'Article'
-) ?>
-</td>
+<td><?=h($r['nom']??'Article')?></td>
 
-<td>
-<?= (int)$row['quantite'] ?>
-</td>
+<td><?=h($r['categorie']??'')?></td>
 
-<td>
-<?= money(
-    $row['prix_unitaire']
-) ?>
-</td>
+<td class="num"><?=h($r['quantite'])?></td>
 
-<td>
-<?= money(
-    $row['montant']
-) ?>
-</td>
+<td class="num"><?=money($r['prix_unitaire'])?></td>
+
+<td class="num"><?=money($m)?></td>
 
 </tr>
 
@@ -1563,47 +563,95 @@ Montant
 
 </table>
 
+<div class="total-area">
 
-<div class="total">
+<div class="total-line">
 
-<p>
-Total :
-<strong>
-<?= money($total) ?>
-</strong>
-</p>
+<span>Total facture</span>
 
-<p>
-Déjà payé :
-<?= money($paid) ?>
-</p>
-
-<p>
-Reste :
-<strong>
-<?= money($rest) ?>
-</strong>
-</p>
+<strong><?=money($total)?></strong>
 
 </div>
 
+<div class="total-line">
 
-<div class="no-print">
+<span>Déjà encaissé</span>
 
-<button
-    onclick="window.print()"
->
-🖨️ Imprimer
-</button>
+<strong><?=money($paid)?></strong>
+
+</div>
+
+<div class="total-line">
+
+<span>Reste client</span>
+
+<strong><?=money($rest)?></strong>
+
+</div>
+
+<div class="total-line total-final">
+
+<span>Statut</span>
+
+<span class="status <?=$rest<=0?'paid':($paid>0?'partial':'unpaid')?>">
+
+<?=h($status)?>
+
+</span>
+
+</div>
+
+</div>
+
+<div class="signature-area">
+
+<div class="signature-box">
+
+<?php if($signature): ?>
+
+<img
+src="assets/signature.png"
+class="signature-img"
+onerror="this.style.display='none'">
+
+<?php else: ?>
+
+<div class="signature-line"></div>
+
+<?php endif; ?>
+
+<strong>Responsable</strong>
+
+</div>
+
+</div>
+
+<div class="footer">
+
+LAMBEMAH GESTION — Document commercial
 
 </div>
 
 </div>
 
 <script>
-window.onload=function(){
-    window.print();
-};
+
+document
+.getElementById('signatureCheck')
+.addEventListener('change',function(){
+
+    const url=new URL(window.location.href);
+
+    if(this.checked){
+        url.searchParams.set('signature','1');
+    }else{
+        url.searchParams.delete('signature');
+    }
+
+    window.location.href=url.toString();
+
+});
+
 </script>
 
 </body>
@@ -1612,22 +660,832 @@ window.onload=function(){
 
 <?php
 
-        exit;
+exit;
 
-    } catch (Throwable $e) {
+}
 
-        die(
-            "Erreur impression : " .
-            h($e->getMessage())
+/*
+|--------------------------------------------------------------------------
+| ACTIONS
+|--------------------------------------------------------------------------
+*/
+
+if($_SERVER['REQUEST_METHOD']==='POST'){
+
+try{
+
+/*
+|--------------------------------------------------------------------------
+| ENREGISTRER VENTE
+|--------------------------------------------------------------------------
+*/
+
+if(isset($_POST['save_vente'])){
+
+    $client=cleanText(
+        $_POST['client'] ??
+        'Client comptant'
+    );
+
+    if($client===''){
+        $client='Client comptant';
+    }
+
+    $editRef=cleanText(
+        $_POST['edit_ref'] ?? ''
+    );
+
+    $ids=$_POST['produit_id']??[];
+    $qtys=$_POST['quantite']??[];
+    $prices=$_POST['prix_unitaire']??[];
+
+    $lines=[];
+
+    for($i=0;$i<count($ids);$i++){
+
+        $pid=(int)($ids[$i]??0);
+        $q=(int)($qtys[$i]??0);
+        $p=(float)($prices[$i]??0);
+
+        if($pid>0 && $q>0 && $p>0){
+
+            $lines[]=[
+                'pid'=>$pid,
+                'q'=>$q,
+                'p'=>$p
+            ];
+        }
+    }
+
+    if(!$lines){
+        throw new Exception(
+            "Ajoutez au moins un article."
+        );
+    }
+
+/*
+|--------------------------------------------------------------------------
+| NOUVELLE VENTE
+|--------------------------------------------------------------------------
+*/
+
+if($editRef===''){
+
+    $ref=nextSaleNumber($conn);
+
+    $conn->begin_transaction();
+
+    try{
+
+        foreach($lines as $line){
+
+            $pid=$line['pid'];
+            $q=$line['q'];
+            $p=$line['p'];
+
+            $r=$conn->query("
+                SELECT id,nom,stock
+                FROM produits
+                WHERE id=$pid
+            ");
+
+            if(!$r || !$r->num_rows){
+                throw new Exception(
+                    "Article introuvable."
+                );
+            }
+
+            $prod=$r->fetch_assoc();
+
+            $stock=(int)$prod['stock'];
+
+            if($stock<$q){
+
+                throw new Exception(
+                    "Stock insuffisant pour ".
+                    $prod['nom'].
+                    " (stock : ".$stock.")."
+                );
+            }
+
+            $vid=nextId($conn,'ventes');
+
+            $date=date('Y-m-d H:i:s');
+
+            $montant=$q*$p;
+
+            $desc=
+                "FACTURE=".$conn->real_escape_string($ref).
+                "|CLIENT=".$conn->real_escape_string($client).
+                "|PAYE=0".
+                "|RESTE=0".
+                "|VENTE";
+
+            $stmt=$conn->prepare("
+                INSERT INTO ventes
+                (id,produit_id,quantite,prix_unitaire,montant,description,date_vente)
+                VALUES (?,?,?,?,?,?,?)
+            ");
+
+            if(!$stmt){
+                throw new Exception(
+                    "Erreur préparation vente : ".
+                    $conn->error
+                );
+            }
+
+            $stmt->bind_param(
+                'iiiddss',
+                $vid,
+                $pid,
+                $q,
+                $p,
+                $montant,
+                $desc,
+                $date
+            );
+
+            if(!$stmt->execute()){
+                throw new Exception(
+                    "Erreur enregistrement vente : ".
+                    $stmt->error
+                );
+            }
+
+            $mid=nextId($conn,'mouvements');
+
+            $md=
+                "FACTURE=".$conn->real_escape_string($ref).
+                "|CLIENT=".$conn->real_escape_string($client).
+                "|SORTIE VENTE";
+
+            $stmt2=$conn->prepare("
+                INSERT INTO mouvements
+                (id,produit_id,type,quantite,prix,description,date_mouvement)
+                VALUES (?,?,'SORTIE',?,?,?,?)
+            ");
+
+            if(!$stmt2){
+                throw new Exception(
+                    "Erreur mouvement : ".
+                    $conn->error
+                );
+            }
+
+            $stmt2->bind_param(
+                'iiidss',
+                $mid,
+                $pid,
+                $q,
+                $p,
+                $md,
+                $date
+            );
+
+            if(!$stmt2->execute()){
+                throw new Exception(
+                    "Erreur mouvement : ".
+                    $stmt2->error
+                );
+            }
+
+            if(!$conn->query("
+                UPDATE produits
+                SET stock=stock-$q
+                WHERE id=$pid
+            ")){
+                throw new Exception(
+                    "Erreur mise à jour du stock."
+                );
+            }
+        }
+
+        $conn->commit();
+
+    }catch(Throwable $e){
+
+        $conn->rollback();
+        throw $e;
+    }
+
+    flash(
+        'ok',
+        "Facture $ref enregistrée avec succès."
+    );
+
+    header(
+        "Location: ventes.php?facture=".
+        urlencode($ref)
+    );
+
+    exit;
+}
+
+/*
+|--------------------------------------------------------------------------
+| MODIFICATION VENTE
+|--------------------------------------------------------------------------
+*/
+
+$old=invoiceRows($conn,$editRef);
+
+if(!$old){
+
+    throw new Exception(
+        "Facture à modifier introuvable."
+    );
+}
+
+$oldMeta=parseMeta(
+    $old[0]['description']
+);
+
+$oldPaid=(float)(
+    $oldMeta['PAYE'] ?? 0
+);
+
+$oldTotal=0;
+
+foreach($old as $r){
+
+    $oldTotal +=
+        (float)$r['quantite'] *
+        (float)$r['prix_unitaire'];
+}
+
+/*
+ * Totalement payée = verrouillée
+ */
+
+if($oldPaid >= $oldTotal - 0.01){
+
+    throw new Exception(
+        "Cette facture est totalement payée ".
+        "et ne peut plus être modifiée."
+    );
+}
+
+$newTotal=0;
+
+foreach($lines as $line){
+
+    $newTotal +=
+        $line['q'] *
+        $line['p'];
+}
+
+if($newTotal + 0.01 < $oldPaid){
+
+    throw new Exception(
+        "Le nouveau total (".
+        money($newTotal).
+        ") est inférieur au montant déjà encaissé (".
+        money($oldPaid).
+        ")."
+    );
+}
+
+$newRest=max(
+    0,
+    $newTotal-$oldPaid
+);
+
+$ref=$editRef;
+
+$conn->begin_transaction();
+
+try{
+
+/*
+|--------------------------------------------------------------------------
+| Restaurer ancien stock
+|--------------------------------------------------------------------------
+*/
+
+foreach($old as $r){
+
+    $pid=(int)$r['produit_id'];
+    $q=(int)$r['quantite'];
+
+    if(!$conn->query("
+        UPDATE produits
+        SET stock=stock+$q
+        WHERE id=$pid
+    ")){
+        throw new Exception(
+            "Erreur restauration stock."
         );
     }
 }
 
+/*
+|--------------------------------------------------------------------------
+| Supprimer anciennes lignes
+|--------------------------------------------------------------------------
+*/
+
+$safe=$conn->real_escape_string($ref);
+
+if(!$conn->query("
+    DELETE FROM ventes
+    WHERE description LIKE '%FACTURE=$safe|%'
+")){
+    throw new Exception(
+        "Impossible de modifier la facture."
+    );
+}
+
+if(!$conn->query("
+    DELETE FROM mouvements
+    WHERE type='SORTIE'
+    AND description LIKE '%FACTURE=$safe|%'
+")){
+    throw new Exception(
+        "Impossible de modifier les mouvements."
+    );
+}
+
+/*
+|--------------------------------------------------------------------------
+| Recréer lignes
+|--------------------------------------------------------------------------
+*/
+
+foreach($lines as $line){
+
+    $pid=$line['pid'];
+    $q=$line['q'];
+    $p=$line['p'];
+
+    $r=$conn->query("
+        SELECT id,nom,stock
+        FROM produits
+        WHERE id=$pid
+    ");
+
+    if(!$r || !$r->num_rows){
+
+        throw new Exception(
+            "Article introuvable."
+        );
+    }
+
+    $prod=$r->fetch_assoc();
+
+    if((int)$prod['stock']<$q){
+
+        throw new Exception(
+            "Stock insuffisant pour ".
+            $prod['nom'].
+            " (stock : ".
+            $prod['stock'].
+            ")."
+        );
+    }
+
+    $vid=nextId($conn,'ventes');
+
+    $date=date('Y-m-d H:i:s');
+
+    $montant=$q*$p;
+
+    $desc=
+        "FACTURE=".$conn->real_escape_string($ref).
+        "|CLIENT=".$conn->real_escape_string($client).
+        "|PAYE=".$oldPaid.
+        "|RESTE=".$newRest.
+        "|VENTE";
+
+    $stmt=$conn->prepare("
+        INSERT INTO ventes
+        (id,produit_id,quantite,prix_unitaire,montant,description,date_vente)
+        VALUES (?,?,?,?,?,?,?)
+    ");
+
+    if(!$stmt){
+
+        throw new Exception(
+            "Erreur préparation modification."
+        );
+    }
+
+    $stmt->bind_param(
+        'iiiddss',
+        $vid,
+        $pid,
+        $q,
+        $p,
+        $montant,
+        $desc,
+        $date
+    );
+
+    if(!$stmt->execute()){
+
+        throw new Exception(
+            "Erreur modification vente : ".
+            $stmt->error
+        );
+    }
+
+    $mid=nextId(
+        $conn,
+        'mouvements'
+    );
+
+    $md=
+        "FACTURE=".$conn->real_escape_string($ref).
+        "|CLIENT=".$conn->real_escape_string($client).
+        "|SORTIE VENTE";
+
+    $stmt2=$conn->prepare("
+        INSERT INTO mouvements
+        (id,produit_id,type,quantite,prix,description,date_mouvement)
+        VALUES (?,?,'SORTIE',?,?,?,?)
+    ");
+
+    if(!$stmt2){
+
+        throw new Exception(
+            "Erreur préparation mouvement."
+        );
+    }
+
+    $stmt2->bind_param(
+        'iiidss',
+        $mid,
+        $pid,
+        $q,
+        $p,
+        $md,
+        $date
+    );
+
+    if(!$stmt2->execute()){
+
+        throw new Exception(
+            "Erreur mouvement : ".
+            $stmt2->error
+        );
+    }
+
+    if(!$conn->query("
+        UPDATE produits
+        SET stock=stock-$q
+        WHERE id=$pid
+    ")){
+        throw new Exception(
+            "Erreur mise à jour stock."
+        );
+    }
+}
+
+$conn->commit();
+
+}catch(Throwable $e){
+
+    $conn->rollback();
+
+    throw $e;
+}
+
+flash(
+    'ok',
+    "Facture $ref modifiée. ".
+    "Encaissement conservé : ".
+    money($oldPaid)
+);
+
+header(
+    "Location: ventes.php?facture=".
+    urlencode($ref)
+);
+
+exit;
+
+}
+
+/*
+|--------------------------------------------------------------------------
+| ENCAISSEMENT
+|--------------------------------------------------------------------------
+*/
+
+if(isset($_POST['encaisser_facture'])){
+
+    $ref=cleanText(
+        $_POST['ref'] ?? ''
+    );
+
+    $montant=(float)(
+        $_POST['montant'] ?? 0
+    );
+
+    $rows=invoiceRows(
+        $conn,
+        $ref
+    );
+
+    if(!$rows){
+
+        throw new Exception(
+            "Facture introuvable."
+        );
+    }
+
+    $meta=parseMeta(
+        $rows[0]['description']
+    );
+
+    $total=0;
+
+    foreach($rows as $r){
+
+        $total +=
+            (float)$r['quantite'] *
+            (float)$r['prix_unitaire'];
+    }
+
+    $oldPaid=(float)(
+        $meta['PAYE'] ?? 0
+    );
+
+    if($oldPaid >= $total - 0.01){
+
+        throw new Exception(
+            "Cette facture est déjà totalement payée."
+        );
+    }
+
+    if($montant<=0){
+
+        throw new Exception(
+            "Montant d'encaissement invalide."
+        );
+    }
+
+    $newPaid=$oldPaid+$montant;
+
+    if($newPaid>$total+0.01){
+
+        throw new Exception(
+            "L'encaissement dépasse le montant restant."
+        );
+    }
+
+    $rest=max(
+        0,
+        $total-$newPaid
+    );
+
+    $safe=$conn->real_escape_string($ref);
+
+    $client=cleanText(
+        $meta['CLIENT'] ??
+        'Client comptant'
+    );
+
+    $desc=
+        "FACTURE=$safe".
+        "|CLIENT=".$conn->real_escape_string($client).
+        "|PAYE=".$newPaid.
+        "|RESTE=".$rest.
+        "|VENTE";
+
+    if(!$conn->query("
+        UPDATE ventes
+        SET description='".
+        $conn->real_escape_string($desc).
+        "'
+        WHERE description LIKE '%FACTURE=$safe|%'
+    ")){
+
+        throw new Exception(
+            "Erreur lors de l'encaissement."
+        );
+    }
+
+    flash(
+        'ok',
+        "Encaissement enregistré : ".
+        money($montant)
+    );
+
+    header(
+        "Location: ventes.php?facture=".
+        urlencode($ref)
+    );
+
+    exit;
+}
+
+/*
+|--------------------------------------------------------------------------
+| SUPPRESSION
+|--------------------------------------------------------------------------
+*/
+
+if(isset($_POST['supprimer_facture'])){
+
+    $ref=cleanText(
+        $_POST['ref'] ?? ''
+    );
+
+    $rows=invoiceRows(
+        $conn,
+        $ref
+    );
+
+    if(!$rows){
+
+        throw new Exception(
+            "Facture introuvable."
+        );
+    }
+
+    $meta=parseMeta(
+        $rows[0]['description']
+    );
+
+    $paid=(float)(
+        $meta['PAYE'] ?? 0
+    );
+
+    if($paid>0){
+
+        throw new Exception(
+            "Une facture ayant un encaissement ".
+            "ne peut pas être supprimée."
+        );
+    }
+
+    $conn->begin_transaction();
+
+    try{
+
+        foreach($rows as $r){
+
+            $pid=(int)$r['produit_id'];
+            $q=(int)$r['quantite'];
+
+            if(!$conn->query("
+                UPDATE produits
+                SET stock=stock+$q
+                WHERE id=$pid
+            ")){
+                throw new Exception(
+                    "Erreur restauration stock."
+                );
+            }
+        }
+
+        $safe=$conn->real_escape_string($ref);
+
+        if(!$conn->query("
+            DELETE FROM ventes
+            WHERE description LIKE '%FACTURE=$safe|%'
+        ")){
+            throw new Exception(
+                "Erreur suppression vente."
+            );
+        }
+
+        if(!$conn->query("
+            DELETE FROM mouvements
+            WHERE type='SORTIE'
+            AND description LIKE '%FACTURE=$safe|%'
+        ")){
+            throw new Exception(
+                "Erreur suppression mouvement."
+            );
+        }
+
+        $conn->commit();
+
+    }catch(Throwable $e){
+
+        $conn->rollback();
+
+        throw $e;
+    }
+
+    flash(
+        'ok',
+        "Facture $ref supprimée."
+    );
+
+    header("Location: ventes.php");
+
+    exit;
+}
+
+}catch(Throwable $e){
+
+    flash(
+        'err',
+        $e->getMessage()
+    );
+
+    header(
+        "Location: ventes.php"
+    );
+
+    exit;
+}
+
+}
+
+/*
+|--------------------------------------------------------------------------
+| DONNEES
+|--------------------------------------------------------------------------
+*/
+
+$flash=$_SESSION['flash']??null;
+unset($_SESSION['flash']);
+
+$editRef=cleanText(
+    $_GET['modifier'] ?? ''
+);
+
+$selectedRef=cleanText(
+    $_GET['facture'] ?? ''
+);
+
+$editRows=$editRef
+    ? invoiceRows($conn,$editRef)
+    : [];
+
+$detailRows=$selectedRef
+    ? invoiceRows($conn,$selectedRef)
+    : [];
+
+/*
+|--------------------------------------------------------------------------
+| PRODUITS
+|--------------------------------------------------------------------------
+*/
+
+$products=[];
+
+$q=$conn->query("
+    SELECT id,nom,categorie,prix_achat,prix_vente,stock
+    FROM produits
+    ORDER BY nom ASC
+");
+
+while($q && ($r=$q->fetch_assoc())){
+    $products[]=$r;
+}
+
+/*
+|--------------------------------------------------------------------------
+| FACTURES
+|--------------------------------------------------------------------------
+*/
+
+$factures=[];
+
+$q=$conn->query("
+    SELECT v.*,p.nom
+    FROM ventes v
+    LEFT JOIN produits p ON p.id=v.produit_id
+    ORDER BY v.id DESC
+");
+
+while($q && ($r=$q->fetch_assoc())){
+
+    $meta=parseMeta(
+        $r['description']
+    );
+
+    $ref=$meta['FACTURE']
+        ?? ('ANCIEN-'.$r['id']);
+
+    if(!isset($factures[$ref])){
+
+        $factures[$ref]=[
+            'ref'=>$ref,
+            'client'=>$meta['CLIENT']
+                ?? 'Client comptant',
+            'date'=>$r['date_vente']??'',
+            'total'=>0,
+            'paye'=>(float)(
+                $meta['PAYE']??0
+            ),
+            'articles'=>0
+        ];
+    }
+
+    $factures[$ref]['total'] +=
+        (float)$r['quantite'] *
+        (float)$r['prix_unitaire'];
+
+    $factures[$ref]['articles']++;
+}
+
 ?>
-
-
 <!DOCTYPE html>
-
 <html lang="fr">
 
 <head>
@@ -1635,464 +1493,284 @@ window.onload=function(){
 <meta charset="UTF-8">
 
 <meta
-    name="viewport"
-    content="width=device-width,initial-scale=1"
->
+name="viewport"
+content="width=device-width,initial-scale=1">
 
-<title>
-Ventes - LAMBEMAH GESTION
-</title>
-
+<title>Ventes — LAMBEMAH</title>
 
 <style>
 
-*{
-    box-sizing:border-box;
-}
+*{box-sizing:border-box}
 
 body{
     margin:0;
-    font-family:
-        Arial,
-        Helvetica,
-        sans-serif;
-
-    background:#f4f8fc;
-
-    color:#172033;
+    background:#f4f8fd;
+    color:#14283d;
+    font-family:Arial,Helvetica,sans-serif;
 }
 
-
-/* HEADER */
-
-.header{
-
-    background:
-        linear-gradient(
-            135deg,
-            #1677ff,
-            #0d4ea6
-        );
-
-    color:white;
-
-    padding:18px 25px;
-
+.layout{
     display:flex;
-
-    align-items:center;
-
-    justify-content:space-between;
-
-    gap:15px;
-
-    box-shadow:
-        0 4px 15px
-        rgba(0,0,0,.10);
+    min-height:100vh;
 }
 
-.header h1{
-    margin:0;
-    font-size:22px;
+.side{
+    width:260px;
+    background:linear-gradient(180deg,#103454,#0b2840);
+    color:white;
+    padding:25px 18px;
+    position:fixed;
+    left:0;
+    top:0;
+    bottom:0;
 }
 
-.header p{
-    margin:5px 0 0;
-    opacity:.85;
+.brand{
+    font-size:28px;
+    font-weight:bold;
 }
 
-
-/* CONTAINER */
-
-.container{
-
-    max-width:1200px;
-
-    margin:25px auto;
-
-    padding:
-        0 18px;
+.sub{
+    color:#cbdced;
+    margin-top:5px;
 }
 
+.nav{
+    margin-top:30px;
+}
 
-/* ALERT */
-
-.alert{
-
-    padding:14px 18px;
-
+.nav a{
+    display:block;
+    color:white;
+    text-decoration:none;
+    padding:12px 14px;
+    margin:5px 0;
     border-radius:10px;
-
-    margin-bottom:20px;
-
-    font-weight:600;
 }
 
-.alert-error{
-
-    background:#ffecec;
-
-    color:#a30000;
-
-    border:
-        1px solid
-        #ffb8b8;
+.nav a:hover,
+.nav a.active{
+    background:#2563eb;
 }
 
+.main{
+    margin-left:260px;
+    width:calc(100% - 260px);
+    padding:25px;
+}
 
-/* CARD */
+.head{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:15px;
+}
+
+.head h1{
+    margin:0;
+}
+
+.btn{
+    display:inline-block;
+    border:0;
+    padding:10px 14px;
+    border-radius:9px;
+    background:#2563eb;
+    color:white;
+    text-decoration:none;
+    font-weight:bold;
+    cursor:pointer;
+}
+
+.btn.green{background:#059669}
+.btn.danger{background:#dc2626}
+.btn.secondary{
+    background:#e7eef8;
+    color:#102f4b;
+}
 
 .card{
-
     background:white;
-
-    border-radius:14px;
-
-    padding:22px;
-
-    margin-bottom:22px;
-
-    box-shadow:
-        0 4px 18px
-        rgba(15,50,90,.07);
-
-    border:
-        1px solid
-        #e4edf7;
+    border:1px solid #e0e8f2;
+    border-radius:15px;
+    padding:20px;
+    margin-top:18px;
+    box-shadow:0 4px 18px #1234510d;
 }
 
-.card h2{
-
-    margin:
-        0 0 18px;
-
-    color:#0d4ea6;
-
-    font-size:19px;
-}
-
-
-/* GRID */
-
-.grid{
-
+.stats{
     display:grid;
-
-    grid-template-columns:
-        repeat(2,1fr);
-
-    gap:15px;
+    grid-template-columns:repeat(3,1fr);
+    gap:12px;
+    margin-top:18px;
 }
 
-.field{
+.stat{
+    background:white;
+    border:1px solid #e0e8f2;
+    border-radius:14px;
+    padding:16px;
+}
 
-    display:flex;
+.stat b{
+    display:block;
+    font-size:22px;
+    margin-top:6px;
+    color:#102f4b;
+}
 
-    flex-direction:column;
-
-    gap:7px;
+.formgrid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:10px;
 }
 
 .field label{
-    font-weight:600;
+    display:block;
+    font-size:13px;
+    font-weight:bold;
+    margin-bottom:5px;
 }
 
-
-/* INPUT */
-
-input,
-select{
-
+.field input,
+.field select{
     width:100%;
-
-    padding:
-        11px 12px;
-
-    border:
-        1px solid
-        #ccd8e6;
-
-    border-radius:9px;
-
-    background:white;
-
-    font-size:14px;
-
-    outline:none;
+    padding:10px;
+    border:1px solid #cbd8e7;
+    border-radius:8px;
 }
 
-input:focus,
-select:focus{
-
-    border-color:#1677ff;
-
-    box-shadow:
-        0 0 0 3px
-        rgba(22,119,255,.10);
+.line{
+    display:grid;
+    grid-template-columns:2fr 1fr 1fr 1fr auto;
+    gap:8px;
+    margin-bottom:8px;
+    align-items:end;
 }
 
+.totalbox{
+    text-align:right;
+    font-size:20px;
+    font-weight:bold;
+    margin-top:10px;
+}
 
-/* ARTICLE TABLE */
+.tablewrap{
+    overflow:auto;
+}
 
-.article-table{
-
+table{
     width:100%;
-
     border-collapse:collapse;
-
-    margin-top:20px;
+    min-width:850px;
 }
 
-.article-table th{
-
-    background:#eaf4ff;
-
-    color:#0d4ea6;
-
+th,td{
+    padding:11px;
+    border-bottom:1px solid #e4ebf3;
     text-align:left;
 }
 
-.article-table th,
-.article-table td{
-
-    padding:9px;
-
-    border:
-        1px solid
-        #e1e8f0;
+th{
+    background:#f2f6fb;
+    font-size:12px;
 }
 
-
-/* BUTTONS */
-
-.btn{
-
-    display:inline-flex;
-
-    align-items:center;
-
-    justify-content:center;
-
-    gap:6px;
-
-    padding:
-        10px 15px;
-
-    border:0;
-
-    border-radius:9px;
-
-    cursor:pointer;
-
-    text-decoration:none;
-
-    font-weight:600;
-
-    font-size:14px;
+.money{
+    font-weight:bold;
 }
 
-.btn-primary{
-    background:#1677ff;
-    color:white;
+.status{
+    padding:5px 9px;
+    border-radius:20px;
+    font-size:11px;
+    font-weight:bold;
 }
 
-.btn-secondary{
-    background:#eef4fb;
-    color:#174a7c;
+.paid{
+    background:#dcfce7;
+    color:#166534;
 }
 
-.btn-success{
-    background:#16a05d;
-    color:white;
+.partial{
+    background:#fff3cd;
+    color:#92400e;
 }
 
-.btn-danger{
-    background:#dc3545;
-    color:white;
+.unpaid{
+    background:#fee2e2;
+    color:#991b1b;
 }
-
-.btn-warning{
-    background:#f0a000;
-    color:white;
-}
-
 
 .actions{
-
     display:flex;
-
-    gap:8px;
-
+    gap:6px;
     flex-wrap:wrap;
-
-    margin-top:20px;
 }
 
-
-/* TOTAL */
-
-.total-box{
-
-    margin-top:20px;
-
-    padding:18px;
-
-    background:#f4f9ff;
-
-    border:
-        1px solid
-        #dcecff;
-
-    border-radius:10px;
-
-    text-align:right;
+.flash{
+    padding:12px;
+    border-radius:9px;
+    margin-top:15px;
 }
 
-.grand-total{
-
-    font-size:24px;
-
-    font-weight:bold;
-
-    color:#0d4ea6;
+.ok{
+    background:#dcfce7;
+    color:#166534;
 }
 
-
-/* FACTURES */
-
-.invoice-table{
-
-    width:100%;
-
-    border-collapse:collapse;
+.err{
+    background:#fee2e2;
+    color:#991b1b;
 }
 
-.invoice-table th{
-
-    background:#1677ff;
-
-    color:white;
-
-    text-align:left;
+.mobile{
+    display:none;
 }
 
-.invoice-table th,
-.invoice-table td{
+@media(max-width:850px){
 
-    padding:12px 10px;
-
-    border-bottom:
-        1px solid
-        #e5eaf0;
-}
-
-.invoice-table tr:hover{
-    background:#f7fbff;
-}
-
-
-/* BADGES */
-
-.badge{
-
-    display:inline-block;
-
-    padding:
-        6px 10px;
-
-    border-radius:20px;
-
-    font-size:12px;
-
-    font-weight:bold;
-}
-
-.badge-paid{
-    background:#dff7e9;
-    color:#117333;
-}
-
-.badge-partial{
-    background:#fff2cf;
-    color:#8a5a00;
-}
-
-.badge-unpaid{
-    background:#ffe0e0;
-    color:#a30000;
-}
-
-
-/* MOBILE */
-
-@media(max-width:800px){
-
-    .header{
-
-        padding:15px;
-
-        flex-direction:column;
-
-        align-items:flex-start;
+    .side{
+        display:none;
     }
 
-
-    .container{
-        padding:0 10px;
+    .main{
+        margin:0;
+        width:100%;
+        padding:14px;
     }
 
-
-    .card{
-        padding:15px;
+    .mobile{
+        display:block;
+        margin-bottom:12px;
     }
 
+    .head{
+        display:block;
+    }
 
-    .grid{
+    .head .btn{
+        margin-top:10px;
+    }
+
+    .stats{
         grid-template-columns:1fr;
     }
 
-
-    .article-table{
-
-        display:block;
-
-        overflow-x:auto;
-
-        white-space:nowrap;
+    .formgrid{
+        grid-template-columns:1fr;
     }
 
-
-    .invoice-table{
-
-        display:block;
-
-        overflow-x:auto;
-
-        white-space:nowrap;
+    .line{
+        grid-template-columns:1fr 1fr;
     }
 
-
-    .actions{
-
-        flex-direction:column;
+    .line .wide{
+        grid-column:1/-1;
     }
 
-
-    .actions .btn{
-        width:100%;
-    }
-
-}
-
-
-@media(max-width:480px){
-
-    .header h1{
-        font-size:18px;
-    }
-
-    .card h2{
-        font-size:17px;
+    .card{
+        padding:14px;
     }
 
 }
@@ -2101,706 +1779,530 @@ select:focus{
 
 </head>
 
-
 <body>
 
+<div class="layout">
 
-<header class="header">
+<aside class="side">
+
+<div class="brand">
+LAMBEMAH
+</div>
+
+<div class="sub">
+GESTION • PRESTATION
+</div>
+
+<nav class="nav">
+
+<a href="index.php">Accueil</a>
+
+<a href="produits.php">
+Achats / Fournisseurs
+</a>
+
+<a class="active" href="ventes.php">
+Ventes / Clients
+</a>
+
+<a href="prestations.php">
+Prestations
+</a>
+
+<a href="recettes.php">
+Recettes
+</a>
+
+<a href="depenses.php">
+Dépenses
+</a>
+
+<a href="statistiques.php">
+Statistiques
+</a>
+
+<a href="utilisateurs.php">
+Équipe
+</a>
+
+<a href="index.php?logout=1">
+Déconnexion
+</a>
+
+</nav>
+
+</aside>
+
+<main class="main">
+
+<div class="mobile">
+
+<a class="btn secondary"
+href="index.php">
+
+☰ Menu
+
+</a>
+
+</div>
+
+<div class="head">
 
 <div>
 
-<h1>
-💰 LAMBEMAH GESTION — Ventes
-</h1>
+<h1>🛒 Ventes & Clients</h1>
 
 <p>
-Gestion des factures et paiements
+Factures, encaissements et stock.
 </p>
 
 </div>
 
-
 <a
-    href="index.php"
-    class="btn btn-secondary"
->
-🏠 Accueil
+class="btn"
+href="?nouvelle_vente=1">
+
+＋ Nouvelle facture
+
 </a>
 
-</header>
+</div>
 
+<?php if($flash): ?>
 
-<div class="container">
+<div class="flash <?=$flash['type']?>">
 
-
-<?php if ($error): ?>
-
-<div class="alert alert-error">
-
-❌ <?= h($error) ?>
+<?=h($flash['msg'])?>
 
 </div>
 
 <?php endif; ?>
 
+<div class="stats">
 
-<!-- =====================================================
-     NOUVELLE FACTURE
-     ===================================================== -->
+<div class="stat">
+
+Factures de vente
+
+<b><?=count($factures)?></b>
+
+</div>
+
+<div class="stat">
+
+Articles vendus
+
+<b>
+<?=array_sum(
+    array_column(
+        $factures,
+        'articles'
+    )
+)?>
+</b>
+
+</div>
+
+<div class="stat">
+
+Total facturé
+
+<b>
+<?=money(
+    array_sum(
+        array_column(
+            $factures,
+            'total'
+        )
+    )
+)?>
+</b>
+
+</div>
+
+</div>
+
+<?php if(isset($_GET['nouvelle_vente']) || $editRows): ?>
 
 <div class="card">
 
 <h2>
 
-<?= $editRows
-    ? '✏️ Modifier la facture ' . h($editFacture)
-    : '➕ Nouvelle facture'
-?>
+<?=$editRows
+    ? '✏️ Modifier la facture '.h($editRef)
+    : '＋ Nouvelle facture de vente'?>
 
 </h2>
 
+<?php if($editRows):
 
-<form method="POST">
+$editMeta=parseMeta(
+    $editRows[0]['description']
+);
 
-<input
-    type="hidden"
-    name="action"
-    value="save_invoice"
->
+$editPaid=(float)(
+    $editMeta['PAYE']??0
+);
 
+?>
 
-<div class="grid">
+<div class="flash ok">
 
+Encaissement déjà enregistré :
+<strong><?=money($editPaid)?></strong>.
 
-<div class="field">
-
-<label>
-Référence facture
-</label>
-
-<input
-    type="text"
-    name="facture"
-    value="<?= h(
-        $editFacture ?: nextInvoiceNumber($conn)
-    ) ?>"
-    <?= $editRows ? 'readonly' : '' ?>
-    required
->
+Il sera conservé.
 
 </div>
-
-
-<div class="field">
-
-<label>
-Client
-</label>
-
-<input
-    type="text"
-    name="client"
-    value="<?= h(
-        $editMeta['CLIENT'] ?? ''
-    ) ?>"
-    placeholder="Nom du client"
->
-
-</div>
-
-
-<div class="field">
-
-<label>
-Date
-</label>
-
-<input
-    type="date"
-    name="date_vente"
-    value="<?= h(
-        $editRows[0]['date_vente']
-        ?? date('Y-m-d')
-    ) ?>"
-    required
->
-
-</div>
-
-
-</div>
-
-
-<table class="article-table">
-
-<thead>
-
-<tr>
-
-<th>
-Article
-</th>
-
-<th>
-Quantité
-</th>
-
-<th>
-Prix unitaire
-</th>
-
-<th>
-Montant
-</th>
-
-<th>
-Action
-</th>
-
-</tr>
-
-</thead>
-
-
-<tbody id="articlesBody">
-
-
-<?php if ($editRows): ?>
-
-
-<?php foreach ($editRows as $row): ?>
-
-<tr>
-
-<td>
-
-<select
-    name="produit_id[]"
-    class="produit"
-    onchange="changerPrix(this)"
-    required
->
-
-<option value="">
-Choisir...
-</option>
-
-
-<?php foreach ($produits as $produit): ?>
-
-<option
-    value="<?= (int)$produit['id'] ?>"
-    data-prix="<?= h(
-        $produit['prix_vente']
-    ) ?>"
-    <?= (
-        (int)$produit['id']
-        ===
-        (int)$row['produit_id']
-    )
-    ? 'selected'
-    : '' ?>
->
-
-<?= h($produit['nom']) ?>
-
-— stock:
-<?= (int)$produit['stock'] ?>
-
-</option>
-
-<?php endforeach; ?>
-
-</select>
-
-</td>
-
-
-<td>
-
-<input
-    type="number"
-    name="quantite[]"
-    class="quantite"
-    min="1"
-    value="<?= (int)$row['quantite'] ?>"
-    oninput="calculer()"
-    required
->
-
-</td>
-
-
-<td>
-
-<input
-    type="number"
-    name="prix_unitaire[]"
-    class="prix"
-    min="0"
-    step="1"
-    value="<?= h(
-        $row['prix_unitaire']
-    ) ?>"
-    oninput="calculer()"
-    required
->
-
-</td>
-
-
-<td class="montant">
-<?= money($row['montant']) ?>
-</td>
-
-
-<td>
-
-<button
-    type="button"
-    class="btn btn-danger"
-    onclick="supprimerLigne(this)"
->
-🗑️
-</button>
-
-</td>
-
-</tr>
-
-<?php endforeach; ?>
-
-
-<?php else: ?>
-
-
-<tr>
-
-<td>
-
-<select
-    name="produit_id[]"
-    class="produit"
-    onchange="changerPrix(this)"
-    required
->
-
-<option value="">
-Choisir un article...
-</option>
-
-
-<?php foreach ($produits as $produit): ?>
-
-<option
-    value="<?= (int)$produit['id'] ?>"
-    data-prix="<?= h(
-        $produit['prix_vente']
-    ) ?>"
->
-
-<?= h($produit['nom']) ?>
-
-— stock:
-<?= (int)$produit['stock'] ?>
-
-</option>
-
-<?php endforeach; ?>
-
-</select>
-
-</td>
-
-
-<td>
-
-<input
-    type="number"
-    name="quantite[]"
-    class="quantite"
-    min="1"
-    value="1"
-    oninput="calculer()"
-    required
->
-
-</td>
-
-
-<td>
-
-<input
-    type="number"
-    name="prix_unitaire[]"
-    class="prix"
-    min="0"
-    step="1"
-    value="0"
-    oninput="calculer()"
-    required
->
-
-</td>
-
-
-<td class="montant">
-0 FG
-</td>
-
-
-<td>
-
-<button
-    type="button"
-    class="btn btn-danger"
-    onclick="supprimerLigne(this)"
->
-🗑️
-</button>
-
-</td>
-
-</tr>
-
 
 <?php endif; ?>
 
+<form method="post">
 
-</tbody>
+<input
+type="hidden"
+name="save_vente"
+value="1">
 
-</table>
+<input
+type="hidden"
+name="edit_ref"
+value="<?=h($editRef)?>">
 
+<div class="formgrid">
 
-<div class="actions">
+<div class="field">
 
-<button
-    type="button"
-    class="btn btn-secondary"
-    onclick="ajouterLigne()"
->
-➕ Ajouter un article
-</button>
+<label>Client</label>
 
+<input
+name="client"
+value="<?=h(
+    $editRows
+    ? ($editMeta['CLIENT']??'Client comptant')
+    : ''
+)?>"
+placeholder="Nom du client">
 
-<button
-    type="submit"
-    class="btn btn-primary"
->
-<?= $editRows
-    ? '💾 Enregistrer les modifications'
-    : '✅ Enregistrer la facture'
+</div>
+
+<div class="field">
+
+<label>Référence</label>
+
+<input
+readonly
+value="<?=h(
+    $editRef
+    ?: 'Automatique'
+)?>">
+
+</div>
+
+</div>
+
+<h3>Articles de la facture</h3>
+
+<div id="lines">
+
+<?php
+
+$base=$editRows ?: [
+    [
+        'produit_id'=>'',
+        'quantite'=>1,
+        'prix_unitaire'=>''
+    ]
+];
+
+foreach($base as $r):
+
 ?>
+
+<div class="line">
+
+<div class="field wide">
+
+<label>Article</label>
+
+<select
+name="produit_id[]"
+required>
+
+<option value="">
+Choisir
+</option>
+
+<?php foreach($products as $p): ?>
+
+<option
+value="<?=$p['id']?>"
+<?=(
+    (int)$p['id'] ===
+    (int)($r['produit_id']??0)
+)?'selected':''?>>
+
+<?=h($p['nom'])?>
+— stock <?=h($p['stock'])?>
+
+</option>
+
+<?php endforeach; ?>
+
+</select>
+
+</div>
+
+<div class="field">
+
+<label>Quantité</label>
+
+<input
+type="number"
+min="1"
+name="quantite[]"
+value="<?=h(
+    $r['quantite']??1
+)?>"
+required>
+
+</div>
+
+<div class="field">
+
+<label>Prix unitaire</label>
+
+<input
+type="number"
+min="1"
+name="prix_unitaire[]"
+value="<?=h(
+    $r['prix_unitaire']??''
+)?>"
+required>
+
+</div>
+
+<div class="field">
+
+<label>Montant</label>
+
+<input
+readonly
+class="lineTotal"
+value="0 FG">
+
+</div>
+
+<button
+type="button"
+class="btn danger"
+onclick="
+this.parentElement.remove();
+calc();
+">
+
+×
+
 </button>
 
+</div>
 
-<?php if ($editRows): ?>
+<?php endforeach; ?>
+
+</div>
+
+<button
+type="button"
+class="btn secondary"
+onclick="addLine()">
+
+＋ Ajouter une ligne
+
+</button>
+
+<div class="totalbox">
+
+Total :
+<span id="grand">0 FG</span>
+
+</div>
+
+<br>
+
+<button class="btn green">
+
+💾 Enregistrer la facture
+
+</button>
 
 <a
-    href="ventes.php"
-    class="btn btn-secondary"
->
-❌ Annuler
+class="btn secondary"
+href="ventes.php">
+
+Annuler
+
 </a>
-
-<?php endif; ?>
-
-</div>
-
-
-<div class="total-box">
-
-<div>
-Total de la facture
-</div>
-
-<div
-    class="grand-total"
-    id="grandTotal"
->
-0 FG
-</div>
-
-</div>
-
 
 </form>
 
 </div>
 
+<?php endif; ?>
 
-<!-- =====================================================
-     LISTE FACTURES
-     ===================================================== -->
+<?php if($detailRows):
+
+$meta=parseMeta(
+    $detailRows[0]['description']
+);
+
+$total=0;
+
+foreach($detailRows as $r){
+
+    $total +=
+        (float)$r['quantite'] *
+        (float)$r['prix_unitaire'];
+}
+
+$paid=(float)(
+    $meta['PAYE']??0
+);
+
+$rest=max(
+    0,
+    $total-$paid
+);
+
+$status=$paid<=0
+    ? 'Non payée'
+    : ($rest<=0
+        ? 'Payée'
+        : 'Partiellement payée'
+    );
+
+?>
 
 <div class="card">
 
+<div class="head">
+
+<div>
+
 <h2>
-📋 Toutes les factures
+📄 Facture <?=h($selectedRef)?>
 </h2>
 
-
-<?php if (!$factures): ?>
-
 <p>
-Aucune facture enregistrée pour le moment.
+
+<strong>Client :</strong>
+
+<?=h(
+    $meta['CLIENT']
+    ?? 'Client comptant'
+)?>
+
 </p>
 
+</div>
 
-<?php else: ?>
+<div class="actions">
 
+<a
+class="btn secondary"
+target="_blank"
+href="?imprimer=<?=urlencode($selectedRef)?>">
 
-<div style="overflow-x:auto">
+🖨️ Imprimer / PDF
 
-<table class="invoice-table">
+</a>
+
+<?php if($rest>0): ?>
+
+<a
+class="btn secondary"
+href="?modifier=<?=urlencode($selectedRef)?>">
+
+✏️ Modifier
+
+</a>
+
+<?php endif; ?>
+
+<?php if($paid<=0): ?>
+
+<form
+method="post"
+onsubmit="
+return confirm('Supprimer cette facture ?')
+">
+
+<input
+type="hidden"
+name="supprimer_facture"
+value="1">
+
+<input
+type="hidden"
+name="ref"
+value="<?=h($selectedRef)?>">
+
+<button
+class="btn danger">
+
+🗑️ Supprimer
+
+</button>
+
+</form>
+
+<?php endif; ?>
+
+</div>
+
+</div>
+
+<div class="tablewrap">
+
+<table>
 
 <thead>
 
 <tr>
 
-<th>
-Facture
-</th>
-
-<th>
-Client
-</th>
-
-<th>
-Date
-</th>
-
-<th>
-Articles
-</th>
-
-<th>
-Total
-</th>
-
-<th>
-Payé
-</th>
-
-<th>
-Reste
-</th>
-
-<th>
-Statut
-</th>
-
-<th>
-Actions
-</th>
+<th>Désignation</th>
+<th>Qté</th>
+<th>Prix unitaire</th>
+<th>Montant</th>
 
 </tr>
 
 </thead>
-
 
 <tbody>
 
-
-<?php foreach ($factures as $facture): ?>
+<?php foreach($detailRows as $r): ?>
 
 <tr>
 
-
 <td>
-
-<strong>
-<?= h($facture['ref']) ?>
-</strong>
-
+<?=h($r['nom']??'Article')?>
 </td>
 
-
 <td>
-
-<?= h(
-    $facture['client']
-    ?: 'Client comptant'
-) ?>
-
+<?=h($r['quantite'])?>
 </td>
 
-
 <td>
-
-<?= h(
-    $facture['date']
-) ?>
-
+<?=money($r['prix_unitaire'])?>
 </td>
 
+<td class="money">
 
-<td>
-
-<?= (int)$facture['count'] ?>
-
-</td>
-
-
-<td>
-
-<strong>
-<?= money(
-    $facture['total']
-) ?>
-</strong>
-
-</td>
-
-
-<td>
-
-<?= money(
-    $facture['paid']
-) ?>
-
-</td>
-
-
-<td>
-
-<?= money(
-    $facture['rest']
-) ?>
-
-</td>
-
-
-<td>
-
-
-<?php if (
-    $facture['status']
-    === 'PAYEE'
-): ?>
-
-<span class="badge badge-paid">
-✅ PAYÉE
-</span>
-
-
-<?php elseif (
-    $facture['status']
-    === 'PARTIEL'
-): ?>
-
-<span class="badge badge-partial">
-🟠 PARTIEL
-</span>
-
-
-<?php else: ?>
-
-<span class="badge badge-unpaid">
-🔴 IMPAYÉE
-</span>
-
-<?php endif; ?>
-
-
-</td>
-
-
-<td>
-
-<div
-    class="actions"
-    style="margin:0"
->
-
-
-<?php if (
-    $facture['status']
-    !== 'PAYEE'
-): ?>
-
-<a
-    href="ventes.php?modifier=<?= urlencode(
-        $facture['ref']
-    ) ?>"
-    class="btn btn-primary"
->
-✏️
-</a>
-
-<?php endif; ?>
-
-
-<?php if (
-    $facture['rest'] > 0
-): ?>
-
-<button
-    type="button"
-    class="btn btn-success"
-    onclick="ouvrirPaiement(
-        '<?= h($facture['ref']) ?>',
-        <?= (float)$facture['rest'] ?>
-    )"
->
-💰
-</button>
-
-<?php endif; ?>
-
-
-<a
-    href="ventes.php?imprimer=<?= urlencode(
-        $facture['ref']
-    ) ?>"
-    target="_blank"
-    class="btn btn-secondary"
->
-🖨️
-</a>
-
-
-<?php if (
-    $facture['paid'] <= 0
-): ?>
-
-<form
-    method="POST"
-    style="display:inline"
-    onsubmit="
-        return confirm(
-            'Supprimer définitivement cette facture ?'
-        );
-    "
->
-
-<input
-    type="hidden"
-    name="action"
-    value="delete_invoice"
->
-
-<input
-    type="hidden"
-    name="facture"
-    value="<?= h(
-        $facture['ref']
-    ) ?>"
->
-
-<button
-    type="submit"
-    class="btn btn-danger"
->
-🗑️
-</button>
-
-</form>
-
-<?php endif; ?>
-
-
-</div>
+<?=money(
+    (float)$r['quantite'] *
+    (float)$r['prix_unitaire']
+)?>
 
 </td>
 
@@ -2808,10 +2310,111 @@ Actions
 
 <?php endforeach; ?>
 
-
 </tbody>
 
 </table>
+
+</div>
+
+<div class="card">
+
+<div class="formgrid">
+
+<div>
+
+<strong>Total facture</strong>
+
+<br>
+
+<?=money($total)?>
+
+</div>
+
+<div>
+
+<strong>Déjà encaissé</strong>
+
+<br>
+
+<?=money($paid)?>
+
+</div>
+
+</div>
+
+<hr>
+
+<strong>Reste client :</strong>
+
+<?=money($rest)?>
+
+<p>
+
+<span class="status <?=$rest<=0
+    ? 'paid'
+    : ($paid>0
+        ? 'partial'
+        : 'unpaid')?>">
+
+<?=h($status)?>
+
+</span>
+
+</p>
+
+<?php if($rest>0): ?>
+
+<form method="post">
+
+<input
+type="hidden"
+name="encaisser_facture"
+value="1">
+
+<input
+type="hidden"
+name="ref"
+value="<?=h($selectedRef)?>">
+
+<div class="formgrid">
+
+<div class="field">
+
+<label>
+Montant encaissé
+</label>
+
+<input
+type="number"
+min="1"
+max="<?=h($rest)?>"
+step="1"
+name="montant"
+required>
+
+</div>
+
+<div style="display:flex;align-items:end">
+
+<button
+class="btn green">
+
+💰 Encaisser
+
+</button>
+
+</div>
+
+</div>
+
+</form>
+
+<?php else: ?>
+
+<div class="flash ok">
+
+🔒 Facture totalement payée.
+Modification verrouillée.
 
 </div>
 
@@ -2819,568 +2422,266 @@ Actions
 
 </div>
 
-
 </div>
 
+<?php endif; ?>
 
-<!-- =====================================================
-     MODAL PAIEMENT
-     ===================================================== -->
+<div class="card">
 
-<div
-    id="paiementModal"
-    style="
-        display:none;
-        position:fixed;
-        inset:0;
-        background:rgba(0,0,0,.45);
-        align-items:center;
-        justify-content:center;
-        padding:15px;
-        z-index:9999;
-    "
->
-
-<div
-    style="
-        background:white;
-        width:100%;
-        max-width:420px;
-        border-radius:14px;
-        padding:25px;
-        box-shadow:0 15px 50px rgba(0,0,0,.2);
-    "
->
-
-<h2 style="color:#0d4ea6;margin-top:0">
-💰 Paiement
+<h2>
+👥 Clients & factures
 </h2>
 
+<p>
+Cliquez sur une facture pour voir ses articles
+et gérer son encaissement.
+</p>
 
-<form method="POST">
+<div class="tablewrap">
 
-<input
-    type="hidden"
-    name="action"
-    value="pay_invoice"
->
+<table>
 
+<thead>
 
-<input
-    type="hidden"
-    name="facture"
-    id="paiementFacture"
->
+<tr>
 
+<th>Client</th>
+<th>Facture</th>
+<th>Date</th>
+<th>Articles</th>
+<th>Total</th>
+<th>Encaissé</th>
+<th>Reste</th>
+<th>Statut</th>
+<th></th>
 
-<div class="field">
+</tr>
 
-<label>
-Facture
-</label>
+</thead>
 
-<input
-    type="text"
-    id="paiementFactureText"
-    readonly
->
+<tbody>
 
-</div>
+<?php foreach($factures as $f):
 
+$rest=max(
+    0,
+    $f['total']-$f['paye']
+);
 
-<div
-    class="field"
-    style="margin-top:15px"
->
+$st=$f['paye']<=0
+    ? 'Non payée'
+    : ($rest<=0
+        ? 'Payée'
+        : 'Partiellement payée'
+    );
 
-<label>
-Reste à payer
-</label>
+?>
 
-<input
-    type="text"
-    id="paiementResteText"
-    readonly
->
+<tr>
 
-</div>
+<td>
+<b><?=h($f['client'])?></b>
+</td>
 
-
-<div
-    class="field"
-    style="margin-top:15px"
->
-
-<label>
-Montant du paiement
-</label>
-
-<input
-    type="number"
-    name="montant_paiement"
-    id="montantPaiement"
-    min="1"
-    step="1"
-    required
->
-
-</div>
-
-
-<div class="actions">
-
-<button
-    type="submit"
-    class="btn btn-success"
->
-💰 Valider
-</button>
-
-
-<button
-    type="button"
-    class="btn btn-secondary"
-    onclick="fermerPaiement()"
->
-Annuler
-</button>
-
-</div>
-
-</form>
-
-</div>
-
-</div>
-
-
-<script>
-
-/* =========================================================
-   PRIX AUTOMATIQUE
-   ========================================================= */
-
-function changerPrix(select){
-
-    const row =
-        select.closest('tr');
-
-    if(!row){
-        return;
-    }
-
-
-    const option =
-        select.options[
-            select.selectedIndex
-        ];
-
-
-    const prix =
-        option.dataset.prix || 0;
-
-
-    const input =
-        row.querySelector('.prix');
-
-
-    if(input){
-
-        /*
-         * Pour une nouvelle ligne,
-         * on met automatiquement le prix.
-         */
-        if(
-            parseFloat(input.value || 0)
-            === 0
-        ){
-
-            input.value = prix;
-        }
-    }
-
-
-    calculer();
-}
-
-
-/* =========================================================
-   CALCUL
-   ========================================================= */
-
-function calculer(){
-
-    const rows =
-        document.querySelectorAll(
-            '#articlesBody tr'
-        );
-
-
-    let total = 0;
-
-
-    rows.forEach(function(row){
-
-        const qte =
-            row.querySelector(
-                '.quantite'
-            );
-
-
-        const prix =
-            row.querySelector(
-                '.prix'
-            );
-
-
-        const montant =
-            row.querySelector(
-                '.montant'
-            );
-
-
-        if(
-            !qte ||
-            !prix ||
-            !montant
-        ){
-            return;
-        }
-
-
-        const quantite =
-            parseFloat(
-                qte.value || 0
-            );
-
-
-        const prixUnitaire =
-            parseFloat(
-                prix.value || 0
-            );
-
-
-        const valeur =
-            quantite *
-            prixUnitaire;
-
-
-        total += valeur;
-
-
-        montant.textContent =
-            valeur.toLocaleString(
-                'fr-FR'
-            ) + ' FG';
-
-    });
-
-
-    const grandTotal =
-        document.getElementById(
-            'grandTotal'
-        );
-
-
-    if(grandTotal){
-
-        grandTotal.textContent =
-            total.toLocaleString(
-                'fr-FR'
-            ) + ' FG';
-    }
-}
-
-
-/* =========================================================
-   AJOUTER ARTICLE
-   ========================================================= */
-
-function ajouterLigne(){
-
-    const tbody =
-        document.getElementById(
-            'articlesBody'
-        );
-
-
-    const tr =
-        document.createElement(
-            'tr'
-        );
-
-
-    tr.innerHTML = `
+<td>
+<?=h($f['ref'])?>
+</td>
 
 <td>
 
-<select
-    name="produit_id[]"
-    class="produit"
-    onchange="changerPrix(this)"
-    required
->
+<?=h(
+    $f['date']
+    ? date(
+        'd/m/Y',
+        strtotime($f['date'])
+    )
+    : '—'
+)?>
 
-<option value="">
-Choisir un article...
-</option>
+</td>
 
-<?php foreach ($produits as $produit): ?>
+<td>
+<?=h($f['articles'])?>
+</td>
 
-<option
-    value="<?= (int)$produit['id'] ?>"
-    data-prix="<?= h(
-        $produit['prix_vente']
-    ) ?>"
->
+<td class="money">
+<?=money($f['total'])?>
+</td>
 
-<?= h(
-    $produit['nom']
-) ?>
+<td>
+<?=money($f['paye'])?>
+</td>
 
-— stock:
-<?= (int)$produit['stock'] ?>
+<td>
+<?=money($rest)?>
+</td>
 
-</option>
+<td>
+
+<span
+class="status <?=$rest<=0
+    ? 'paid'
+    : ($f['paye']>0
+        ? 'partial'
+        : 'unpaid')?>">
+
+<?=h($st)?>
+
+</span>
+
+</td>
+
+<td>
+
+<a
+class="btn"
+href="?facture=<?=urlencode($f['ref'])?>">
+
+Ouvrir
+
+</a>
+
+</td>
+
+</tr>
 
 <?php endforeach; ?>
 
-</select>
+<?php if(!$factures): ?>
+
+<tr>
+
+<td colspan="9">
+
+Aucune facture de vente.
 
 </td>
 
+</tr>
 
-<td>
+<?php endif; ?>
 
-<input
-    type="number"
-    name="quantite[]"
-    class="quantite"
-    min="1"
-    value="1"
-    oninput="calculer()"
-    required
->
+</tbody>
 
-</td>
+</table>
 
+</div>
 
-<td>
+</div>
 
-<input
-    type="number"
-    name="prix_unitaire[]"
-    class="prix"
-    min="0"
-    step="1"
-    value="0"
-    oninput="calculer()"
-    required
->
+</main>
 
-</td>
+</div>
 
+<script>
 
-<td class="montant">
-0 FG
-</td>
+function fmt(n){
 
-
-<td>
-
-<button
-    type="button"
-    class="btn btn-danger"
-    onclick="supprimerLigne(this)"
->
-🗑️
-</button>
-
-</td>
-
-`;
-
-
-    tbody.appendChild(tr);
-
-
-    calculer();
+    return new Intl.NumberFormat('fr-FR')
+        .format(Math.round(n))
+        +' FG';
 }
 
+function calc(){
 
-/* =========================================================
-   SUPPRIMER ARTICLE
-   ========================================================= */
+    let total=0;
 
-function supprimerLigne(button){
+    document
+    .querySelectorAll('#lines .line')
+    .forEach(line=>{
 
-    const tbody =
-        document.getElementById(
-            'articlesBody'
+        const q=parseFloat(
+            line.querySelector(
+                '[name="quantite[]"]'
+            )?.value || 0
         );
 
-
-    const rows =
-        tbody.querySelectorAll(
-            'tr'
+        const p=parseFloat(
+            line.querySelector(
+                '[name="prix_unitaire[]"]'
+            )?.value || 0
         );
 
+        const montant=q*p;
 
-    if(rows.length <= 1){
+        total+=montant;
 
-        const row =
-            button.closest('tr');
+        const field=
+            line.querySelector('.lineTotal');
 
-
-        const select =
-            row.querySelector(
-                'select'
-            );
-
-
-        const qte =
-            row.querySelector(
-                '.quantite'
-            );
-
-
-        const prix =
-            row.querySelector(
-                '.prix'
-            );
-
-
-        if(select){
-            select.selectedIndex = 0;
+        if(field){
+            field.value=fmt(montant);
         }
 
+    });
 
-        if(qte){
-            qte.value = 1;
-        }
+    const grand=
+        document.getElementById('grand');
 
-
-        if(prix){
-            prix.value = 0;
-        }
-
-
-        calculer();
-
-        return;
+    if(grand){
+        grand.textContent=fmt(total);
     }
-
-
-    const row =
-        button.closest('tr');
-
-
-    if(row){
-        row.remove();
-    }
-
-
-    calculer();
 }
 
+function addLine(){
 
-/* =========================================================
-   PAIEMENT
-   ========================================================= */
+    const box=
+        document.getElementById('lines');
 
-function ouvrirPaiement(
-    facture,
-    reste
-){
+    const source=
+        box.querySelector('.line');
 
-    const modal =
-        document.getElementById(
-            'paiementModal'
-        );
+    if(!source)return;
 
+    const clone=
+        source.cloneNode(true);
 
-    document.getElementById(
-        'paiementFacture'
-    ).value = facture;
-
-
-    document.getElementById(
-        'paiementFactureText'
-    ).value = facture;
-
-
-    document.getElementById(
-        'paiementResteText'
-    ).value =
-        Number(reste).toLocaleString(
-            'fr-FR'
-        ) + ' FG';
-
-
-    const montant =
-        document.getElementById(
-            'montantPaiement'
-        );
-
-
-    montant.value = reste;
-
-    montant.max = reste;
-
-
-    modal.style.display =
-        'flex';
-}
-
-
-function fermerPaiement(){
-
-    const modal =
-        document.getElementById(
-            'paiementModal'
-        );
-
-
-    modal.style.display =
-        'none';
-}
-
-
-document.addEventListener(
-    'click',
-    function(event){
-
-        const modal =
-            document.getElementById(
-                'paiementModal'
-            );
-
+    clone.querySelectorAll('input')
+    .forEach(input=>{
 
         if(
-            modal &&
-            event.target === modal
+            input.name==='quantite[]'
         ){
 
-            fermerPaiement();
+            input.value=1;
+
+        }else if(
+            input.name==='prix_unitaire[]'
+        ){
+
+            input.value='';
+
+        }else if(
+            input.classList.contains(
+                'lineTotal'
+            )
+        ){
+
+            input.value='0 FG';
         }
 
+    });
+
+    const select=
+        clone.querySelector('select');
+
+    if(select){
+        select.selectedIndex=0;
     }
-);
 
+    box.appendChild(clone);
 
-/* CALCUL INITIAL */
+    calc();
+}
 
 document.addEventListener(
-    'DOMContentLoaded',
-    function(){
-
-        calculer();
-
-    }
+    'input',
+    calc
 );
 
-</script>
+calc();
 
+</script>
 
 </body>
 
