@@ -1,3 +1,8 @@
+
+<style>
+.login-logo img{object-fit:contain!important;visibility:visible!important;opacity:1!important;}
+</style>
+
 <?php
 session_start();
 require_once __DIR__ . '/config.php';
@@ -351,7 +356,7 @@ input {
 
     outline: none;
 
-    font-size: 15px;
+    font-size: 10px;
 }
 
 
@@ -375,7 +380,7 @@ button {
 
     color: white;
 
-    font-size: 15px;
+    font-size: 10px;
 
     font-weight: bold;
 
@@ -397,6 +402,12 @@ button:hover {
 
 
 <div class="login-box">
+<div class="login-logo" style="text-align:center;margin:0 auto 12px;">
+    <img src="assets/logo.png" alt="LAMBEMAH GESTION"
+         style="width:170px;max-width:70%;height:auto;display:block;margin:0 auto;"
+         onerror="this.style.display='none';">
+</div>
+
 
 
     <div class="logo">
@@ -887,7 +898,7 @@ a {
 
     display: block;
 
-    font-size: 15px;
+    font-size: 10px;
 
     line-height: 1.2;
 }
@@ -921,7 +932,7 @@ a {
 
     color: #dbe7f8;
 
-    font-size: 12px;
+    font-size: 11px;
 
     transition: .2s;
 }
@@ -978,7 +989,7 @@ a {
 
     margin: 0;
 
-    font-size: 21px;
+    font-size: 10px;
 }
 
 
@@ -991,7 +1002,7 @@ a {
 
     color: #68758a;
 
-    font-size: 12px;
+    font-size: 11px;
 }
 
 
@@ -1060,7 +1071,7 @@ a {
 
     margin-top: 8px;
 
-    font-size: 15px;
+    font-size: 11px;
 }
 
 
@@ -1165,7 +1176,7 @@ a {
         0
         12px;
 
-    font-size: 15px;
+    font-size: 11px;
 }
 
 
@@ -1239,7 +1250,7 @@ a {
 
     margin: 0;
 
-    font-size: 15px;
+    font-size: 11px;
 }
 
 
@@ -1253,7 +1264,7 @@ a {
 
     border-radius: 8px;
 
-    font-size: 10px;
+    font-size: 11px;
 
     background: #eef2f7;
 
@@ -1334,7 +1345,7 @@ td {
 
     color: #758196;
 
-    font-size: 10px;
+    font-size: 11px;
 
     line-height: 1.5;
 }
@@ -1404,7 +1415,7 @@ td {
 
         content: "LTK";
 
-        font-size: 18px;
+        font-size: 10px;
     }
 
 
@@ -1422,7 +1433,7 @@ td {
             12px
             5px;
 
-        font-size: 15px;
+        font-size: 10px;
     }
 
 
@@ -1452,7 +1463,7 @@ td {
 
     .header h1 {
 
-        font-size: 15px;
+        font-size: 10px;
     }
 
 
@@ -1485,13 +1496,13 @@ td {
 
     .card strong {
 
-        font-size: 14px;
+        font-size: 10px;
     }
 
 
     .card small {
 
-        font-size: 10px;
+        font-size: 11px;
     }
 
 
@@ -1514,7 +1525,7 @@ td {
 
         padding: 11px 5px;
 
-        font-size: 10px;
+        font-size: 11px;
     }
 
 
@@ -1526,7 +1537,7 @@ td {
 
     table {
 
-        font-size: 10px;
+        font-size: 11px;
     }
 
 }
