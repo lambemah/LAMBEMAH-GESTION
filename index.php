@@ -1,5 +1,82 @@
 
 <style>
+/* PAGE DE CONNEXION — style mobile inspiré de la référence */
+body{
+    position:relative;
+    overflow-x:hidden;
+    background:
+      radial-gradient(circle at 18% 20%, rgba(255,255,255,.95) 0 10%, transparent 30%),
+      radial-gradient(circle at 85% 78%, rgba(74,157,219,.28), transparent 32%),
+      linear-gradient(135deg,#dcecf7 0%,#b9d8e8 48%,#e8f2f7 100%) !important;
+}
+body:before{
+    content:"";
+    position:fixed;
+    inset:0;
+    z-index:-1;
+    background:
+      linear-gradient(120deg,transparent 0 48%,rgba(255,255,255,.25) 48% 49%,transparent 49%),
+      radial-gradient(ellipse at 80% 20%,rgba(7,26,53,.10),transparent 25%);
+}
+.login-box{
+    font-size:11px!important;
+}
+.login-logo{
+    margin-bottom:8px!important;
+}
+.login-logo img{
+    width:175px!important;
+    max-width:68%!important;
+}
+.logo{
+    margin-bottom:20px!important;
+}
+.logo h1{
+    font-size:23px!important;
+    letter-spacing:.2px;
+}
+.logo p{
+    font-size:10px!important;
+}
+.login-box label{
+    font-size:10px!important;
+    font-weight:700;
+}
+.login-box input{
+    width:100%;
+    font-size:11px!important;
+    padding:11px 12px!important;
+    border:1px solid #cbd9e6!important;
+    border-radius:10px!important;
+    background:#fff!important;
+}
+.login-box button{
+    width:100%;
+    font-size:11px!important;
+    font-weight:700;
+    padding:12px!important;
+    border-radius:10px!important;
+    background:#1479e8!important;
+    border:0!important;
+    color:#fff!important;
+    cursor:pointer;
+}
+.login-box button:hover{
+    background:#0d68cf!important;
+}
+@media(max-width:600px){
+    .login-box{
+        width:92%;
+        padding:22px 20px 24px;
+        border-radius:18px;
+    }
+    .login-logo img{width:155px!important;}
+    .logo h1{font-size:20px!important;}
+}
+</style>
+
+
+<style>
 .login-logo img{object-fit:contain!important;visibility:visible!important;opacity:1!important;}
 </style>
 
@@ -265,24 +342,14 @@ body {
 
 
 .login-box {
-
-    width: 390px;
-
+    width: 430px;
     max-width: 92%;
-
-    background: #ffffff;
-
-    border-radius: 18px;
-
-    padding: 32px;
-
-    border: 1px solid #dfe7f0;
-
-    box-shadow:
-        0 15px 40px
-        rgba(7, 26, 53, 0.12);
+    padding: 26px 30px 30px;
+    background: rgba(255,255,255,.94);
+    border-radius: 22px;
+    border: 1px solid rgba(255,255,255,.75);
+    box-shadow: 0 18px 55px rgba(7,26,53,.20);
 }
-
 
 .logo {
 
@@ -402,15 +469,13 @@ button:hover {
 
 
 <div class="login-box">
-<div class="login-logo" style="text-align:center;margin:0 auto 12px;">
+<div class="login-logo" style="text-align:center;margin:0 auto 8px;">
     <img src="assets/logo.png" alt="LAMBEMAH GESTION"
-         style="width:170px;max-width:70%;height:auto;display:block;margin:0 auto;"
+         style="width:175px;max-width:68%;height:auto;display:block;margin:0 auto;"
          onerror="this.style.display='none';">
 </div>
 
-
-
-    <div class="logo">
+<div class="logo">
 
         <h1>
             LAMBEMAH GESTION
