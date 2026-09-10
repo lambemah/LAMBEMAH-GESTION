@@ -1,49 +1,56 @@
-```php
 <?php
 session_start();
 require_once "config.php";
+
+/* =========================================================
+   AUTHENTIFICATION
+========================================================= */
 
 if (!isset($_SESSION["id"])) {
     header("Location: index.php");
     exit;
 }
 
-/*
-|--------------------------------------------------------------------------
-| DROITS
-|--------------------------------------------------------------------------
-| admin       = accès complet
-| gestion     = produits, ventes, recettes, dépenses, statistiques
-| vendeur     = produits et ventes
-| comptable   = recettes, dépenses et statistiques
-| lecture     = consultation uniquement
-|--------------------------------------------------------------------------
-*/
-
 $role = $_SESSION["role"] ?? "lecture";
 
+/* Seul l'administrateur gère les utilisateurs */
 if ($role !== "admin") {
-    die("⛔ Accès refusé. Seul l'administrateur peut gérer les utilisateurs.");
+    http_response_code(403);
+    die("
+        <div style='font-family:Arial;text-align:center;padding:60px'>
+            <h2>⛔ Accès refusé</h2>
+            <p>Seul l'administrateur peut gérer les utilisateurs.</p>
+            <a href='index.php'>← Retour à l'accueil</a>
+        </div>
+    ");
 }
 
 $message = "";
 $type_message = "";
 
-/*
-|--------------------------------------------------------------------------
-| AJOUTER UN UTILISATEUR
-|--------------------------------------------------------------------------
-*/
+/* =========================================================
+   RÔLES AUTORISÉS
+========================================================= */
 
-if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["action"])) {
+$roles_autorises = [
+    "admin",
+    "gestion",
+    "vendeur",
+    "comptable",
+    "lecture"
+];
 
-    $action = $_POST["action"];
+/* =========================================================
+   TRAITEMENT DES FORMULAIRES
+========================================================= */
 
-    /*
-    |--------------------------------------------------------------------------
-    | AJOUT
-    |--------------------------------------------------------------------------
-    */
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+
+    $action = $_POST["action"] ?? "";
+
+    /* =====================================================
+       AJOUTER
+    ===================================================== */
 
     if ($action === "ajouter") {
 
@@ -52,85 +59,118 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["action"])) {
         $mot_de_passe = trim($_POST["mot_de_passe"] ?? "");
         $role_nouveau = trim($_POST["role"] ?? "lecture");
 
-        $roles_autorises = [
-            "admin",
-            "gestion",
-            "vendeur",
-            "comptable",
-            "lecture"
-        ];
+        if ($nom === "" || $username === "" || $mot_de_passe === "") {
 
-        if (
-            $nom === "" ||
-            $username === "" ||
-            $mot_de_passe === ""
-        ) {
-
-            $message = "Veuillez remplir tous les champs.";
+            $message = "Veuillez remplir tous les champs obligatoires.";
             $type_message = "error";
 
-        } elseif (!in_array($role_nouveau, $roles_autorises)) {
+        } elseif (!in_array($role_nouveau, $roles_autorises, true)) {
 
             $message = "Rôle invalide.";
             $type_message = "error";
 
+        } elseif (strlen($mot_de_passe) < 4) {
+
+            $message = "Le mot de passe doit contenir au moins 4 caractères.";
+            $type_message = "error";
+
         } else {
 
+            /* Vérifier si le nom d'utilisateur existe */
             $verification = $conn->prepare(
                 "SELECT id FROM utilisateurs WHERE username = ? LIMIT 1"
             );
 
-            $verification->bind_param("s", $username);
-            $verification->execute();
+            if (!$verification) {
 
-            $resultat = $verification->get_result();
-
-            if ($resultat->num_rows > 0) {
-
-                $message = "Ce nom d'utilisateur existe déjà.";
+                $message = "Erreur de vérification.";
                 $type_message = "error";
 
             } else {
 
-                $stmt = $conn->prepare(
-                    "INSERT INTO utilisateurs
-                    (nom, username, mot_de_passe, role)
-                    VALUES (?, ?, ?, ?)"
-                );
+                $verification->bind_param("s", $username);
+                $verification->execute();
 
-                $stmt->bind_param(
-                    "ssss",
-                    $nom,
-                    $username,
-                    $mot_de_passe,
-                    $role_nouveau
-                );
+                $resultat = $verification->get_result();
 
-                if ($stmt->execute()) {
+                if ($resultat->num_rows > 0) {
 
-                    $message = "Utilisateur ajouté avec succès.";
-                    $type_message = "success";
+                    $message = "Ce nom d'utilisateur existe déjà.";
+                    $type_message = "error";
 
                 } else {
 
-                    $message = "Erreur lors de l'ajout.";
-                    $type_message = "error";
+                    /*
+                     * Certains anciens champs ID de la base
+                     * ne sont pas AUTO_INCREMENT.
+                     * On génère donc nous-même le prochain ID.
+                     */
+                    $res_id = $conn->query(
+                        "SELECT COALESCE(MAX(id), 0) + 1 AS prochain_id
+                         FROM utilisateurs"
+                    );
+
+                    $ligne_id = $res_id ? $res_id->fetch_assoc() : null;
+                    $nouvel_id = (int)($ligne_id["prochain_id"] ?? 1);
+
+                    /* Sécurité supplémentaire */
+                    if ($nouvel_id <= 0) {
+                        $nouvel_id = 1;
+                    }
+
+                    /* Hachage du mot de passe */
+                    $mot_de_passe_hash = password_hash(
+                        $mot_de_passe,
+                        PASSWORD_DEFAULT
+                    );
+
+                    $stmt = $conn->prepare(
+                        "INSERT INTO utilisateurs
+                        (id, nom, username, mot_de_passe, role)
+                        VALUES (?, ?, ?, ?, ?)"
+                    );
+
+                    if (!$stmt) {
+
+                        $message = "Erreur lors de la préparation de l'ajout.";
+                        $type_message = "error";
+
+                    } else {
+
+                        $stmt->bind_param(
+                            "issss",
+                            $nouvel_id,
+                            $nom,
+                            $username,
+                            $mot_de_passe_hash,
+                            $role_nouveau
+                        );
+
+                        if ($stmt->execute()) {
+
+                            $message = "Utilisateur ajouté avec succès.";
+                            $type_message = "success";
+
+                        } else {
+
+                            $message = "Erreur lors de l'ajout de l'utilisateur.";
+                            $type_message = "error";
+                        }
+
+                        $stmt->close();
+                    }
                 }
 
-                $stmt->close();
+                $verification->close();
             }
-
-            $verification->close();
         }
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | MODIFICATION
-    |--------------------------------------------------------------------------
-    */
+    /* =====================================================
+       MODIFIER
+    ===================================================== */
 
-    if ($action === "modifier") {
+    elseif ($action === "modifier") {
 
         $id = (int)($_POST["id"] ?? 0);
         $nom = trim($_POST["nom"] ?? "");
@@ -138,116 +178,229 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["action"])) {
         $mot_de_passe = trim($_POST["mot_de_passe"] ?? "");
         $role_nouveau = trim($_POST["role"] ?? "lecture");
 
-        $roles_autorises = [
-            "admin",
-            "gestion",
-            "vendeur",
-            "comptable",
-            "lecture"
-        ];
-
         if ($id <= 0 || $nom === "" || $username === "") {
 
             $message = "Informations invalides.";
             $type_message = "error";
 
-        } elseif (!in_array($role_nouveau, $roles_autorises)) {
+        } elseif (!in_array($role_nouveau, $roles_autorises, true)) {
 
             $message = "Rôle invalide.";
             $type_message = "error";
 
-        } else {
+        } elseif ($id === (int)$_SESSION["id"] && $role_nouveau !== "admin") {
 
             /*
-            | Si le mot de passe est vide,
-            | on conserve l'ancien.
-            */
+             * Empêche l'administrateur connecté de se retirer
+             * lui-même ses droits administrateur.
+             */
+            $message = "Tu ne peux pas retirer tes propres droits administrateur.";
+            $type_message = "error";
 
-            if ($mot_de_passe === "") {
+        } else {
 
-                $stmt = $conn->prepare(
-                    "UPDATE utilisateurs
-                     SET nom = ?, username = ?, role = ?
-                     WHERE id = ?"
-                );
+            /* Vérifier que le username n'est pas utilisé par quelqu'un d'autre */
+            $verification = $conn->prepare(
+                "SELECT id
+                 FROM utilisateurs
+                 WHERE username = ?
+                 AND id <> ?
+                 LIMIT 1"
+            );
 
-                $stmt->bind_param(
-                    "sssi",
-                    $nom,
-                    $username,
-                    $role_nouveau,
-                    $id
-                );
+            if (!$verification) {
 
-            } else {
-
-                $stmt = $conn->prepare(
-                    "UPDATE utilisateurs
-                     SET nom = ?, username = ?, mot_de_passe = ?, role = ?
-                     WHERE id = ?"
-                );
-
-                $stmt->bind_param(
-                    "ssssi",
-                    $nom,
-                    $username,
-                    $mot_de_passe,
-                    $role_nouveau,
-                    $id
-                );
-            }
-
-            if ($stmt->execute()) {
-
-                $message = "Utilisateur modifié avec succès.";
-                $type_message = "success";
-
-            } else {
-
-                $message = "Erreur lors de la modification.";
+                $message = "Erreur lors de la vérification.";
                 $type_message = "error";
-            }
 
-            $stmt->close();
+            } else {
+
+                $verification->bind_param(
+                    "si",
+                    $username,
+                    $id
+                );
+
+                $verification->execute();
+
+                $resultat = $verification->get_result();
+
+                if ($resultat->num_rows > 0) {
+
+                    $message = "Ce nom d'utilisateur est déjà utilisé.";
+                    $type_message = "error";
+
+                } else {
+
+                    /*
+                     * Si aucun nouveau mot de passe n'est fourni,
+                     * on conserve l'ancien.
+                     */
+
+                    if ($mot_de_passe === "") {
+
+                        $stmt = $conn->prepare(
+                            "UPDATE utilisateurs
+                             SET nom = ?, username = ?, role = ?
+                             WHERE id = ?"
+                        );
+
+                        if ($stmt) {
+
+                            $stmt->bind_param(
+                                "sssi",
+                                $nom,
+                                $username,
+                                $role_nouveau,
+                                $id
+                            );
+                        }
+
+                    } else {
+
+                        if (strlen($mot_de_passe) < 4) {
+
+                            $stmt = null;
+
+                            $message = "Le nouveau mot de passe doit contenir au moins 4 caractères.";
+                            $type_message = "error";
+
+                        } else {
+
+                            $mot_de_passe_hash = password_hash(
+                                $mot_de_passe,
+                                PASSWORD_DEFAULT
+                            );
+
+                            $stmt = $conn->prepare(
+                                "UPDATE utilisateurs
+                                 SET nom = ?, username = ?, mot_de_passe = ?, role = ?
+                                 WHERE id = ?"
+                            );
+
+                            if ($stmt) {
+
+                                $stmt->bind_param(
+                                    "ssssi",
+                                    $nom,
+                                    $username,
+                                    $mot_de_passe_hash,
+                                    $role_nouveau,
+                                    $id
+                                );
+                            }
+                        }
+                    }
+
+                    if (isset($stmt) && $stmt) {
+
+                        if ($stmt->execute()) {
+
+                            $message = "Utilisateur modifié avec succès.";
+                            $type_message = "success";
+
+                        } else {
+
+                            $message = "Erreur lors de la modification.";
+                            $type_message = "error";
+                        }
+
+                        $stmt->close();
+                    }
+                }
+
+                $verification->close();
+            }
         }
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | SUPPRESSION
-    |--------------------------------------------------------------------------
-    */
+    /* =====================================================
+       SUPPRIMER
+    ===================================================== */
 
-    if ($action === "supprimer") {
+    elseif ($action === "supprimer") {
 
         $id = (int)($_POST["id"] ?? 0);
 
-        /*
-        | Empêche de supprimer son propre compte.
-        */
-
+        /* Impossible de supprimer son propre compte */
         if ($id === (int)$_SESSION["id"]) {
 
             $message = "Tu ne peux pas supprimer ton propre compte.";
             $type_message = "error";
 
-        } elseif ($id > 0) {
+        } elseif ($id <= 0) {
+
+            $message = "Utilisateur invalide.";
+            $type_message = "error";
+
+        } else {
 
             $stmt = $conn->prepare(
                 "DELETE FROM utilisateurs WHERE id = ?"
             );
 
-            $stmt->bind_param("i", $id);
-
-            if ($stmt->execute()) {
-
-                $message = "Utilisateur supprimé.";
-                $type_message = "success";
-
-            } else {
+            if (!$stmt) {
 
                 $message = "Erreur lors de la suppression.";
                 $type_message = "error";
+
+            } else {
+
+                $stmt->bind_param("i", $id);
+
+                if ($stmt->execute()) {
+
+                    if ($stmt->affected_rows > 0) {
+
+                        $message = "Utilisateur supprimé avec succès.";
+                        $type_message = "success";
+
+                    } else {
+
+                        $message = "Utilisateur introuvable.";
+                        $type_message = "error";
+                    }
+
+                } else {
+
+                    $message = "Erreur lors de la suppression.";
+                    $type_message = "error";
+                }
+
+                $stmt->close();
+            }
+        }
+    }
+}
+
+/* =========================================================
+   UTILISATEUR À MODIFIER
+========================================================= */
+
+$modifier = null;
+
+if (isset($_GET["modifier"])) {
+
+    $id_modifier = (int)$_GET["modifier"];
+
+    if ($id_modifier > 0) {
+
+        $stmt = $conn->prepare(
+            "SELECT id, nom, username, role
+             FROM utilisateurs
+             WHERE id = ?
+             LIMIT 1"
+        );
+
+        if ($stmt) {
+
+            $stmt->bind_param("i", $id_modifier);
+            $stmt->execute();
+
+            $result = $stmt->get_result();
+
+            if ($result && $result->num_rows === 1) {
+                $modifier = $result->fetch_assoc();
             }
 
             $stmt->close();
@@ -255,72 +408,85 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST["action"])) {
     }
 }
 
-/*
-|--------------------------------------------------------------------------
-| UTILISATEUR À MODIFIER
-|--------------------------------------------------------------------------
-*/
+/* =========================================================
+   RECHERCHE
+========================================================= */
 
-$modifier = null;
+$recherche = trim($_GET["recherche"] ?? "");
 
-if (isset($_GET["modifier"])) {
+if ($recherche !== "") {
 
-    $id = (int)$_GET["modifier"];
+    $motif = "%" . $recherche . "%";
 
     $stmt = $conn->prepare(
-        "SELECT id, nom, username, role
+        "SELECT id, nom, username, role, date_creation
          FROM utilisateurs
-         WHERE id = ?
-         LIMIT 1"
+         WHERE nom LIKE ?
+            OR username LIKE ?
+            OR role LIKE ?
+         ORDER BY id DESC"
     );
 
-    $stmt->bind_param("i", $id);
+    $stmt->bind_param(
+        "sss",
+        $motif,
+        $motif,
+        $motif
+    );
+
     $stmt->execute();
 
-    $result = $stmt->get_result();
+    $utilisateurs = $stmt->get_result();
 
-    if ($result->num_rows === 1) {
-        $modifier = $result->fetch_assoc();
-    }
+} else {
 
-    $stmt->close();
+    $utilisateurs = $conn->query(
+        "SELECT id, nom, username, role, date_creation
+         FROM utilisateurs
+         ORDER BY id DESC"
+    );
 }
 
-/*
-|--------------------------------------------------------------------------
-| LISTE DES UTILISATEURS
-|--------------------------------------------------------------------------
-*/
-
-$utilisateurs = $conn->query(
-    "SELECT id, nom, username, role, date_creation
-     FROM utilisateurs
-     ORDER BY id DESC"
-);
-
-/*
-|--------------------------------------------------------------------------
-| LABELS DES RÔLES
-|--------------------------------------------------------------------------
-*/
+/* =========================================================
+   LABELS DES RÔLES
+========================================================= */
 
 function nomRole($role)
 {
     $roles = [
-        "admin" => "👑 Administrateur",
-        "gestion" => "💼 Gestionnaire",
-        "vendeur" => "💰 Vendeur",
+        "admin"     => "👑 Administrateur",
+        "gestion"   => "💼 Gestionnaire",
+        "vendeur"   => "💰 Vendeur",
         "comptable" => "🧾 Comptable",
-        "lecture" => "👁️ Lecture seule"
+        "lecture"   => "👁️ Lecture seule"
     ];
 
     return $roles[$role] ?? $role;
 }
 
+function classeRole($role)
+{
+    switch ($role) {
+
+        case "admin":
+            return "role-admin";
+
+        case "gestion":
+            return "role-gestion";
+
+        case "vendeur":
+            return "role-vendeur";
+
+        case "comptable":
+            return "role-comptable";
+
+        default:
+            return "role-lecture";
+    }
+}
+
 ?>
-
 <!DOCTYPE html>
-
 <html lang="fr">
 
 <head>
@@ -340,40 +506,49 @@ function nomRole($role)
 }
 
 body {
-    font-family: Arial, sans-serif;
-    background: #f4faff;
+    font-family: Arial, Helvetica, sans-serif;
+    background: #f4f9fc;
     color: #263746;
 }
 
-/* SIDEBAR */
+/* =========================================================
+   SIDEBAR
+========================================================= */
 
 .sidebar {
     position: fixed;
     left: 0;
     top: 0;
     bottom: 0;
-    width: 245px;
-    background: linear-gradient(180deg, #55c7ed, #168dcc);
-    padding: 25px 15px;
+    width: 235px;
+    background: linear-gradient(180deg, #173b63, #155b87);
+    padding: 20px 13px;
     color: white;
+    z-index: 10;
 }
 
 .brand {
-    padding: 5px 12px 28px;
+    padding: 4px 12px 22px;
 }
 
-.brand-icon {
-    font-size: 30px;
+.brand-logo {
+    width: 58px;
+    height: 58px;
+    object-fit: contain;
+    display: block;
+    margin-bottom: 8px;
 }
 
 .brand h2 {
-    font-size: 21px;
-    margin-top: 5px;
+    font-size: 19px;
+    letter-spacing: .4px;
 }
 
 .brand span {
-    font-size: 11px;
-    opacity: .85;
+    display: block;
+    margin-top: 4px;
+    font-size: 10px;
+    opacity: .75;
 }
 
 .nav {
@@ -381,110 +556,158 @@ body {
 }
 
 .nav li {
-    margin: 5px 0;
+    margin: 4px 0;
 }
 
 .nav a {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 13px 14px;
+    gap: 10px;
+    padding: 11px 12px;
     color: white;
     text-decoration: none;
-    border-radius: 12px;
-    font-size: 14px;
+    border-radius: 10px;
+    font-size: 13px;
+    transition: .2s;
 }
 
 .nav a:hover,
 .nav a.active {
-    background: rgba(255,255,255,.22);
+    background: rgba(255,255,255,.15);
 }
 
 .sidebar-bottom {
     position: absolute;
-    bottom: 20px;
-    left: 15px;
-    right: 15px;
+    bottom: 18px;
+    left: 13px;
+    right: 13px;
 }
 
 .logout {
     display: block;
     color: white;
     text-decoration: none;
-    padding: 13px;
-    border-radius: 12px;
-    background: rgba(255,255,255,.12);
+    padding: 11px 12px;
+    border-radius: 10px;
+    background: rgba(255,255,255,.09);
+    font-size: 13px;
 }
 
-/* MAIN */
+/* =========================================================
+   MAIN
+========================================================= */
 
 .main {
-    margin-left: 245px;
-    padding: 30px;
+    margin-left: 235px;
+    padding: 25px;
 }
 
 .header {
-    margin-bottom: 25px;
+    margin-bottom: 18px;
 }
 
 .header h1 {
-    font-size: 28px;
+    font-size: 25px;
+    color: #173b63;
 }
 
 .header p {
-    margin-top: 7px;
+    margin-top: 5px;
     color: #81919a;
+    font-size: 13px;
 }
 
-/* CARDS */
+/* =========================================================
+   MESSAGES
+========================================================= */
+
+.message {
+    padding: 11px 14px;
+    border-radius: 9px;
+    margin-bottom: 16px;
+    font-size: 13px;
+}
+
+.success {
+    background: #eaf8f1;
+    color: #16834d;
+    border: 1px solid #c9eedb;
+}
+
+.error {
+    background: #fff0f0;
+    color: #c62828;
+    border: 1px solid #ffd0d0;
+}
+
+/* =========================================================
+   GRID
+========================================================= */
 
 .grid {
     display: grid;
-    grid-template-columns: 350px 1fr;
-    gap: 20px;
+    grid-template-columns: 320px 1fr;
+    gap: 18px;
 }
+
+/* =========================================================
+   CARD
+========================================================= */
 
 .card {
     background: white;
-    border-radius: 18px;
-    padding: 23px;
-    box-shadow: 0 5px 20px #dfeef4;
+    border-radius: 15px;
+    padding: 19px;
+    box-shadow: 0 4px 18px rgba(30,80,110,.07);
+    border: 1px solid #e8f0f4;
 }
 
 .card h2 {
-    font-size: 18px;
-    margin-bottom: 20px;
+    color: #173b63;
+    font-size: 16px;
+    margin-bottom: 17px;
 }
 
-/* FORM */
+/* =========================================================
+   FORM
+========================================================= */
 
 .group {
-    margin-bottom: 15px;
+    margin-bottom: 13px;
 }
 
 .group label {
     display: block;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: bold;
-    margin-bottom: 7px;
+    margin-bottom: 6px;
+    color: #526572;
 }
 
 .group input,
 .group select {
     width: 100%;
-    padding: 12px;
-    border: 1px solid #dce8ed;
-    border-radius: 10px;
-    font-size: 14px;
+    padding: 10px 11px;
+    border: 1px solid #d9e6ec;
+    border-radius: 9px;
+    font-size: 13px;
+    outline: none;
     background: white;
+}
+
+.group input:focus,
+.group select:focus {
+    border-color: #168dcc;
+    box-shadow: 0 0 0 2px rgba(22,141,204,.08);
 }
 
 button {
     border: none;
-    border-radius: 10px;
-    padding: 11px 15px;
+    border-radius: 9px;
+    padding: 9px 13px;
     cursor: pointer;
     font-weight: bold;
+    font-size: 12px;
 }
 
 .btn-primary {
@@ -494,11 +717,11 @@ button {
 }
 
 .btn-primary:hover {
-    background: #0d78ad;
+    background: #0e78ad;
 }
 
 .btn-edit {
-    background: #eaf8ff;
+    background: #eaf7ff;
     color: #168dcc;
 }
 
@@ -507,40 +730,69 @@ button {
     color: #d33;
 }
 
-/* MESSAGES */
-
-.message {
-    padding: 13px;
-    border-radius: 10px;
-    margin-bottom: 18px;
+.btn-cancel {
+    display: inline-block;
+    margin-top: 10px;
+    color: #168dcc;
+    text-decoration: none;
+    font-size: 12px;
 }
 
-.success {
-    background: #eafaf1;
-    color: #16834d;
-}
-
-.error {
-    background: #fff0f0;
-    color: #c62828;
-}
-
-/* ROLE INFO */
+/* =========================================================
+   ROLES
+========================================================= */
 
 .roles {
-    background: #f3faff;
-    padding: 15px;
-    border-radius: 12px;
-    margin-top: 18px;
-    font-size: 12px;
+    background: #f5faff;
+    padding: 12px;
+    border-radius: 10px;
+    margin-top: 15px;
+    font-size: 11px;
     line-height: 1.8;
+    border: 1px solid #e5f0f5;
 }
 
 .roles strong {
-    color: #168dcc;
+    color: #173b63;
 }
 
-/* TABLE */
+/* =========================================================
+   SEARCH
+========================================================= */
+
+.search-box {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 15px;
+}
+
+.search-box input {
+    flex: 1;
+    padding: 9px 11px;
+    border: 1px solid #d9e6ec;
+    border-radius: 9px;
+    font-size: 12px;
+    outline: none;
+}
+
+.search-box button {
+    background: #173b63;
+    color: white;
+    min-width: 75px;
+}
+
+.clear-search {
+    display: flex;
+    align-items: center;
+    text-decoration: none;
+    padding: 0 8px;
+    color: #8b99a2;
+    font-size: 11px;
+}
+
+/* =========================================================
+   TABLE
+========================================================= */
 
 .table-container {
     overflow-x: auto;
@@ -549,43 +801,75 @@ button {
 table {
     width: 100%;
     border-collapse: collapse;
-    min-width: 650px;
+    min-width: 620px;
 }
 
 th,
 td {
-    padding: 14px;
+    padding: 11px 9px;
     text-align: left;
-    border-bottom: 1px solid #edf3f6;
-    font-size: 13px;
+    border-bottom: 1px solid #edf2f5;
+    font-size: 12px;
 }
 
 th {
     color: #89969d;
-    font-size: 11px;
+    font-size: 10px;
+    font-weight: bold;
+}
+
+td strong {
+    color: #263746;
 }
 
 .badge {
     display: inline-block;
-    padding: 6px 9px;
+    padding: 5px 8px;
     border-radius: 20px;
-    background: #eaf8ff;
-    color: #168dcc;
-    font-size: 11px;
+    font-size: 10px;
     font-weight: bold;
+}
+
+.role-admin {
+    background: #fff6dc;
+    color: #9a7110;
+}
+
+.role-gestion {
+    background: #eaf3ff;
+    color: #1766a3;
+}
+
+.role-vendeur {
+    background: #eafaf1;
+    color: #16834d;
+}
+
+.role-comptable {
+    background: #f2edff;
+    color: #6951a8;
+}
+
+.role-lecture {
+    background: #f0f3f5;
+    color: #66747d;
 }
 
 .actions {
     display: flex;
-    gap: 7px;
+    gap: 6px;
 }
 
 .date {
     color: #89969d;
-    font-size: 12px;
+    font-size: 11px;
 }
 
-@media(max-width: 900px) {
+/* =========================================================
+   RESPONSIVE
+========================================================= */
+
+@media (max-width: 950px) {
 
     .grid {
         grid-template-columns: 1fr;
@@ -593,36 +877,96 @@ th {
 
 }
 
-@media(max-width: 700px) {
+@media (max-width: 700px) {
 
     .sidebar {
         position: relative;
         width: 100%;
-        padding: 15px;
+        padding: 12px;
+    }
+
+    .brand {
+        padding: 3px 8px 12px;
+    }
+
+    .brand-logo {
+        width: 48px;
+        height: 48px;
+    }
+
+    .brand h2 {
+        font-size: 17px;
     }
 
     .nav {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
+        gap: 4px;
+    }
+
+    .nav li {
+        margin: 0;
     }
 
     .nav a {
         flex-direction: column;
         justify-content: center;
-        font-size: 10px;
-        gap: 5px;
+        text-align: center;
+        padding: 8px 4px;
+        font-size: 9px;
+        gap: 3px;
     }
 
     .sidebar-bottom {
         position: static;
-        margin-top: 10px;
+        margin-top: 8px;
+    }
+
+    .logout {
+        text-align: center;
+        font-size: 11px;
+        padding: 8px;
     }
 
     .main {
         margin-left: 0;
-        padding: 18px;
+        padding: 14px;
     }
 
+    .header h1 {
+        font-size: 21px;
+    }
+
+    .header p {
+        font-size: 11px;
+    }
+
+    .card {
+        padding: 15px;
+        border-radius: 12px;
+    }
+
+    .card h2 {
+        font-size: 15px;
+    }
+
+    .search-box {
+        flex-wrap: wrap;
+    }
+
+    .search-box input {
+        min-width: 0;
+        width: 100%;
+    }
+
+    .search-box button {
+        flex: 1;
+    }
+
+    .clear-search {
+        justify-content: center;
+        padding: 8px;
+    }
 }
 
 </style>
@@ -631,474 +975,583 @@ th {
 
 <body>
 
+<!-- =====================================================
+     SIDEBAR
+===================================================== -->
+
 <aside class="sidebar">
 
-<div class="brand">
+    <div class="brand">
 
-<div class="brand-icon">💼</div>
+        <img
+            src="assets/logo.png"
+            alt="LAMBEMAH GESTION"
+            class="brand-logo"
+            onerror="this.style.display='none';"
+        >
 
-<h2>LAMBEMAH</h2>
+        <h2>LAMBEMAH</h2>
 
-<span>GESTION • PRESTATION</span>
+        <span>GESTION • PRESTATION</span>
 
-</div>
+    </div>
 
-<ul class="nav">
+    <ul class="nav">
 
-<li>
-<a href="index.php">
-🏠 Accueil
-</a>
-</li>
+        <li>
+            <a href="index.php">
+                🏠 Accueil
+            </a>
+        </li>
 
-<li>
-<a href="produits.php">
-📦 Produits
-</a>
-</li>
+        <li>
+            <a href="produits.php">
+                📦 Produits
+            </a>
+        </li>
 
-<li>
-<a href="ventes.php">
-💰 Ventes
-</a>
-</li>
+        <li>
+            <a href="ventes.php">
+                💰 Ventes
+            </a>
+        </li>
 
-<li>
-<a href="prestations.php">
-🖨️ Prestations
-</a>
-</li>
+        <li>
+            <a href="prestations.php">
+                🖨️ Prestations
+            </a>
+        </li>
 
-<li>
-<a href="depenses.php">
-💸 Dépenses
-</a>
-</li>
+        <li>
+            <a href="depenses.php">
+                💸 Dépenses
+            </a>
+        </li>
 
-<li>
-<a href="statistiques.php">
-📊 Statistiques
-</a>
-</li>
+        <li>
+            <a href="recettes.php">
+                💵 Recettes
+            </a>
+        </li>
 
-<li>
-<a href="utilisateurs.php" class="active">
-👥 Utilisateurs
-</a>
-</li>
+        <li>
+            <a href="statistiques.php">
+                📊 Statistiques
+            </a>
+        </li>
 
-</ul>
+        <li>
+            <a href="utilisateurs.php" class="active">
+                👥 Utilisateurs
+            </a>
+        </li>
 
-<div class="sidebar-bottom">
+    </ul>
 
-<a class="logout" href="index.php?logout=1">
-🚪 Déconnexion
-</a>
+    <div class="sidebar-bottom">
 
-</div>
+        <a
+            class="logout"
+            href="index.php?logout=1"
+        >
+            🚪 Déconnexion
+        </a>
+
+    </div>
 
 </aside>
 
 
+<!-- =====================================================
+     CONTENU
+===================================================== -->
+
 <main class="main">
 
-<div class="header">
+    <div class="header">
 
-<h1>Utilisateurs 👥</h1>
+        <h1>Utilisateurs 👥</h1>
 
-<p>
-Gère les personnes qui peuvent accéder à LAMBEMAH GESTION.
-</p>
+        <p>
+            Gestion des accès à LAMBEMAH GESTION.
+        </p>
 
-</div>
+    </div>
 
 
-<?php if ($message !== ""): ?>
+    <?php if ($message !== ""): ?>
 
-<div class="message <?= $type_message ?>">
+        <div class="message <?= htmlspecialchars($type_message) ?>">
 
-<?= htmlspecialchars($message) ?>
+            <?= htmlspecialchars($message) ?>
 
-</div>
+        </div>
 
-<?php endif; ?>
+    <?php endif; ?>
 
 
-<div class="grid">
+    <div class="grid">
 
 
-<!-- FORMULAIRE -->
+        <!-- =================================================
+             FORMULAIRE
+        ================================================= -->
 
-<div class="card">
+        <div class="card">
 
-<?php if ($modifier): ?>
+            <?php if ($modifier): ?>
 
-<h2>✏️ Modifier l'utilisateur</h2>
+                <h2>✏️ Modifier l'utilisateur</h2>
 
-<form method="POST">
+                <form method="POST">
 
-<input
-type="hidden"
-name="action"
-value="modifier"
->
+                    <input
+                        type="hidden"
+                        name="action"
+                        value="modifier"
+                    >
 
-<input
-type="hidden"
-name="id"
-value="<?= (int)$modifier["id"] ?>"
->
+                    <input
+                        type="hidden"
+                        name="id"
+                        value="<?= (int)$modifier["id"] ?>"
+                    >
 
-<div class="group">
 
-<label>Nom complet</label>
+                    <div class="group">
 
-<input
-type="text"
-name="nom"
-value="<?= htmlspecialchars($modifier["nom"]) ?>"
-required
->
+                        <label>Nom complet</label>
 
-</div>
+                        <input
+                            type="text"
+                            name="nom"
+                            value="<?= htmlspecialchars($modifier["nom"]) ?>"
+                            required
+                        >
 
+                    </div>
 
-<div class="group">
 
-<label>Nom d'utilisateur</label>
+                    <div class="group">
 
-<input
-type="text"
-name="username"
-value="<?= htmlspecialchars($modifier["username"]) ?>"
-required
->
+                        <label>Nom d'utilisateur</label>
 
-</div>
+                        <input
+                            type="text"
+                            name="username"
+                            value="<?= htmlspecialchars($modifier["username"]) ?>"
+                            required
+                        >
 
+                    </div>
 
-<div class="group">
 
-<label>Nouveau mot de passe</label>
+                    <div class="group">
 
-<input
-type="password"
-name="mot_de_passe"
-placeholder="Laisser vide pour conserver l'ancien"
->
+                        <label>Nouveau mot de passe</label>
 
-</div>
+                        <input
+                            type="password"
+                            name="mot_de_passe"
+                            placeholder="Laisser vide pour conserver l'ancien"
+                        >
 
+                    </div>
 
-<div class="group">
 
-<label>Droits</label>
+                    <div class="group">
 
-<select name="role">
+                        <label>Droits</label>
 
-<option value="admin"
-<?= $modifier["role"] === "admin" ? "selected" : "" ?>>
-👑 Administrateur
-</option>
+                        <select name="role">
 
-<option value="gestion"
-<?= $modifier["role"] === "gestion" ? "selected" : "" ?>>
-💼 Gestionnaire
-</option>
+                            <option
+                                value="lecture"
+                                <?= $modifier["role"] === "lecture" ? "selected" : "" ?>
+                            >
+                                👁️ Lecture seule
+                            </option>
 
-<option value="vendeur"
-<?= $modifier["role"] === "vendeur" ? "selected" : "" ?>>
-💰 Vendeur
-</option>
+                            <option
+                                value="vendeur"
+                                <?= $modifier["role"] === "vendeur" ? "selected" : "" ?>
+                            >
+                                💰 Vendeur
+                            </option>
 
-<option value="comptable"
-<?= $modifier["role"] === "comptable" ? "selected" : "" ?>>
-🧾 Comptable
-</option>
+                            <option
+                                value="comptable"
+                                <?= $modifier["role"] === "comptable" ? "selected" : "" ?>
+                            >
+                                🧾 Comptable
+                            </option>
 
-<option value="lecture"
-<?= $modifier["role"] === "lecture" ? "selected" : "" ?>>
-👁️ Lecture seule
-</option>
+                            <option
+                                value="gestion"
+                                <?= $modifier["role"] === "gestion" ? "selected" : "" ?>
+                            >
+                                💼 Gestionnaire
+                            </option>
 
-</select>
+                            <option
+                                value="admin"
+                                <?= $modifier["role"] === "admin" ? "selected" : "" ?>
+                            >
+                                👑 Administrateur
+                            </option>
 
-</div>
+                        </select>
 
+                    </div>
 
-<button class="btn-primary" type="submit">
-💾 Enregistrer les modifications
-</button>
 
-</form>
+                    <button
+                        class="btn-primary"
+                        type="submit"
+                    >
+                        💾 Enregistrer
+                    </button>
 
-<br>
+                </form>
 
-<a href="utilisateurs.php"
-style="color:#168dcc;text-decoration:none;font-size:13px;">
-← Annuler
-</a>
 
-<?php else: ?>
+                <a
+                    href="utilisateurs.php"
+                    class="btn-cancel"
+                >
+                    ← Annuler
+                </a>
 
-<h2>➕ Ajouter une personne</h2>
 
-<form method="POST">
+            <?php else: ?>
 
-<input
-type="hidden"
-name="action"
-value="ajouter"
->
 
-<div class="group">
+                <h2>➕ Ajouter une personne</h2>
 
-<label>Nom complet</label>
+                <form method="POST">
 
-<input
-type="text"
-name="nom"
-placeholder="Ex : Ibrahima Konaté"
-required
->
+                    <input
+                        type="hidden"
+                        name="action"
+                        value="ajouter"
+                    >
 
-</div>
 
+                    <div class="group">
 
-<div class="group">
+                        <label>Nom complet</label>
 
-<label>Nom d'utilisateur</label>
+                        <input
+                            type="text"
+                            name="nom"
+                            placeholder="Ex : Ibrahima Konaté"
+                            required
+                        >
 
-<input
-type="text"
-name="username"
-placeholder="Ex : ibrahima"
-required
->
+                    </div>
 
-</div>
 
+                    <div class="group">
 
-<div class="group">
+                        <label>Nom d'utilisateur</label>
 
-<label>Mot de passe</label>
+                        <input
+                            type="text"
+                            name="username"
+                            placeholder="Ex : ibrahima"
+                            required
+                        >
 
-<input
-type="password"
-name="mot_de_passe"
-placeholder="Mot de passe"
-required
->
+                    </div>
 
-</div>
 
+                    <div class="group">
 
-<div class="group">
+                        <label>Mot de passe</label>
 
-<label>Droits accordés</label>
+                        <input
+                            type="password"
+                            name="mot_de_passe"
+                            placeholder="Minimum 4 caractères"
+                            required
+                        >
 
-<select name="role">
+                    </div>
 
-<option value="lecture">
-👁️ Lecture seule
-</option>
 
-<option value="vendeur">
-💰 Vendeur
-</option>
+                    <div class="group">
 
-<option value="comptable">
-🧾 Comptable
-</option>
+                        <label>Droits accordés</label>
 
-<option value="gestion">
-💼 Gestionnaire
-</option>
+                        <select name="role">
 
-<option value="admin">
-👑 Administrateur
-</option>
+                            <option value="lecture">
+                                👁️ Lecture seule
+                            </option>
 
-</select>
+                            <option value="vendeur">
+                                💰 Vendeur
+                            </option>
 
-</div>
+                            <option value="comptable">
+                                🧾 Comptable
+                            </option>
 
+                            <option value="gestion">
+                                💼 Gestionnaire
+                            </option>
 
-<button class="btn-primary" type="submit">
-➕ Créer l'utilisateur
-</button>
+                            <option value="admin">
+                                👑 Administrateur
+                            </option>
 
-</form>
+                        </select>
 
+                    </div>
 
-<div class="roles">
 
-<strong>👑 Administrateur</strong> : accès complet.<br>
+                    <button
+                        class="btn-primary"
+                        type="submit"
+                    >
+                        ➕ Créer l'utilisateur
+                    </button>
 
-<strong>💼 Gestionnaire</strong> : gestion de l'activité.<br>
+                </form>
 
-<strong>💰 Vendeur</strong> : produits et ventes.<br>
 
-<strong>🧾 Comptable</strong> : recettes, dépenses et statistiques.<br>
+                <div class="roles">
 
-<strong>👁️ Lecture seule</strong> : consultation uniquement.
+                    <strong>👑 Administrateur</strong> : accès complet.<br>
 
-</div>
+                    <strong>💼 Gestionnaire</strong> : gestion de l'activité.<br>
 
-<?php endif; ?>
+                    <strong>💰 Vendeur</strong> : produits et ventes.<br>
 
-</div>
+                    <strong>🧾 Comptable</strong> : recettes, dépenses et statistiques.<br>
 
+                    <strong>👁️ Lecture seule</strong> : consultation uniquement.
 
-<!-- LISTE -->
+                </div>
 
-<div class="card">
+            <?php endif; ?>
 
-<h2>👥 Équipe LAMBEMAH GESTION</h2>
+        </div>
 
-<div class="table-container">
 
-<table>
+        <!-- =================================================
+             LISTE
+        ================================================= -->
 
-<thead>
+        <div class="card">
 
-<tr>
+            <h2>👥 Équipe LAMBEMAH GESTION</h2>
 
-<th>NOM</th>
 
-<th>IDENTIFIANT</th>
+            <!-- RECHERCHE -->
 
-<th>DROITS</th>
+            <form
+                method="GET"
+                class="search-box"
+            >
 
-<th>CRÉÉ LE</th>
+                <input
+                    type="text"
+                    name="recherche"
+                    value="<?= htmlspecialchars($recherche) ?>"
+                    placeholder="Rechercher un nom, identifiant ou rôle..."
+                >
 
-<th>ACTIONS</th>
+                <button type="submit">
+                    🔎 Rechercher
+                </button>
 
-</tr>
+                <?php if ($recherche !== ""): ?>
 
-</thead>
+                    <a
+                        href="utilisateurs.php"
+                        class="clear-search"
+                    >
+                        ✕ Effacer
+                    </a>
 
-<tbody>
+                <?php endif; ?>
 
-<?php if ($utilisateurs && $utilisateurs->num_rows > 0): ?>
+            </form>
 
-<?php while ($u = $utilisateurs->fetch_assoc()): ?>
 
-<tr>
+            <div class="table-container">
 
-<td>
+                <table>
 
-<strong>
-<?= htmlspecialchars($u["nom"]) ?>
-</strong>
+                    <thead>
 
-</td>
+                        <tr>
 
-<td>
-<?= htmlspecialchars($u["username"]) ?>
-</td>
+                            <th>NOM</th>
 
-<td>
+                            <th>IDENTIFIANT</th>
 
-<span class="badge">
+                            <th>DROITS</th>
 
-<?= htmlspecialchars(nomRole($u["role"])) ?>
+                            <th>CRÉÉ LE</th>
 
-</span>
+                            <th>ACTIONS</th>
 
-</td>
+                        </tr>
 
-<td class="date">
+                    </thead>
 
-<?= date(
-"d/m/Y",
-strtotime($u["date_creation"])
-) ?>
 
-</td>
+                    <tbody>
 
-<td>
+                    <?php if ($utilisateurs && $utilisateurs->num_rows > 0): ?>
 
-<div class="actions">
+                        <?php while ($u = $utilisateurs->fetch_assoc()): ?>
 
-<a
-href="utilisateurs.php?modifier=<?= (int)$u["id"] ?>"
-style="text-decoration:none;"
->
+                            <tr>
 
-<button
-type="button"
-class="btn-edit"
->
-✏️
-</button>
+                                <td>
 
-</a>
+                                    <strong>
+                                        <?= htmlspecialchars($u["nom"]) ?>
+                                    </strong>
 
+                                </td>
 
-<?php if ((int)$u["id"] !== (int)$_SESSION["id"]): ?>
 
-<form
-method="POST"
-onsubmit="return confirm('Supprimer cet utilisateur ?');"
->
+                                <td>
 
-<input
-type="hidden"
-name="action"
-value="supprimer"
->
+                                    <?= htmlspecialchars($u["username"]) ?>
 
-<input
-type="hidden"
-name="id"
-value="<?= (int)$u["id"] ?>"
->
+                                </td>
 
-<button
-type="submit"
-class="btn-delete"
->
-🗑️
-</button>
 
-</form>
+                                <td>
 
-<?php endif; ?>
+                                    <span
+                                        class="badge <?= htmlspecialchars(classeRole($u["role"])) ?>"
+                                    >
+                                        <?= htmlspecialchars(nomRole($u["role"])) ?>
+                                    </span>
 
-</div>
+                                </td>
 
-</td>
 
-</tr>
+                                <td class="date">
 
-<?php endwhile; ?>
+                                    <?php
 
-<?php else: ?>
+                                    if (!empty($u["date_creation"])) {
 
-<tr>
+                                        $timestamp = strtotime($u["date_creation"]);
 
-<td colspan="5">
-Aucun utilisateur.
-</td>
+                                        echo $timestamp
+                                            ? date("d/m/Y", $timestamp)
+                                            : "-";
 
-</tr>
+                                    } else {
 
-<?php endif; ?>
+                                        echo "-";
+                                    }
 
-</tbody>
+                                    ?>
 
-</table>
+                                </td>
 
-</div>
 
-</div>
+                                <td>
 
-</div>
+                                    <div class="actions">
+
+                                        <!-- MODIFIER -->
+
+                                        <a
+                                            href="utilisateurs.php?modifier=<?= (int)$u["id"] ?>"
+                                            style="text-decoration:none;"
+                                            title="Modifier"
+                                        >
+
+                                            <button
+                                                type="button"
+                                                class="btn-edit"
+                                            >
+                                                ✏️
+                                            </button>
+
+                                        </a>
+
+
+                                        <!-- SUPPRIMER -->
+
+                                        <?php if ((int)$u["id"] !== (int)$_SESSION["id"]): ?>
+
+                                            <form
+                                                method="POST"
+                                                onsubmit="return confirm('Supprimer cet utilisateur ? Cette action est définitive.');"
+                                            >
+
+                                                <input
+                                                    type="hidden"
+                                                    name="action"
+                                                    value="supprimer"
+                                                >
+
+                                                <input
+                                                    type="hidden"
+                                                    name="id"
+                                                    value="<?= (int)$u["id"] ?>"
+                                                >
+
+                                                <button
+                                                    type="submit"
+                                                    class="btn-delete"
+                                                    title="Supprimer"
+                                                >
+                                                    🗑️
+                                                </button>
+
+                                            </form>
+
+                                        <?php endif; ?>
+
+                                    </div>
+
+                                </td>
+
+                            </tr>
+
+                        <?php endwhile; ?>
+
+                    <?php else: ?>
+
+                        <tr>
+
+                            <td
+                                colspan="5"
+                                style="text-align:center;color:#89969d;padding:25px;"
+                            >
+                                <?= $recherche !== ""
+                                    ? "Aucun utilisateur trouvé."
+                                    : "Aucun utilisateur."
+                                ?>
+                            </td>
+
+                        </tr>
+
+                    <?php endif; ?>
+
+                    </tbody>
+
+                </table>
+
+            </div>
+
+        </div>
+
+    </div>
 
 </main>
 
 </body>
-
 </html>
-```
