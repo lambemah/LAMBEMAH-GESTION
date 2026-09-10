@@ -303,7 +303,7 @@ body {
 
     color: #718096;
 
-    font-size: 13px;
+    font-size: 10px;
 }
 
 
@@ -321,7 +321,7 @@ body {
 
     margin-bottom: 15px;
 
-    font-size: 13px;
+    font-size: 10px;
 }
 
 
@@ -331,7 +331,7 @@ label {
 
     margin-bottom: 7px;
 
-    font-size: 13px;
+    font-size: 10px;
 
     font-weight: bold;
 }
@@ -887,7 +887,7 @@ a {
 
     display: block;
 
-    font-size: 20px;
+    font-size: 15px;
 
     line-height: 1.2;
 }
@@ -901,7 +901,7 @@ a {
 
     margin-top: 7px;
 
-    font-size: 12px;
+    font-size: 10px;
 }
 
 
@@ -921,7 +921,7 @@ a {
 
     color: #dbe7f8;
 
-    font-size: 14px;
+    font-size: 12px;
 
     transition: .2s;
 }
@@ -978,7 +978,7 @@ a {
 
     margin: 0;
 
-    font-size: 26px;
+    font-size: 21px;
 }
 
 
@@ -991,7 +991,7 @@ a {
 
     color: #68758a;
 
-    font-size: 14px;
+    font-size: 12px;
 }
 
 
@@ -1007,7 +1007,7 @@ a {
 
     padding: 10px 14px;
 
-    font-size: 13px;
+    font-size: 10px;
 }
 
 
@@ -1050,7 +1050,7 @@ a {
 
     color: #68758a;
 
-    font-size: 12px;
+    font-size: 10px;
 }
 
 
@@ -1060,7 +1060,7 @@ a {
 
     margin-top: 8px;
 
-    font-size: 22px;
+    font-size: 15px;
 }
 
 
@@ -1128,7 +1128,7 @@ a {
         10px
         13px;
 
-    font-size: 13px;
+    font-size: 10px;
 }
 
 
@@ -1165,7 +1165,7 @@ a {
         0
         12px;
 
-    font-size: 17px;
+    font-size: 15px;
 }
 
 
@@ -1194,7 +1194,7 @@ a {
 
     text-align: center;
 
-    font-size: 13px;
+    font-size: 10px;
 
     font-weight: bold;
 }
@@ -1239,7 +1239,7 @@ a {
 
     margin: 0;
 
-    font-size: 17px;
+    font-size: 15px;
 }
 
 
@@ -1253,7 +1253,7 @@ a {
 
     border-radius: 8px;
 
-    font-size: 11px;
+    font-size: 10px;
 
     background: #eef2f7;
 
@@ -1285,7 +1285,7 @@ table {
 
     border-collapse: collapse;
 
-    font-size: 12px;
+    font-size: 10px;
 }
 
 
@@ -1334,7 +1334,7 @@ td {
 
     color: #758196;
 
-    font-size: 11px;
+    font-size: 10px;
 
     line-height: 1.5;
 }
@@ -1422,7 +1422,7 @@ td {
             12px
             5px;
 
-        font-size: 20px;
+        font-size: 15px;
     }
 
 
@@ -1452,13 +1452,13 @@ td {
 
     .header h1 {
 
-        font-size: 20px;
+        font-size: 15px;
     }
 
 
     .header p {
 
-        font-size: 12px;
+        font-size: 10px;
     }
 
 
@@ -1485,13 +1485,13 @@ td {
 
     .card strong {
 
-        font-size: 16px;
+        font-size: 14px;
     }
 
 
     .card small {
 
-        font-size: 11px;
+        font-size: 10px;
     }
 
 
@@ -1514,7 +1514,7 @@ td {
 
         padding: 11px 5px;
 
-        font-size: 11px;
+        font-size: 10px;
     }
 
 
@@ -1526,7 +1526,7 @@ td {
 
     table {
 
-        font-size: 11px;
+        font-size: 10px;
     }
 
 }
