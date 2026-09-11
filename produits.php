@@ -9,9 +9,15 @@ function h($v){return htmlspecialchars((string)$v,ENT_QUOTES,'UTF-8');}
 function money($v){return number_format((float)$v,0,',',' ').' FG';}
 function cleanText($v){return trim(preg_replace('/[|\r\n]+/',' ',(string)$v));}
 function nextId(mysqli $conn,string $table):int{
+    static $nextIds=[];
     if(!in_array($table,['produits','mouvements','ventes'],true)) return 1;
-    $q=$conn->query("SELECT COALESCE(MAX(id),0)+1 n FROM `$table`");
-    return (int)(($q&&$q->fetch_assoc()['n']??1));
+    if(!isset($nextIds[$table])){
+        $q=$conn->query("SELECT COALESCE(MAX(id),0)+1 AS n FROM `$table`");
+        if(!$q) throw new Exception($conn->error);
+        $row=$q->fetch_assoc();
+        $nextIds[$table]=(int)($row['n']??1);
+    }
+    return $nextIds[$table]++;
 }
 function parseMeta(string $desc):array{
     $o=[];
