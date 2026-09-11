@@ -6,258 +6,375 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
     die('Connexion à la base de données impossible.');
 }
 $conn->set_charset('utf8mb4');
+mysqli_report(MYSQLI_REPORT_OFF);
 
-function h($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
-function money($v){ return number_format((float)$v, 0, ',', ' ') . ' FG'; }
+function h($v): string { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
+function money($v): string { return number_format((float)$v, 0, ',', ' ') . ' FG'; }
+function cleanText($v): string { return trim(preg_replace('/[|\r\n]+/', ' ', (string)$v)); }
+function flash(string $type, string $msg): void { $_SESSION['flash'] = ['type'=>$type,'msg'=>$msg]; }
 
-/* =========================
-   DÉCONNEXION
-   ========================= */
-if (isset($_GET['logout'])) {
-    $_SESSION = [];
-    if (ini_get('session.use_cookies')) {
-        $p = session_get_cookie_params();
-        setcookie(session_name(), '', time() - 42000, $p['path'], $p['domain'], $p['secure'], $p['httponly']);
-    }
-    session_destroy();
-    header('Location: index.php');
-    exit;
+function nextId(mysqli $conn, string $table): int {
+    $allowed = ['produits','mouvements','ventes','depenses','recettes'];
+    if (!in_array($table, $allowed, true)) throw new Exception('Table non autorisée.');
+    $q = $conn->query("SELECT MAX(id) AS max_id FROM `$table`");
+    if (!$q) throw new Exception('Impossible de lire le prochain identifiant : ' . $conn->error);
+    $r = $q->fetch_assoc();
+    return ((int)($r['max_id'] ?? 0)) + 1;
 }
 
-/* =========================
-   CONNEXION
-   ========================= */
-$loginError = '';
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['login_submit'])) {
-    $username = trim($_POST['username'] ?? '');
-    $password = (string)($_POST['password'] ?? '');
+function parseMeta(string $desc): array {
+    $o = [];
+    foreach (explode('|', $desc) as $p) {
+        $p = trim($p);
+        if ($p === '') continue;
+        if (strpos($p, '=') !== false) {
+            [$k,$v] = explode('=', $p, 2);
+            $o[strtoupper(trim($k))] = trim($v);
+            continue;
+        }
+        if (preg_match('/^Facture\s*:\s*(.+)$/i', $p, $m)) $o['FACTURE'] = trim($m[1]);
+        if (preg_match('/^Fournisseur\s*:\s*(.+)$/i', $p, $m)) $o['FOURNISSEUR'] = trim($m[1]);
+        if (preg_match('/^Pay[ée]e?\s*:\s*([0-9\s,.]+)\s*FG/i', $p, $m)) $o['PAYE'] = (float)str_replace([' ', ','], ['', '.'], $m[1]);
+        if (preg_match('/^Reste fournisseur\s*:\s*([0-9\s,.]+)\s*FG/i', $p, $m)) $o['RESTE'] = (float)str_replace([' ', ','], ['', '.'], $m[1]);
+    }
+    return $o;
+}
 
-    if ($username === '' || $password === '') {
-        $loginError = 'Veuillez remplir tous les champs.';
-    } else {
-        $stmt = $conn->prepare("SELECT id, nom, username, mot_de_passe, role FROM utilisateurs WHERE username = ? LIMIT 1");
-        if ($stmt) {
-            $stmt->bind_param('s', $username);
-            $stmt->execute();
-            $r = $stmt->get_result();
-            $u = $r ? $r->fetch_assoc() : null;
-            $stmt->close();
+function invoiceRows(mysqli $conn, string $ref): array {
+    $safe = $conn->real_escape_string($ref);
+    $rows = [];
+    $sql = "SELECT m.*, p.nom, p.categorie FROM mouvements m
+            LEFT JOIN produits p ON p.id=m.produit_id
+            WHERE m.type='ENTREE'
+              AND (m.description LIKE '%FACTURE=$safe|%'
+                   OR m.description LIKE '%FACTURE=$safe%'
+                   OR m.description LIKE '%Facture : $safe%')
+            ORDER BY m.id ASC";
+    $q = $conn->query($sql);
+    while ($q && ($r = $q->fetch_assoc())) $rows[] = $r;
+    return $rows;
+}
 
-            if ($u) {
-                $stored = (string)$u['mot_de_passe'];
-                $valid = password_verify($password, $stored) || hash_equals($stored, $password);
-                if ($valid) {
-                    session_regenerate_id(true);
-                    $_SESSION['user_id'] = (int)$u['id'];
-                    $_SESSION['utilisateur_id'] = (int)$u['id'];
-                    $_SESSION['id_utilisateur'] = (int)$u['id'];
-                    $_SESSION['id'] = (int)$u['id'];
-                    $_SESSION['nom'] = $u['nom'];
-                    $_SESSION['username'] = $u['username'];
-                    $_SESSION['role'] = $u['role'];
-                    header('Location: index.php');
-                    exit;
-                }
-            }
-            $loginError = 'Nom d’utilisateur ou mot de passe incorrect.';
-        } else {
-            $loginError = 'Erreur de connexion à la base de données.';
+function purchaseRef(mysqli $conn): string {
+    $year = date('Y');
+    $max = 0;
+    $q = $conn->query("SELECT description FROM mouvements WHERE type='ENTREE'");
+    while ($q && ($r = $q->fetch_assoc())) {
+        if (preg_match('/FACTURE=ACH-' . preg_quote($year,'/') . '-(\d{4})\|/', $r['description'] ?? '', $m)) {
+            $max = max($max, (int)$m[1]);
         }
     }
+    return 'ACH-' . $year . '-' . str_pad((string)($max + 1), 4, '0', STR_PAD_LEFT);
 }
 
-$loggedIn = isset($_SESSION['user_id']) || isset($_SESSION['utilisateur_id']) || isset($_SESSION['id_utilisateur']) || isset($_SESSION['id']);
+function deletePurchaseRows(mysqli $conn, string $ref): void {
+    $safe = $conn->real_escape_string($ref);
+    $q = $conn->query("DELETE FROM mouvements WHERE type='ENTREE' AND (description LIKE '%FACTURE=$safe|%' OR description LIKE '%FACTURE=$safe%' OR description LIKE '%Facture : $safe%')");
+    if (!$q) throw new Exception($conn->error);
+}
 
-if (!$loggedIn):
-?>
-<!doctype html>
-<html lang="fr">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Connexion — LAMBEMAH GESTION</title>
-<style>
-:root{--navy:#08253f;--blue:#1677e8;--light:#eef4fa;--line:#d7e1eb;--text:#1a2a3a;--muted:#718092}
-*{box-sizing:border-box}html,body{margin:0;min-height:100%;font-family:Inter,Arial,sans-serif;color:var(--text);background:linear-gradient(135deg,#eef4fa,#f8fbfe)}
-body{min-height:100vh;display:grid;place-items:center;padding:20px}
-.login{width:min(390px,100%);background:#fff;border:1px solid #dce7f0;border-radius:20px;box-shadow:0 18px 40px rgba(12,41,67,.10);padding:28px}
-.brand{text-align:center}.logo{width:70px;height:70px;object-fit:contain;margin:auto auto 10px;display:block}.brand h1{margin:0;font-size:23px;color:var(--navy)}.brand p{margin:6px 0 22px;color:var(--muted);font-size:12px}
-.error{background:#fff1f1;border:1px solid #f1cdcd;color:#ad2525;border-radius:9px;padding:10px 11px;font-size:12px;margin-bottom:12px}
-label{display:block;font-size:12px;font-weight:700;margin:12px 0 6px}input{width:100%;height:44px;border:1px solid var(--line);border-radius:10px;padding:0 12px;font-size:13px;outline:none}input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(22,119,232,.10)}button{width:100%;height:44px;margin-top:18px;border:0;border-radius:10px;background:var(--blue);color:#fff;font-size:13px;font-weight:800;cursor:pointer}
-</style>
-</head>
-<body>
-<div class="login">
-  <div class="brand">
-    <img class="logo" src="/assets/logo.png" alt="LAMBEMAH" onerror="this.style.display='none'">
-    <h1>LAMBEMAH GESTION</h1>
-    <p>Connexion à votre espace</p>
-  </div>
-  <?php if($loginError): ?><div class="error"><?=h($loginError)?></div><?php endif; ?>
-  <form method="post" autocomplete="off">
-    <label>Nom d’utilisateur</label>
-    <input type="text" name="username" required autofocus>
-    <label>Mot de passe</label>
-    <input type="password" name="password" required>
-    <button type="submit" name="login_submit">Se connecter</button>
-  </form>
-</div>
-</body>
-</html>
-<?php exit; endif;
+function restorePurchaseStock(mysqli $conn, array $rows): void {
+    foreach ($rows as $r) {
+        $pid = (int)$r['produit_id'];
+        $qty = (int)$r['quantite'];
+        $st = $conn->prepare('UPDATE produits SET stock = stock - ? WHERE id = ?');
+        if (!$st) throw new Exception($conn->error);
+        $st->bind_param('ii', $qty, $pid);
+        if (!$st->execute()) { $e=$st->error; $st->close(); throw new Exception($e); }
+        $st->close();
+    }
+}
 
 /* =========================
-   INDICATEURS
+   IMPRESSION
    ========================= */
-$caVentes = 0; $nbVentes = 0;
-$q = $conn->query("SELECT COUNT(*) n, COALESCE(SUM(montant),0) total FROM ventes");
-if($q){$r=$q->fetch_assoc();$nbVentes=(int)$r['n'];$caVentes=(float)$r['total'];}
+if (isset($_GET['imprimer'])) {
+    $ref = cleanText($_GET['imprimer']);
+    $rows = invoiceRows($conn, $ref);
+    if (!$rows) die('Facture introuvable.');
+    $meta = parseMeta($rows[0]['description']);
+    $total = 0;
+    foreach ($rows as $r) $total += (float)$r['quantite'] * (float)$r['prix'];
+    $paid = (float)($meta['PAYE'] ?? 0);
+    $rest = max(0, $total - $paid);
+    ?>
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?=h($ref)?> — LAMBEMAH GESTION</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#edf3f9;color:#172b40;font:14px Arial,sans-serif}.printbar{max-width:900px;margin:14px auto;background:#fff;border:1px solid #dbe5ef;border-radius:12px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px}.printbar button{border:0;border-radius:8px;padding:10px 14px;background:#1675e8;color:#fff;font-weight:700;cursor:pointer}.paper{max-width:900px;margin:12px auto 30px;background:#fff;padding:36px;box-shadow:0 6px 22px #17324a12}.head{display:flex;justify-content:space-between;gap:24px;border-bottom:2px solid #1675e8;padding-bottom:16px}.brandline{display:flex;gap:14px;align-items:center}.brandline img{width:76px;height:76px;object-fit:contain}.brand{font-size:24px;font-weight:900;color:#123b70}.gold{font-size:11px;color:#b77905;font-weight:800;letter-spacing:1.2px}.contact{font-size:11px;line-height:1.6;color:#64748b;margin-top:4px}.factbox{background:#edf6ff;border-left:4px solid #1675e8;border-radius:10px;padding:12px 15px;min-width:210px}.factbox b{font-size:21px;color:#123b70}.info{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:18px 0}.box{border:1px solid #dbe5ef;border-radius:10px;padding:12px}.table{width:100%;border-collapse:collapse;border:1px solid #dbe5ef}.table th,.table td{padding:10px;border-bottom:1px solid #e6edf3}.table th{background:#f2f6fa;text-transform:uppercase;color:#5b7083;font-size:11px;text-align:left}.num{text-align:right}.totals{max-width:360px;margin:18px 0 0 auto}.row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #e5edf3}.grand{font-size:17px;font-weight:900;border-top:2px solid #17324a;border-bottom:0}.signature{margin-top:58px;display:flex;justify-content:flex-end}.sigbox{width:220px;text-align:center}.space{height:92px;display:flex;align-items:center;justify-content:center}.space img{max-width:180px;max-height:82px;object-fit:contain}.sigline{border-top:1px solid #40556a;padding-top:7px;font-weight:700}.hidden{display:none!important}@media print{body{background:#fff}.printbar{display:none}.paper{margin:0;max-width:none;box-shadow:none;padding:15mm}}@media(max-width:650px){.paper{margin:8px;padding:18px}.head{display:block}.factbox{margin-top:14px}.info{grid-template-columns:1fr}.table{font-size:11px}}
+</style></head><body>
+<div class="printbar"><label><input type="checkbox" id="addSignature"> Ajouter la signature</label><button onclick="window.print()">🖨️ Imprimer / PDF</button></div>
+<div class="paper"><div class="head"><div class="brandline"><img src="/assets/logo.png" alt="LAMBEMAH" onerror="this.style.display='none'"><div><div class="brand">LAMBEMAH GESTION</div><div class="gold">GESTION • ACHATS</div><div class="contact">+224 611 752 767 / 622 595 362<br>konatelambetenin@gmail.com<br>KM 36, Guinée</div></div></div><div class="factbox"><b>FACTURE D'ACHAT</b><br>N° <?=h($ref)?><br><small><?=h(date('d/m/Y H:i',strtotime($rows[0]['date_mouvement']??'now')))?></small></div></div>
+<div class="info"><div class="box"><b>Fournisseur</b><br><?=h($meta['FOURNISSEUR']??'—')?></div><div class="box"><b>Paiement</b><br><?=money($paid)?> payé — <?=money($rest)?> restant</div></div>
+<table class="table"><thead><tr><th>Désignation</th><th>Catégorie</th><th class="num">Qté</th><th class="num">Prix achat</th><th class="num">Montant</th></tr></thead><tbody><?php foreach($rows as $r): $m=(float)$r['quantite']*(float)$r['prix']; ?><tr><td><?=h($r['nom']??'Article')?></td><td><?=h($r['categorie']??'')?></td><td class="num"><?=h($r['quantite'])?></td><td class="num"><?=money($r['prix'])?></td><td class="num"><?=money($m)?></td></tr><?php endforeach; ?></tbody></table>
+<div class="totals"><div class="row"><span>Total</span><b><?=money($total)?></b></div><div class="row"><span>Déjà payé</span><b><?=money($paid)?></b></div><div class="row grand"><span>Reste fournisseur</span><b><?=money($rest)?></b></div></div>
+<div class="signature"><div class="sigbox"><div class="space"><img id="signatureImg" class="hidden" src="/assets/signature.png" alt="Signature"></div><div class="sigline">Responsable</div></div></div></div>
+<script>const c=document.getElementById('addSignature'),img=document.getElementById('signatureImg');c.addEventListener('change',()=>img.classList.toggle('hidden',!c.checked));</script></body></html>
+<?php exit; }
 
-$caPrestations = 0; $nbPrestations = 0;
-$q = $conn->query("SELECT COUNT(*) n, COALESCE(SUM(montant),0) total FROM recettes WHERE libelle LIKE 'Prestation DTF%'");
-if($q){$r=$q->fetch_assoc();$nbPrestations=(int)$r['n'];$caPrestations=(float)$r['total'];}
+/* =========================
+   POST
+   ========================= */
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    try {
+        $action = $_POST['action'] ?? '';
 
-$recettesManuelles = 0;
-$q = $conn->query("SELECT COALESCE(SUM(montant),0) total FROM recettes WHERE libelle NOT LIKE 'Prestation DTF%'");
-if($q){$recettesManuelles=(float)$q->fetch_assoc()['total'];}
+        /* ---------- PRODUIT ---------- */
+        if ($action === 'create_product' || $action === 'update_product') {
+            $id = (int)($_POST['id'] ?? 0);
+            $nom = cleanText($_POST['nom'] ?? '');
+            $categorie = cleanText($_POST['categorie'] ?? '');
+            $prixAchat = (float)($_POST['prix_achat'] ?? 0);
+            $prixVente = (float)($_POST['prix_vente'] ?? 0);
+            $stock = max(0, (int)($_POST['stock'] ?? 0));
+            if ($nom === '') throw new Exception('Le nom du produit est obligatoire.');
+            if ($prixAchat < 0 || $prixVente < 0) throw new Exception('Les prix ne peuvent pas être négatifs.');
 
-$depenses = 0;
-$q = $conn->query("SELECT COALESCE(SUM(montant),0) total FROM depenses");
-if($q){$depenses=(float)$q->fetch_assoc()['total'];}
+            if ($action === 'create_product') {
+                $conn->begin_transaction();
+                try {
+                    $pid = nextId($conn, 'produits');
+                    $st = $conn->prepare('INSERT INTO produits (id, nom, categorie, prix_achat, prix_vente, stock) VALUES (?,?,?,?,?,?)');
+                    if (!$st) throw new Exception($conn->error);
+                    $st->bind_param('issddi', $pid, $nom, $categorie, $prixAchat, $prixVente, $stock);
+                    if (!$st->execute()) { $e=$st->error; $st->close(); throw new Exception($e); }
+                    $st->close();
+                    if ($stock > 0) {
+                        $mid = nextId($conn, 'mouvements');
+                        $desc = 'PRODUIT_INIT=1|ARTICLE=' . $nom;
+                        $date = date('Y-m-d H:i:s');
+                        $st = $conn->prepare("INSERT INTO mouvements (id, produit_id, type, quantite, prix, description, date_mouvement) VALUES (?,?, 'ENTREE',?,?,?,?)");
+                        if (!$st) throw new Exception($conn->error);
+                        $st->bind_param('iiidss', $mid, $pid, $stock, $prixAchat, $desc, $date);
+                        if (!$st->execute()) { $e=$st->error; $st->close(); throw new Exception($e); }
+                        $st->close();
+                    }
+                    $conn->commit();
+                } catch (Throwable $e) { $conn->rollback(); throw $e; }
+                flash('ok','Produit ajouté avec succès.');
+                header('Location: produits.php'); exit;
+            }
 
-$cogs = 0;
-$q = $conn->query("SELECT v.quantite, p.prix_achat FROM ventes v LEFT JOIN produits p ON p.id=v.produit_id");
-if($q){while($r=$q->fetch_assoc()){$cogs += (float)$r['quantite']*(float)($r['prix_achat']??0);}}
+            $st = $conn->prepare('UPDATE produits SET nom=?, categorie=?, prix_achat=?, prix_vente=? WHERE id=?');
+            if (!$st) throw new Exception($conn->error);
+            $st->bind_param('ssddi', $nom, $categorie, $prixAchat, $prixVente, $id);
+            if (!$st->execute()) { $e=$st->error; $st->close(); throw new Exception($e); }
+            $st->close();
+            flash('ok','Produit modifié.');
+            header('Location: produits.php'); exit;
+        }
 
-$caTotal = $caVentes + $caPrestations + $recettesManuelles;
-$benefice = $caTotal - $cogs - $depenses;
+        /* ---------- ACHAT ---------- */
+        if ($action === 'save_purchase') {
+            $editRef = cleanText($_POST['edit_ref'] ?? '');
+            $fourn = cleanText($_POST['fournisseur'] ?? '');
+            $ids = $_POST['produit_id'] ?? [];
+            $qtys = $_POST['quantite'] ?? [];
+            $prices = $_POST['prix'] ?? [];
+            if ($fourn === '') throw new Exception('Veuillez renseigner le fournisseur.');
+            $lines=[];
+            for($i=0;$i<count($ids);$i++){
+                $pid=(int)($ids[$i]??0); $q=(int)($qtys[$i]??0); $p=(float)($prices[$i]??0);
+                if($pid>0 && $q>0 && $p>=0) $lines[]=['pid'=>$pid,'q'=>$q,'p'=>$p];
+            }
+            if (!$lines) throw new Exception('Ajoutez au moins un article.');
 
-$stockQte = 0; $stockValeur = 0; $faible = 0; $rupture = 0;
-$q = $conn->query("SELECT stock, prix_achat FROM produits");
-if($q){while($r=$q->fetch_assoc()){
-    $s=(int)$r['stock']; $stockQte += $s; $stockValeur += $s*(float)$r['prix_achat'];
-    if($s<=0)$rupture++; elseif($s<=5)$faible++;
-}}
+            $old=[]; $oldPaid=0; $ref=$editRef;
+            if($editRef!==''){
+                $old=invoiceRows($conn,$editRef);
+                if(!$old) throw new Exception('Facture à modifier introuvable.');
+                $om=parseMeta($old[0]['description']);
+                $oldPaid=(float)($om['PAYE']??0);
+                $newTotal=0; foreach($lines as $l) $newTotal += $l['q']*$l['p'];
+                if($oldPaid>0 && $newTotal+0.01<$oldPaid) throw new Exception('Le nouveau total ne peut pas être inférieur au montant déjà payé : '.money($oldPaid).'.');
+                if($oldPaid>0 && $oldPaid > 0.01 && count($old) > 0) {
+                    // Modification autorisée tant que la facture n'est pas totalement payée.
+                    $oldTotal=0; foreach($old as $r) $oldTotal += (float)$r['quantite']*(float)$r['prix'];
+                    if($oldTotal - $oldPaid <= 0.01) throw new Exception('Cette facture est totalement payée et verrouillée.');
+                }
+            } else {
+                $ref=purchaseRef($conn);
+            }
 
-$recentSales=[];
-$q=$conn->query("SELECT v.id,v.quantite,v.montant,v.date_vente,p.nom FROM ventes v LEFT JOIN produits p ON p.id=v.produit_id ORDER BY v.id DESC LIMIT 6");
-if($q){while($r=$q->fetch_assoc())$recentSales[]=$r;}
+            $newTotal=0; foreach($lines as $l) $newTotal += $l['q']*$l['p'];
+            $newRest=max(0,$newTotal-$oldPaid);
 
-$recentPrestations=[];
-$q=$conn->query("SELECT id,libelle,montant,date_recette,description FROM recettes WHERE libelle LIKE 'Prestation DTF%' ORDER BY id DESC LIMIT 6");
-if($q){while($r=$q->fetch_assoc())$recentPrestations[]=$r;}
+            $conn->begin_transaction();
+            try{
+                if($old){
+                    restorePurchaseStock($conn,$old);
+                    deletePurchaseRows($conn,$editRef);
+                }
 
-$userName = $_SESSION['nom'] ?? $_SESSION['username'] ?? 'Utilisateur';
-$role = $_SESSION['role'] ?? 'admin';
+                foreach($lines as $l){
+                    $pid=$l['pid']; $q=$l['q']; $p=$l['p'];
+                    $chk=$conn->query("SELECT id, nom, stock FROM produits WHERE id=$pid LIMIT 1");
+                    if(!$chk || !$chk->num_rows) throw new Exception('Article introuvable.');
+                    $mid=nextId($conn,'mouvements');
+                    $desc='FACTURE='.$ref.'|FOURNISSEUR='.cleanText($fourn).'|PAYE='.$oldPaid.'|RESTE='.$newRest.'|ACHAT';
+                    $date=date('Y-m-d H:i:s');
+                    $st=$conn->prepare("INSERT INTO mouvements (id,produit_id,type,quantite,prix,description,date_mouvement) VALUES (?,?, 'ENTREE',?,?,?,?)");
+                    if(!$st) throw new Exception($conn->error);
+                    $st->bind_param('iiidss',$mid,$pid,$q,$p,$desc,$date);
+                    if(!$st->execute()){ $e=$st->error; $st->close(); throw new Exception($e); }
+                    $st->close();
+                    $st=$conn->prepare('UPDATE produits SET stock=stock+?, prix_achat=? WHERE id=?');
+                    if(!$st) throw new Exception($conn->error);
+                    $st->bind_param('idi',$q,$p,$pid);
+                    if(!$st->execute()){ $e=$st->error; $st->close(); throw new Exception($e); }
+                    $st->close();
+                }
+
+                $conn->commit();
+            } catch(Throwable $e){ $conn->rollback(); throw $e; }
+            flash('ok','Facture '.$ref.' enregistrée.');
+            header('Location: produits.php?facture='.urlencode($ref)); exit;
+        }
+
+        /* ---------- REGLEMENT ---------- */
+        if ($action === 'pay_purchase') {
+            $ref=cleanText($_POST['ref']??'');
+            $montant=(float)($_POST['montant']??0);
+            $rows=invoiceRows($conn,$ref);
+            if(!$rows) throw new Exception('Facture introuvable.');
+            $meta=parseMeta($rows[0]['description']);
+            $total=0; foreach($rows as $r) $total += (float)$r['quantite']*(float)$r['prix'];
+            $old=(float)($meta['PAYE']??0);
+            $rest=max(0,$total-$old);
+            if($rest<=0.01) throw new Exception('Cette facture est déjà totalement payée.');
+            if($montant<=0 || $montant>$rest+0.01) throw new Exception('Montant de règlement invalide.');
+            $new=$old+$montant; $newRest=max(0,$total-$new);
+            $safe=$conn->real_escape_string($ref); $fourn=cleanText($meta['FOURNISSEUR']??'');
+            $desc='FACTURE='.$ref.'|FOURNISSEUR='.$fourn.'|PAYE='.$new.'|RESTE='.$newRest.'|ACHAT';
+            $conn->begin_transaction();
+            try{
+                $safeDesc=$conn->real_escape_string($desc);
+                $q=$conn->query("UPDATE mouvements SET description='$safeDesc' WHERE type='ENTREE' AND (description LIKE '%FACTURE=$safe|%' OR description LIKE '%FACTURE=$safe%' OR description LIKE '%Facture : $safe%')");
+                if(!$q) throw new Exception($conn->error);
+                $conn->commit();
+            } catch(Throwable $e){$conn->rollback();throw $e;}
+            flash('ok','Règlement enregistré.');
+            header('Location: produits.php?facture='.urlencode($ref)); exit;
+        }
+
+        /* ---------- SUPPRESSION ACHAT ---------- */
+        if ($action === 'delete_purchase') {
+            $ref=cleanText($_POST['ref']??'');
+            $rows=invoiceRows($conn,$ref);
+            if(!$rows) throw new Exception('Facture introuvable.');
+            $meta=parseMeta($rows[0]['description']);
+            if((float)($meta['PAYE']??0)>0.01) throw new Exception('Impossible de supprimer une facture déjà payée en partie.');
+            $conn->begin_transaction();
+            try{
+                restorePurchaseStock($conn,$rows);
+                deletePurchaseRows($conn,$ref);
+                $conn->commit();
+            } catch(Throwable $e){$conn->rollback();throw $e;}
+            flash('ok','Facture supprimée.');
+            header('Location: produits.php'); exit;
+        }
+    } catch(Throwable $e){
+        flash('err',$e->getMessage());
+        header('Location: produits.php'); exit;
+    }
+}
+
+/* =========================
+   AFFICHAGE
+   ========================= */
+$flash=$_SESSION['flash']??null; unset($_SESSION['flash']);
+$editRef=cleanText($_GET['modifier']??'');
+$selectedRef=cleanText($_GET['facture']??'');
+$editRows=$editRef?invoiceRows($conn,$editRef):[];
+$detailRows=$selectedRef?invoiceRows($conn,$selectedRef):[];
+$editProductId=(int)($_GET['modifier_produit']??0);
+
+$products=[];
+$q=$conn->query('SELECT id,nom,categorie,prix_achat,prix_vente,stock FROM produits ORDER BY nom ASC');
+while($q&&($r=$q->fetch_assoc())) $products[]=$r;
+
+$editProduct=null;
+if($editProductId){
+    $st=$conn->prepare('SELECT id,nom,categorie,prix_achat,prix_vente,stock FROM produits WHERE id=? LIMIT 1');
+    $st->bind_param('i',$editProductId);$st->execute();$editProduct=$st->get_result()->fetch_assoc();$st->close();
+}
+
+$factures=[];
+$q=$conn->query("SELECT m.*,p.nom FROM mouvements m LEFT JOIN produits p ON p.id=m.produit_id WHERE m.type='ENTREE' ORDER BY m.id DESC");
+while($q&&($r=$q->fetch_assoc())){
+    $m=parseMeta($r['description']);
+    $ref=$m['FACTURE']??('ANCIEN-'.$r['id']);
+    if(!isset($factures[$ref])){
+        $factures[$ref]=['ref'=>$ref,'fournisseur'=>$m['FOURNISSEUR']??'Fournisseur','date'=>$r['date_mouvement']??'','total'=>0,'paye'=>(float)($m['PAYE']??0),'articles'=>0];
+    }
+    $factures[$ref]['total']+=(float)$r['quantite']*(float)$r['prix'];
+    $factures[$ref]['articles']++;
+}
+
+$totalStock=0;$stockValue=0;$low=0;$out=0;
+foreach($products as $p){$totalStock+=(int)$p['stock'];$stockValue+=(int)$p['stock']*(float)$p['prix_achat'];if((int)$p['stock']<=0)$out++;elseif((int)$p['stock']<=5)$low++;}
 ?>
 <!doctype html>
-<html lang="fr">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Tableau de bord — LAMBEMAH GESTION</title>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Achats & Fournisseurs — LAMBEMAH</title>
 <style>
-:root{--navy:#07253f;--navy2:#0d3556;--blue:#1976e8;--blue2:#eaf3ff;--green:#0aa36f;--orange:#eaa626;--red:#dd4d4d;--text:#1e3042;--muted:#718092;--line:#dfe7ee;--bg:#f4f8fc}
-*{box-sizing:border-box}html,body{margin:0;font-family:Inter,Arial,sans-serif;background:var(--bg);color:var(--text)}a{text-decoration:none;color:inherit}
-.app{min-height:100vh;display:flex}.side{width:220px;position:fixed;inset:0 auto 0 0;background:linear-gradient(180deg,var(--navy),#0a2f4d);color:#fff;padding:20px 12px;overflow:auto}.brand{display:flex;align-items:center;gap:10px;padding:2px 8px 20px;border-bottom:1px solid rgba(255,255,255,.10)}.brand img{width:38px;height:38px;object-fit:contain}.brand b{display:block;font-size:16px;letter-spacing:.4px}.brand small{color:#bcd1e4;font-size:10px}.nav{padding-top:12px}.nav a{display:flex;align-items:center;gap:10px;padding:10px 11px;border-radius:10px;margin:4px 0;color:#dce9f5;font-size:12px}.nav a:hover,.nav a.active{background:var(--blue);color:#fff}.userBox{margin-top:18px;padding:11px;border-radius:10px;background:rgba(255,255,255,.07);font-size:10px;color:#c8d8e7}.logout{margin-top:10px!important;background:rgba(255,255,255,.06)}
-.main{margin-left:220px;width:calc(100% - 220px);padding:22px 24px 30px;min-width:0}.top{display:flex;align-items:flex-start;justify-content:space-between;gap:15px;margin-bottom:18px}.top h1{margin:0;font-size:22px;color:var(--navy)}.top p{margin:5px 0 0;font-size:11px;color:var(--muted)}.topUser{font-size:10px;background:#fff;border:1px solid var(--line);padding:8px 10px;border-radius:9px;color:#536579}
-.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.kpi{background:#fff;border:1px solid var(--line);border-radius:12px;padding:13px 14px;min-height:94px}.kpi .t{font-size:10px;color:var(--muted)}.kpi .v{font-size:18px;font-weight:800;margin-top:6px;color:#183651}.kpi.blue{border-left:4px solid var(--blue)}.kpi.green{border-left:4px solid var(--green)}.kpi.orange{border-left:4px solid var(--orange)}.kpi.red{border-left:4px solid var(--red)}
-.smallgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}.pill{background:#fff;border:1px solid var(--line);border-radius:10px;padding:9px 10px;font-size:10px}.pill b{font-size:12px;margin-left:5px}.contentGrid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.panel{background:#fff;border:1px solid var(--line);border-radius:13px;padding:14px}.panelHead{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:10px}.panel h2{font-size:14px;margin:0;color:var(--navy)}.linkBtn{font-size:10px;background:#eef4fb;padding:7px 9px;border-radius:8px;color:#31526e;font-weight:700}.quick{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.quick a{background:#f7fbff;border:1px solid #dbe7f2;border-radius:10px;padding:11px 6px;text-align:center;font-size:10px;font-weight:800;color:#224563}.quick span{display:block;font-size:18px;margin-bottom:4px}.tablewrap{overflow:auto}.table{width:100%;border-collapse:collapse;font-size:10px}.table th,.table td{padding:8px 7px;border-bottom:1px solid #edf1f5;text-align:left;white-space:nowrap}.table th{background:#f7fafc;color:#6c7d8c;font-size:9px;text-transform:uppercase}.amount{text-align:right;font-weight:800}.empty{padding:14px;text-align:center;color:#8a98a5;font-size:10px}.mobileBar{display:none}
-@media(max-width:1050px){.side{width:190px}.main{margin-left:190px;width:calc(100% - 190px)}.kpis{grid-template-columns:repeat(2,1fr)}.smallgrid{grid-template-columns:repeat(2,1fr)}.quick{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:700px){.side{width:58px;padding:10px 5px}.brand{padding:5px 3px 14px;justify-content:center}.brand img{width:34px;height:34px}.brand div{display:none}.nav a{justify-content:center;padding:10px 4px;font-size:17px}.nav a span,.userBox{display:none}.logout{margin-top:8px!important}.main{margin-left:58px;width:calc(100% - 58px);padding:10px}.top{margin-bottom:10px}.top h1{font-size:17px}.top p{font-size:9px}.topUser{display:none}.kpis{grid-template-columns:1fr 1fr;gap:6px}.kpi{min-height:76px;padding:9px 10px;border-radius:10px}.kpi .t{font-size:9px}.kpi .v{font-size:13px}.smallgrid{grid-template-columns:1fr 1fr;gap:5px;margin-top:6px}.pill{padding:7px 7px;font-size:8.5px;border-radius:8px}.pill b{font-size:10px}.contentGrid{grid-template-columns:1fr;gap:8px;margin-top:8px}.panel{padding:10px;border-radius:10px}.panel h2{font-size:12px}.linkBtn{font-size:8.5px;padding:6px 7px}.quick{gap:5px}.quick a{font-size:9px;padding:8px 4px}.quick span{font-size:16px}.table{font-size:9px}.table th,.table td{padding:6px 5px}}
-</style>
-</head>
-<body>
-<div class="app">
-<aside class="side">
-  <div class="brand">
-    <img src="/assets/logo.png" alt="LAMBEMAH" onerror="this.style.display='none'">
-    <div><b>LAMBEMAH</b><small>GESTION • PRESTATION</small></div>
-  </div>
-  <nav class="nav">
-    <a class="active" href="index.php">🏠 <span>Tableau de bord</span></a>
-    <a href="produits.php">📦 <span>Achats / Produits</span></a>
-    <a href="ventes.php">💰 <span>Ventes / Clients</span></a>
-    <a href="prestations.php">🖨️ <span>Prestations</span></a>
-    <a href="recettes.php">💵 <span>Recettes</span></a>
-    <a href="depenses.php">💸 <span>Dépenses</span></a>
-    <a href="statistiques.php">📊 <span>Statistiques</span></a>
-    <a href="utilisateurs.php">👥 <span>Équipe</span></a>
-    <a class="logout" href="?logout=1">🚪 <span>Déconnexion</span></a>
-  </nav>
-  <div class="userBox">Connecté : <b><?=h($userName)?></b><br><?=h($role)?></div>
-</aside>
-
+:root{--navy:#092a46;--blue:#1976e8;--soft:#eef5fc;--line:#d9e4ee;--green:#0b9f6d;--red:#dc3f3f;--text:#17324a}*{box-sizing:border-box}body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#f3f7fb;color:var(--text)}a{text-decoration:none;color:inherit}.layout{display:flex;min-height:100vh}.side{width:270px;position:fixed;inset:0 auto 0 0;background:linear-gradient(180deg,#103b5f,#082a45);color:#fff;padding:28px 20px;overflow:auto}.brand{font-size:28px;font-weight:900}.sub{color:#d6e7f5;margin-top:6px}.nav{margin-top:40px}.nav a{display:block;padding:12px 15px;border-radius:12px;margin:6px 0;font-size:16px}.nav a:hover,.nav a.active{background:#236ce5}.main{margin-left:270px;width:calc(100% - 270px);padding:30px;max-width:1700px}.head{display:flex;justify-content:space-between;gap:15px;align-items:flex-start}.head h1{margin:0;font-size:30px}.head p{margin:6px 0;color:#708296}.btn{border:0;border-radius:9px;padding:11px 14px;background:var(--blue);color:#fff;font-weight:800;cursor:pointer;display:inline-block}.btn.secondary{background:#e7eff8;color:var(--navy)}.btn.green{background:var(--green)}.btn.danger{background:#fee2e2;color:#9a1e1e}.flash{margin-top:16px;padding:12px 14px;border-radius:10px}.ok{background:#dcfce7;color:#166534}.err{background:#fee2e2;color:#991b1b}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:20px}.stat{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px}.stat small{color:#6d8091}.stat b{display:block;font-size:22px;margin-top:6px}.card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:20px;margin-top:18px;box-shadow:0 6px 20px #1234510a}.sectionTitle{display:flex;justify-content:space-between;align-items:center;gap:10px}.sectionTitle h2{margin:0;font-size:20px}.formgrid{display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr;gap:10px}.field label{display:block;font-size:12px;font-weight:800;margin-bottom:6px}.field input,.field select{width:100%;padding:12px;border:1px solid #cbd8e4;border-radius:9px;background:#fff;font-size:14px;min-height:44px}.wide{grid-column:span 2}.productForm{display:grid;grid-template-columns:1.3fr 1fr 1fr 1fr .9fr auto;gap:10px;align-items:end}.purchaseLine{display:grid;grid-template-columns:2fr .8fr 1fr .9fr auto;gap:8px;align-items:end;margin-bottom:9px}.lineTotal{background:#f7fafc}.totalbox{display:flex;justify-content:flex-end;font-size:22px;font-weight:900;margin-top:12px}.actions{display:flex;gap:7px;flex-wrap:wrap}.tablewrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:800px}th,td{padding:12px 10px;border-bottom:1px solid var(--line);text-align:left}th{background:#f3f7fb;color:#5e7184;font-size:11px;text-transform:uppercase}.money{font-weight:800}.tag{padding:6px 9px;border-radius:999px;font-size:11px;font-weight:800}.paid{background:#dcfce7;color:#166534}.partial{background:#fff7ed;color:#9a3412}.unpaid{background:#fee2e2;color:#991b1b}.mobile{display:none}.helper{color:#738497;font-size:11px;margin-top:8px}.twoCols{display:grid;grid-template-columns:1fr 1.55fr;gap:18px}.paybox{background:#eef6ff;border:1px solid #d5e5f5;border-radius:12px;padding:16px;margin-top:16px}.paygrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.paygrid small{color:#6b7e8f}.paygrid b{font-size:18px}.prodCard{background:#f9fbfd;border:1px solid #e1e9f0;border-radius:12px;padding:14px}.prodCard h3{margin:0 0 10px;font-size:16px}.empty{padding:20px;text-align:center;color:#708296}@media(max-width:1050px){.side{width:220px}.main{margin-left:220px;width:calc(100% - 220px);padding:22px}.stats{grid-template-columns:repeat(2,1fr)}.twoCols{grid-template-columns:1fr}.productForm{grid-template-columns:1.4fr 1fr 1fr 1fr 1fr auto}}@media(max-width:800px){.side{display:none}.main{margin:0;width:100%;padding:14px}.mobile{display:block}.head{display:block}.head .btn{margin-top:10px}.stats{grid-template-columns:1fr 1fr;gap:8px}.stat{padding:11px}.stat b{font-size:16px}.productForm{grid-template-columns:1fr 1fr}.purchaseLine{grid-template-columns:1fr 1fr}.purchaseLine .wide{grid-column:1/-1}.formgrid{grid-template-columns:1fr}.wide{grid-column:auto}.card{padding:14px}.paygrid{grid-template-columns:1fr 1fr}.actions .btn{flex:1;text-align:center}.tablewrap{margin:0 -2px}table{min-width:760px}}@media(max-width:450px){.stats{grid-template-columns:1fr}.productForm{grid-template-columns:1fr}.purchaseLine{grid-template-columns:1fr 1fr}.purchaseLine button{grid-column:1/-1}.head h1{font-size:22px}.sectionTitle{display:block}.sectionTitle .actions{margin-top:10px}}
+</style></head>
+<body><div class="layout">
+<aside class="side"><div class="brand">LAMBEMAH</div><div class="sub">GESTION • PRESTATION</div><nav class="nav"><a href="index.php">Accueil</a><a class="active" href="produits.php">Achats / Fournisseurs</a><a href="ventes.php">Ventes / Clients</a><a href="prestations.php">Prestations</a><a href="recettes.php">Recettes</a><a href="depenses.php">Dépenses</a><a href="statistiques.php">Statistiques</a><a href="utilisateurs.php">Équipe</a><a href="index.php?logout=1">Déconnexion</a></nav></aside>
 <main class="main">
-  <div class="top">
-    <div><h1>📊 Tableau de bord</h1><p>Vue rapide de l’activité de LAMBEMAH GESTION.</p></div>
-    <div class="topUser">👤 <?=h($userName)?> · <?=h($role)?></div>
-  </div>
+<div class="mobile"><a class="btn secondary" href="index.php">☰ Menu</a></div>
+<div class="head"><div><h1>📦 Achats & Fournisseurs</h1><p>Produits, achats, stock et règlements.</p></div><div class="actions"><a class="btn" href="?nouvel_achat=1">＋ Nouvelle facture d’achat</a><a class="btn secondary" href="#nouveauProduit">＋ Nouveau produit</a></div></div>
+<?php if($flash): ?><div class="flash <?=h($flash['type'])?>"><?=h($flash['msg'])?></div><?php endif; ?>
+<div class="stats"><div class="stat"><small>Factures d’achat</small><b><?=count($factures)?></b></div><div class="stat"><small>Articles en stock</small><b><?=number_format($totalStock,0,',',' ')?></b></div><div class="stat"><small>Valeur du stock</small><b><?=money($stockValue)?></b></div><div class="stat"><small>Alertes</small><b><?=$low?> faible · <?=$out?> rupture</b></div></div>
 
-  <div class="kpis">
-    <div class="kpi blue"><div class="t">Chiffre d’affaires total</div><div class="v"><?=money($caTotal)?></div></div>
-    <div class="kpi green"><div class="t">Ventes</div><div class="v"><?=money($caVentes)?></div></div>
-    <div class="kpi orange"><div class="t">Prestations DTF</div><div class="v"><?=money($caPrestations)?></div></div>
-    <div class="kpi red"><div class="t">Dépenses</div><div class="v"><?=money($depenses)?></div></div>
-  </div>
-
-  <div class="smallgrid">
-    <div class="pill">💼 Bénéfice estimé <b><?=money($benefice)?></b></div>
-    <div class="pill">📦 Stock <b><?=number_format($stockQte,0,',',' ')?></b></div>
-    <div class="pill">💰 Valeur stock <b><?=money($stockValeur)?></b></div>
-    <div class="pill">⚠️ Stock faible <b><?=$faible?></b> · ⛔ Ruptures <b><?=$rupture?></b></div>
-  </div>
-
-  <section class="panel" style="margin-top:12px">
-    <div class="panelHead"><h2>⚡ Accès rapide</h2></div>
-    <div class="quick">
-      <a href="ventes.php?nouvelle_vente=1"><span>💰</span>Nouvelle vente</a>
-      <a href="prestations.php"><span>🖨️</span>Nouvelle prestation</a>
-      <a href="produits.php?nouvel_achat=1"><span>📦</span>Nouvel achat</a>
-      <a href="statistiques.php"><span>📊</span>Statistiques</a>
-    </div>
-  </section>
-
-  <div class="contentGrid">
-    <section class="panel">
-      <div class="panelHead"><h2>🧾 Dernières ventes</h2><a class="linkBtn" href="ventes.php">Tout voir</a></div>
-      <div class="tablewrap">
-        <table class="table">
-          <thead><tr><th>Article</th><th>Qté</th><th>Montant</th><th>Date</th></tr></thead>
-          <tbody>
-          <?php if($recentSales): foreach($recentSales as $r): ?>
-            <tr><td><?=h($r['nom'] ?? 'Article')?></td><td><?=h($r['quantite'])?></td><td class="amount"><?=money($r['montant'])?></td><td><?=h(substr((string)$r['date_vente'],0,10))?></td></tr>
-          <?php endforeach; else: ?><tr><td class="empty" colspan="4">Aucune vente.</td></tr><?php endif; ?>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panelHead"><h2>🖨️ Dernières prestations</h2><a class="linkBtn" href="prestations.php">Tout voir</a></div>
-      <div class="tablewrap">
-        <table class="table">
-          <thead><tr><th>Client</th><th>Montant</th><th>Date</th></tr></thead>
-          <tbody>
-          <?php if($recentPrestations): foreach($recentPrestations as $r): $client=preg_replace('/^Prestation DTF\s*-\s*/i','',$r['libelle']); ?>
-            <tr><td><?=h($client)?></td><td class="amount"><?=money($r['montant'])?></td><td><?=h(substr((string)$r['date_recette'],0,10))?></td></tr>
-          <?php endforeach; else: ?><tr><td class="empty" colspan="3">Aucune prestation.</td></tr><?php endif; ?>
-          </tbody>
-        </table>
-      </div>
-    </section>
-  </div>
-
-  <section class="panel" style="margin-top:12px">
-    <div class="panelHead"><h2>🧭 Modules</h2></div>
-    <div class="quick">
-      <a href="produits.php"><span>📦</span>Achats / Stock</a>
-      <a href="ventes.php"><span>💰</span>Ventes</a>
-      <a href="prestations.php"><span>🖨️</span>Prestations</a>
-      <a href="depenses.php"><span>💸</span>Dépenses</a>
-    </div>
-  </section>
-</main>
+<div class="twoCols">
+<section class="card" id="nouveauProduit">
+<div class="sectionTitle"><h2><?=$editProduct?'✏️ Modifier le produit':'＋ Nouveau produit'?></h2><?php if($editProduct): ?><a class="btn secondary" href="produits.php#nouveauProduit">Annuler</a><?php endif; ?></div>
+<p class="helper">Ajoute ici un nouvel article avant de créer une facture d’achat.</p>
+<form method="post" style="margin-top:14px">
+<input type="hidden" name="action" value="<?=$editProduct?'update_product':'create_product'?>"><?php if($editProduct): ?><input type="hidden" name="id" value="<?=$editProduct['id']?>"><?php endif; ?>
+<div class="field"><label>Nom du produit</label><input name="nom" required value="<?=h($editProduct['nom']??'')?>" placeholder="Ex. T-shirt enfant"></div>
+<div class="field" style="margin-top:10px"><label>Catégorie</label><input name="categorie" value="<?=h($editProduct['categorie']??'')?>" placeholder="Ex. T-shirt, Pull, Képi..."></div>
+<div class="productForm" style="margin-top:10px">
+<div class="field"><label>Prix d’achat</label><input type="number" min="0" step="1" name="prix_achat" value="<?=h($editProduct['prix_achat']??'')?>" required></div>
+<div class="field"><label>Prix de vente</label><input type="number" min="0" step="1" name="prix_vente" value="<?=h($editProduct['prix_vente']??'')?>" required></div>
+<div class="field"><label>Stock initial</label><input type="number" min="0" step="1" name="stock" value="<?=h($editProduct['stock']??0)?>"></div>
+<div></div><div></div>
 </div>
-</body>
-</html>
+<div class="actions" style="margin-top:12px"><button class="btn green" type="submit"><?=$editProduct?'Enregistrer les modifications':'Ajouter le produit'?></button></div>
+</form>
+</section>
+
+<section class="card">
+<div class="sectionTitle"><h2>📋 Produits & stock</h2></div>
+<div class="tablewrap" style="margin-top:12px"><table><thead><tr><th>Produit</th><th>Catégorie</th><th>Prix achat</th><th>Prix vente</th><th>Stock</th><th></th></tr></thead><tbody>
+<?php foreach($products as $p): ?><tr><td><b><?=h($p['nom'])?></b></td><td><?=h($p['categorie']?:'—')?></td><td class="money"><?=money($p['prix_achat'])?></td><td class="money"><?=money($p['prix_vente'])?></td><td><span class="tag <?=((int)$p['stock']<=0?'unpaid':((int)$p['stock']<=5?'partial':'paid'))?>"><?=number_format((int)$p['stock'],0,',',' ')?></span></td><td><a class="btn secondary" href="?modifier_produit=<?=$p['id']?>#nouveauProduit">Modifier</a></td></tr><?php endforeach; ?>
+<?php if(!$products): ?><tr><td colspan="6" class="empty">Aucun produit.</td></tr><?php endif; ?></tbody></table></div>
+</section>
+</div>
+
+<?php if(isset($_GET['nouvel_achat']) || $editRows): ?>
+<section class="card">
+<div class="sectionTitle"><h2><?=$editRows?'✏️ Modifier la facture '.$editRef:'＋ Nouvelle facture d’achat'?></h2></div>
+<form method="post"><input type="hidden" name="action" value="save_purchase"><input type="hidden" name="edit_ref" value="<?=h($editRef)?>">
+<div class="formgrid" style="margin-top:14px"><div class="field"><label>Fournisseur</label><input name="fournisseur" required value="<?=h($editRows?(parseMeta($editRows[0]['description'])['FOURNISSEUR']??''):'')?>" placeholder="Nom du fournisseur"></div><div class="field"><label>Référence</label><input readonly value="<?=h($editRef?:'Automatique')?>"></div></div>
+<h3>Articles</h3><div id="purchaseLines">
+<?php $base=$editRows?:[['produit_id'=>'','quantite'=>1,'prix'=>'']]; foreach($base as $r): ?><div class="purchaseLine"><div class="field wide"><label>Article</label><select name="produit_id[]" required><option value="">Choisir</option><?php foreach($products as $p): ?><option value="<?=$p['id']?>" <?=((int)$p['id']===(int)($r['produit_id']??0))?'selected':''?>><?=h($p['nom'])?> — stock <?=$p['stock']?></option><?php endforeach; ?></select></div><div class="field"><label>Quantité</label><input type="number" min="1" name="quantite[]" value="<?=h($r['quantite']??1)?>" required></div><div class="field"><label>Prix achat</label><input type="number" min="0" name="prix[]" value="<?=h($r['prix']??'')?>" required></div><div class="field"><label>Montant</label><input readonly class="lineTotal" value="0 FG"></div><button class="btn danger" type="button" onclick="this.parentElement.remove();calcPurchase()">×</button></div><?php endforeach; ?></div>
+<div class="actions"><button class="btn secondary" type="button" onclick="addPurchaseLine()">＋ Ajouter une ligne</button></div><div class="totalbox">Total : <span id="purchaseGrand">0 FG</span></div><div style="margin-top:12px" class="actions"><button class="btn green" type="submit">💾 Enregistrer la facture</button><a class="btn secondary" href="produits.php">Annuler</a></div></form>
+</section>
+<?php endif; ?>
+
+<?php if($detailRows): $meta=parseMeta($detailRows[0]['description']); $total=0; foreach($detailRows as $r)$total+=(float)$r['quantite']*(float)$r['prix']; $paid=(float)($meta['PAYE']??0); $rest=max(0,$total-$paid); $status=$rest<=0.01?'Payée':($paid>0?'Partiellement payée':'Non payée'); ?>
+<section class="card"><div class="sectionTitle"><h2>📄 Facture <?=h($selectedRef)?></h2><div class="actions"><a class="btn secondary" target="_blank" href="?imprimer=<?=urlencode($selectedRef)?>">🖨️ Imprimer / PDF</a><?php if($rest>0.01): ?><a class="btn secondary" href="?modifier=<?=urlencode($selectedRef)?>">✏️ Modifier</a><?php endif; ?><?php if($paid<=0.01): ?><form method="post" onsubmit="return confirm('Supprimer toute cette facture ?')"><input type="hidden" name="action" value="delete_purchase"><input type="hidden" name="ref" value="<?=h($selectedRef)?>"><button class="btn danger">🗑️ Supprimer</button></form><?php endif; ?></div></div><p><b>Fournisseur :</b> <?=h($meta['FOURNISSEUR']??'—')?></p>
+<div class="tablewrap"><table><thead><tr><th>Désignation</th><th>Qté</th><th>Prix achat</th><th>Montant</th></tr></thead><tbody><?php foreach($detailRows as $r): ?><tr><td><?=h($r['nom']??'Article')?></td><td><?=h($r['quantite'])?></td><td><?=money($r['prix'])?></td><td class="money"><?=money((float)$r['quantite']*(float)$r['prix'])?></td></tr><?php endforeach; ?></tbody></table></div><div class="paybox"><div class="paygrid"><div><small>Total</small><br><b><?=money($total)?></b></div><div><small>Déjà payé</small><br><b><?=money($paid)?></b></div><div><small>Reste</small><br><b><?=money($rest)?></b></div></div><p><span class="tag <?=$rest<=0.01?'paid':($paid>0?'partial':'unpaid')?>"><?=h($status)?></span></p><?php if($rest>0.01): ?><form method="post" class="formgrid"><input type="hidden" name="action" value="pay_purchase"><input type="hidden" name="ref" value="<?=h($selectedRef)?>"><div class="field"><label>Montant à régler</label><input type="number" min="1" max="<?=h($rest)?>" step="1" name="montant" required></div><div><button class="btn green" type="submit">💰 Enregistrer le règlement</button></div></form><?php endif; ?></div></section>
+<?php endif; ?>
+
+<section class="card"><div class="sectionTitle"><h2>🧾 Achats / fournisseurs</h2><span class="helper">Toutes les factures non totalement payées restent modifiables.</span></div><div class="tablewrap" style="margin-top:10px"><table><thead><tr><th>Fournisseur</th><th>Facture</th><th>Date</th><th>Articles</th><th>Total</th><th>Payé</th><th>Reste</th><th>Statut</th><th></th></tr></thead><tbody><?php foreach($factures as $f): $rest=max(0,$f['total']-$f['paye']); $st=$rest<=0.01?'Payée':($f['paye']>0?'Partiellement payée':'Non payée'); ?><tr><td><b><?=h($f['fournisseur'])?></b></td><td><?=h($f['ref'])?></td><td><?=h($f['date']?date('d/m/Y',strtotime($f['date'])):'—')?></td><td><?=h($f['articles'])?></td><td class="money"><?=money($f['total'])?></td><td><?=money($f['paye'])?></td><td><?=money($rest)?></td><td><span class="tag <?=$rest<=0.01?'paid':($f['paye']>0?'partial':'unpaid')?>"><?=h($st)?></span></td><td><a class="btn" href="?facture=<?=urlencode($f['ref'])?>">Ouvrir</a></td></tr><?php endforeach; ?><?php if(!$factures): ?><tr><td colspan="9" class="empty">Aucune facture d’achat pour le moment.</td></tr><?php endif; ?></tbody></table></div></section>
+
+</main></div>
+<script>
+function moneyJS(n){return new Intl.NumberFormat('fr-FR').format(Math.round(n))+' FG';}
+function calcPurchase(){let t=0;document.querySelectorAll('#purchaseLines .purchaseLine').forEach(l=>{let q=parseFloat(l.querySelector('[name="quantite[]"]')?.value||0),p=parseFloat(l.querySelector('[name="prix[]"]')?.value||0),m=q*p;t+=m;let out=l.querySelector('.lineTotal');if(out)out.value=moneyJS(m);});let g=document.getElementById('purchaseGrand');if(g)g.textContent=moneyJS(t);}
+function addPurchaseLine(){let b=document.getElementById('purchaseLines');let s=b.querySelector('.purchaseLine');if(!s)return;let x=s.cloneNode(true);x.querySelectorAll('input').forEach(i=>{if(i.name==='quantite[]')i.value=1;else if(i.name==='prix[]')i.value='';else if(i.classList.contains('lineTotal'))i.value='0 FG';});let sel=x.querySelector('select');if(sel)sel.selectedIndex=0;b.appendChild(x);calcPurchase();}
+document.addEventListener('input',calcPurchase);calcPurchase();
+</script></body></html>
