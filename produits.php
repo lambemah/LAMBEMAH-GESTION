@@ -821,3 +821,2182 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     qexec(
                         $conn,
                         "UPDATE produits
+                         SET
+                            stock = stock + $q,
+                            prix_achat = " . (float)$p . "
+                         WHERE id=$pid"
+                    );
+                }
+
+                $conn->commit();
+
+                flash(
+                    'ok',
+                    'Facture ' . $ref .
+                    ' enregistrée avec succès.'
+                    . (
+                        $oldPaid > 0
+                        ? ' Paiement conservé : '
+                          . money($oldPaid) . '.'
+                        : ''
+                    )
+                );
+
+            } catch (Throwable $e) {
+
+                $conn->rollback();
+                throw $e;
+            }
+
+            header(
+                'Location: produits.php?facture='
+                . urlencode($ref)
+            );
+
+            exit;
+        }
+
+
+        /* =========================
+           RÈGLEMENT
+        ========================= */
+
+        if (isset($_POST['regler_facture'])) {
+
+            $ref = cleanText(
+                $_POST['ref'] ?? ''
+            );
+
+            $montant = (float)(
+                $_POST['montant'] ?? 0
+            );
+
+            $rows = invoiceRows(
+                $conn,
+                $ref
+            );
+
+            if (!$rows) {
+                throw new Exception(
+                    'Facture introuvable.'
+                );
+            }
+
+            $meta = parseMeta(
+                $rows[0]['description']
+            );
+
+            $total = 0;
+
+            foreach ($rows as $r) {
+                $total +=
+                    (float)$r['quantite']
+                    *
+                    (float)$r['prix'];
+            }
+
+            $oldPaid = (float)(
+                $meta['PAYE'] ?? 0
+            );
+
+            $newPaid =
+                $oldPaid + $montant;
+
+            if (
+                $montant <= 0 ||
+                $newPaid > $total + 0.01
+            ) {
+                throw new Exception(
+                    'Montant de règlement invalide.'
+                );
+            }
+
+            $rest = max(
+                0,
+                $total - $newPaid
+            );
+
+            $safe = $conn->real_escape_string(
+                $ref
+            );
+
+            $fourn = cleanText(
+                $meta['FOURNISSEUR'] ?? ''
+            );
+
+            $newDesc =
+                'FACTURE=' . $safe .
+                '|FOURNISSEUR=' .
+                $conn->real_escape_string($fourn) .
+                '|PAYE=' . $newPaid .
+                '|RESTE=' . $rest .
+                '|ACHAT';
+
+            qexec(
+                $conn,
+                "UPDATE mouvements
+                 SET description='"
+                . $conn->real_escape_string($newDesc)
+                . "'
+                 WHERE type='ENTREE'
+                 AND (
+                    description LIKE '%FACTURE=$safe|%'
+                    OR description LIKE '%Facture : $safe%'
+                 )"
+            );
+
+            flash(
+                'ok',
+                'Règlement enregistré.'
+            );
+
+            header(
+                'Location: produits.php?facture='
+                . urlencode($ref)
+            );
+
+            exit;
+        }
+
+
+        /* =========================
+           SUPPRESSION
+        ========================= */
+
+        if (isset($_POST['supprimer_facture'])) {
+
+            $ref = cleanText(
+                $_POST['ref'] ?? ''
+            );
+
+            $rows = invoiceRows(
+                $conn,
+                $ref
+            );
+
+            if (!$rows) {
+                throw new Exception(
+                    'Facture introuvable.'
+                );
+            }
+
+            $meta = parseMeta(
+                $rows[0]['description']
+            );
+
+            if (
+                (float)($meta['PAYE'] ?? 0) > 0
+            ) {
+                throw new Exception(
+                    'Impossible de supprimer une facture ayant un paiement.'
+                );
+            }
+
+            $conn->begin_transaction();
+
+            try {
+
+                foreach ($rows as $r) {
+
+                    qexec(
+                        $conn,
+                        "UPDATE produits
+                         SET stock = stock - "
+                        . (int)$r['quantite'] .
+                        " WHERE id="
+                        . (int)$r['produit_id']
+                    );
+                }
+
+                $safe = $conn->real_escape_string(
+                    $ref
+                );
+
+                qexec(
+                    $conn,
+                    "DELETE FROM mouvements
+                     WHERE type='ENTREE'
+                     AND (
+                        description LIKE '%FACTURE=$safe|%'
+                        OR description LIKE '%Facture : $safe%'
+                     )"
+                );
+
+                $conn->commit();
+
+            } catch (Throwable $e) {
+
+                $conn->rollback();
+                throw $e;
+            }
+
+            flash(
+                'ok',
+                'Facture supprimée.'
+            );
+
+            header(
+                'Location: produits.php'
+            );
+
+            exit;
+        }
+
+    } catch (Throwable $e) {
+
+        flash(
+            'err',
+            $e->getMessage()
+        );
+
+        header(
+            'Location: produits.php'
+        );
+
+        exit;
+    }
+}
+
+
+/* =========================================================
+   DONNÉES
+========================================================= */
+
+$flash = $_SESSION['flash'] ?? null;
+unset($_SESSION['flash']);
+
+$editRef = cleanText(
+    $_GET['modifier'] ?? ''
+);
+
+$selectedRef = cleanText(
+    $_GET['facture'] ?? ''
+);
+
+$editRows = $editRef
+    ? invoiceRows($conn, $editRef)
+    : [];
+
+$detailRows = $selectedRef
+    ? invoiceRows($conn, $selectedRef)
+    : [];
+
+
+/* =========================================================
+   FACTURES
+========================================================= */
+
+$factures = [];
+
+$q = $conn->query(
+    "SELECT m.*, p.nom
+     FROM mouvements m
+     LEFT JOIN produits p
+        ON p.id=m.produit_id
+     WHERE m.type='ENTREE'
+     ORDER BY m.id DESC"
+);
+
+while (
+    $q &&
+    ($r = $q->fetch_assoc())
+) {
+
+    $m = parseMeta(
+        $r['description']
+    );
+
+    $ref = $m['FACTURE']
+        ?? ('ANCIEN-' . $r['id']);
+
+    if (!isset($factures[$ref])) {
+
+        $factures[$ref] = [
+            'ref'         => $ref,
+            'fournisseur' => $m['FOURNISSEUR']
+                ?? 'Fournisseur non renseigné',
+            'date'        => $r['date_mouvement']
+                ?? '',
+            'total'       => 0,
+            'paye'        => (float)(
+                $m['PAYE'] ?? 0
+            ),
+            'articles'    => 0
+        ];
+    }
+
+    $factures[$ref]['total'] +=
+        (float)$r['quantite']
+        *
+        (float)$r['prix'];
+
+    $factures[$ref]['articles']++;
+
+    if (
+        empty($factures[$ref]['date'])
+    ) {
+        $factures[$ref]['date'] =
+            $r['date_mouvement'] ?? '';
+    }
+}
+
+
+/* =========================================================
+   PRODUITS / STOCK
+========================================================= */
+
+$products = [];
+
+$q = $conn->query(
+    "SELECT
+        id,
+        nom,
+        categorie,
+        prix_achat,
+        stock
+     FROM produits
+     ORDER BY nom ASC"
+);
+
+while (
+    $q &&
+    ($r = $q->fetch_assoc())
+) {
+    $products[] = $r;
+}
+
+$stockValue = 0;
+$totalStock = 0;
+
+foreach ($products as $p) {
+
+    $totalStock += (int)$p['stock'];
+
+    $stockValue +=
+        (int)$p['stock']
+        *
+        (float)$p['prix_achat'];
+}
+
+?>
+
+<!doctype html>
+<html lang="fr">
+
+<head>
+
+    <meta charset="utf-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width,initial-scale=1"
+    >
+
+    <title>
+        Achats & Fournisseurs — LAMBEMAH
+    </title>
+
+    <style>
+
+        :root {
+            --navy: #092746;
+            --navy2: #103b62;
+            --blue: #1478e5;
+            --blue2: #1b87ef;
+            --gold: #c59a3d;
+            --bg: #edf4fa;
+            --white: #ffffff;
+            --text: #162b40;
+            --muted: #6e8092;
+            --line: #dce6ef;
+            --green: #079669;
+            --red: #dc3f4b;
+            --shadow: 0 10px 35px rgba(9,39,70,.08);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            color: var(--text);
+            font-family: Arial, sans-serif;
+
+            background:
+                radial-gradient(
+                    circle at 85% 10%,
+                    rgba(20,120,229,.12),
+                    transparent 30%
+                ),
+                radial-gradient(
+                    circle at 10% 90%,
+                    rgba(197,154,61,.08),
+                    transparent 28%
+                ),
+                linear-gradient(
+                    135deg,
+                    #f7fbff,
+                    #e9f1f8
+                );
+        }
+
+        .layout {
+            min-height: 100vh;
+        }
+
+        /* =========================
+           MENU PC
+        ========================= */
+
+        .side {
+            position: fixed;
+            left: 0;
+            top: 0;
+            bottom: 0;
+
+            width: 235px;
+
+            padding: 25px 15px;
+
+            color: #fff;
+
+            background:
+                linear-gradient(
+                    180deg,
+                    #092746 0%,
+                    #0c3152 100%
+                );
+
+            box-shadow:
+                8px 0 30px rgba(9,39,70,.10);
+        }
+
+        .side .brand {
+            font-size: 22px;
+            font-weight: 900;
+            letter-spacing: .3px;
+        }
+
+        .side .sub {
+            color: #b9d2e8;
+            font-size: 10px;
+            margin-top: 5px;
+        }
+
+        .nav {
+            margin-top: 32px;
+        }
+
+        .nav a {
+            display: block;
+
+            color: #eaf4ff;
+            text-decoration: none;
+
+            padding: 10px 12px;
+            margin: 5px 0;
+
+            border-radius: 10px;
+
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .nav a:hover,
+        .nav a.active {
+            background: var(--blue);
+            color: #fff;
+        }
+
+        /* =========================
+           CONTENU
+        ========================= */
+
+        .main {
+            margin-left: 235px;
+
+            width: calc(100% - 235px);
+
+            padding: 24px;
+
+            max-width: 1550px;
+        }
+
+        .mobile {
+            display: none;
+        }
+
+        .head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+
+            gap: 15px;
+        }
+
+        .head h1 {
+            margin: 0;
+
+            color: var(--navy);
+
+            font-size: 22px;
+            font-weight: 900;
+        }
+
+        .head p {
+            margin: 5px 0 0;
+
+            color: var(--muted);
+
+            font-size: 12px;
+        }
+
+        /* =========================
+           BOUTONS
+        ========================= */
+
+        .btn {
+            border: 0;
+
+            border-radius: 9px;
+
+            padding: 9px 13px;
+
+            background:
+                linear-gradient(
+                    135deg,
+                    var(--blue),
+                    var(--blue2)
+                );
+
+            color: #fff;
+
+            font-weight: 800;
+            font-size: 12px;
+
+            cursor: pointer;
+
+            text-decoration: none;
+
+            display: inline-block;
+
+            box-shadow:
+                0 5px 15px rgba(20,120,229,.15);
+        }
+
+        .btn:hover {
+            transform: translateY(-1px);
+        }
+
+        .btn.secondary {
+            background: #e7f0f8;
+            color: var(--navy);
+            box-shadow: none;
+        }
+
+        .btn.green {
+            background: var(--green);
+        }
+
+        .btn.danger {
+            background: #fff0f1;
+            color: #b52634;
+            box-shadow: none;
+        }
+
+        /* =========================
+           MESSAGE
+        ========================= */
+
+        .flash {
+            margin-top: 13px;
+
+            padding: 10px 12px;
+
+            border-radius: 9px;
+
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .flash.ok {
+            background: #e5f8f1;
+            color: #087454;
+        }
+
+        .flash.err {
+            background: #fff0f1;
+            color: #a52130;
+        }
+
+        /* =========================
+           STATS
+        ========================= */
+
+        .stats {
+            display: grid;
+
+            grid-template-columns:
+                repeat(3, 1fr);
+
+            gap: 12px;
+
+            margin-top: 15px;
+        }
+
+        .stat {
+            background: rgba(255,255,255,.95);
+
+            border: 1px solid var(--line);
+
+            border-radius: 13px;
+
+            padding: 13px 15px;
+
+            color: var(--muted);
+
+            box-shadow: var(--shadow);
+
+            font-size: 11px;
+        }
+
+        .stat b {
+            display: block;
+
+            margin-top: 5px;
+
+            color: var(--navy);
+
+            font-size: 19px;
+        }
+
+        /* =========================
+           CARTES
+        ========================= */
+
+        .card {
+            margin-top: 15px;
+
+            background: rgba(255,255,255,.96);
+
+            border: 1px solid var(--line);
+
+            border-radius: 14px;
+
+            padding: 16px;
+
+            box-shadow: var(--shadow);
+        }
+
+        .card h2 {
+            margin: 0 0 12px;
+
+            color: var(--navy);
+
+            font-size: 16px;
+        }
+
+        .card h3 {
+            color: var(--navy);
+
+            font-size: 13px;
+
+            margin: 16px 0 9px;
+        }
+
+        .card p {
+            color: var(--muted);
+
+            font-size: 11px;
+
+            margin: 4px 0 10px;
+        }
+
+        /* =========================
+           FORMULAIRES
+        ========================= */
+
+        .formgrid {
+            display: grid;
+
+            grid-template-columns:
+                1.4fr 1fr;
+
+            gap: 10px;
+        }
+
+        .field label {
+            display: block;
+
+            margin-bottom: 4px;
+
+            font-size: 11px;
+
+            font-weight: 800;
+
+            color: var(--navy);
+        }
+
+        .field input,
+        .field select {
+            width: 100%;
+
+            padding: 9px 10px;
+
+            border:
+                1px solid #cfdce8;
+
+            border-radius: 8px;
+
+            background: #fff;
+
+            color: var(--text);
+
+            font-size: 12px;
+
+            outline: none;
+        }
+
+        .field input:focus,
+        .field select:focus {
+            border-color: var(--blue);
+
+            box-shadow:
+                0 0 0 3px
+                rgba(20,120,229,.10);
+        }
+
+        .line {
+            display: grid;
+
+            grid-template-columns:
+                2.2fr .8fr 1fr 1fr auto;
+
+            gap: 7px;
+
+            align-items: end;
+
+            margin-bottom: 8px;
+        }
+
+        .totalbox {
+            text-align: right;
+
+            margin-top: 12px;
+
+            color: var(--navy);
+
+            font-size: 16px;
+
+            font-weight: 900;
+        }
+
+        /* =========================
+           TABLEAUX
+        ========================= */
+
+        .tablewrap {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        table {
+            width: 100%;
+
+            border-collapse: collapse;
+
+            min-width: 650px;
+        }
+
+        th,
+        td {
+            padding: 9px 8px;
+
+            border-bottom:
+                1px solid var(--line);
+
+            text-align: left;
+
+            font-size: 11px;
+        }
+
+        th {
+            background: #f3f7fb;
+
+            color: #63778b;
+
+            font-size: 9px;
+
+            text-transform: uppercase;
+
+            letter-spacing: .3px;
+        }
+
+        td {
+            color: #31465b;
+        }
+
+        td b {
+            color: var(--navy);
+        }
+
+        .money {
+            color: var(--navy);
+
+            font-weight: 800;
+        }
+
+        /* =========================
+           ACTIONS
+        ========================= */
+
+        .actions {
+            display: flex;
+
+            flex-wrap: wrap;
+
+            gap: 6px;
+
+            margin-top: 7px;
+        }
+
+        /* =========================
+           DÉTAIL FACTURE
+        ========================= */
+
+        .detailhead {
+            display: flex;
+
+            justify-content: space-between;
+
+            align-items: flex-start;
+
+            gap: 15px;
+        }
+
+        .paybox {
+            margin-top: 13px;
+
+            padding: 13px;
+
+            border:
+                1px solid #d5e5f3;
+
+            border-radius: 11px;
+
+            background: #f1f7fc;
+        }
+
+        .paygrid {
+            display: grid;
+
+            grid-template-columns:
+                repeat(3,1fr);
+
+            gap: 10px;
+        }
+
+        .paygrid small {
+            color: #708398;
+
+            font-size: 10px;
+        }
+
+        .paygrid b {
+            display: inline-block;
+
+            margin-top: 3px;
+
+            color: var(--navy);
+
+            font-size: 15px;
+        }
+
+        /* =========================
+           MOBILE
+        ========================= */
+
+        @media(max-width:850px) {
+
+            .side {
+                display: none;
+            }
+
+            .main {
+                margin: 0;
+
+                width: 100%;
+
+                padding:
+                    12px 10px 25px;
+            }
+
+            .mobile {
+                display: block;
+
+                margin-bottom: 8px;
+            }
+
+            .mobile .btn {
+                padding: 7px 10px;
+
+                font-size: 10px;
+            }
+
+            .head {
+                display: block;
+            }
+
+            .head h1 {
+                font-size: 18px;
+            }
+
+            .head p {
+                font-size: 10px;
+            }
+
+            .head > .btn {
+                margin-top: 8px;
+
+                padding: 8px 10px;
+
+                font-size: 10px;
+            }
+
+            .stats {
+                grid-template-columns:
+                    repeat(3,1fr);
+
+                gap: 7px;
+
+                margin-top: 10px;
+            }
+
+            .stat {
+                padding: 9px 7px;
+
+                border-radius: 10px;
+
+                font-size: 9px;
+
+                text-align: center;
+            }
+
+            .stat b {
+                font-size: 14px;
+
+                margin-top: 3px;
+            }
+
+            .card {
+                padding: 11px;
+
+                margin-top: 10px;
+
+                border-radius: 11px;
+            }
+
+            .card h2 {
+                font-size: 14px;
+
+                margin-bottom: 8px;
+            }
+
+            .card h3 {
+                font-size: 12px;
+
+                margin: 11px 0 7px;
+            }
+
+            .card p {
+                font-size: 9px;
+            }
+
+            .formgrid {
+                grid-template-columns: 1fr;
+            }
+
+            .line {
+                grid-template-columns:
+                    1fr 1fr;
+            }
+
+            .line .wide {
+                grid-column: 1 / -1;
+            }
+
+            .line .amount {
+                grid-column: 1 / -1;
+            }
+
+            .line > .btn {
+                font-size: 10px;
+
+                padding: 8px;
+            }
+
+            .field label {
+                font-size: 9px;
+            }
+
+            .field input,
+            .field select {
+                padding: 8px;
+
+                font-size: 10px;
+
+                border-radius: 7px;
+            }
+
+            .btn {
+                padding: 7px 9px;
+
+                font-size: 10px;
+
+                border-radius: 8px;
+            }
+
+            table {
+                min-width: 600px;
+            }
+
+            th,
+            td {
+                padding: 7px 6px;
+
+                font-size: 9px;
+            }
+
+            th {
+                font-size: 8px;
+            }
+
+            .detailhead {
+                display: block;
+            }
+
+            .paygrid {
+                grid-template-columns:
+                    repeat(3,1fr);
+
+                gap: 6px;
+            }
+
+            .paygrid small {
+                font-size: 8px;
+            }
+
+            .paygrid b {
+                font-size: 12px;
+            }
+
+            .totalbox {
+                font-size: 14px;
+            }
+        }
+
+    </style>
+
+</head>
+
+<body>
+
+<div class="layout">
+
+    <!-- MENU PC -->
+
+    <aside class="side">
+
+        <div class="brand">
+            LAMBEMAH
+        </div>
+
+        <div class="sub">
+            GESTION • PRESTATION
+        </div>
+
+        <nav class="nav">
+
+            <a href="index.php">
+                🏠 Accueil
+            </a>
+
+            <a
+                class="active"
+                href="produits.php"
+            >
+                📦 Achats / Fournisseurs
+            </a>
+
+            <a href="ventes.php">
+                💰 Ventes / Clients
+            </a>
+
+            <a href="prestations.php">
+                🖨️ Prestations
+            </a>
+
+            <a href="recettes.php">
+                💵 Recettes
+            </a>
+
+            <a href="depenses.php">
+                💸 Dépenses
+            </a>
+
+            <a href="statistiques.php">
+                📊 Statistiques
+            </a>
+
+            <a href="utilisateurs.php">
+                👥 Équipe
+            </a>
+
+            <a href="index.php?logout=1">
+                🚪 Déconnexion
+            </a>
+
+        </nav>
+
+    </aside>
+
+
+    <!-- CONTENU -->
+
+    <main class="main">
+
+        <div class="mobile">
+            <a
+                class="btn secondary"
+                href="index.php"
+            >
+                ☰ Menu
+            </a>
+        </div>
+
+
+        <div class="head">
+
+            <div>
+
+                <h1>
+                    📦 Achats & Fournisseurs
+                </h1>
+
+                <p>
+                    Factures, paiements et stock.
+                </p>
+
+            </div>
+
+            <a
+                class="btn"
+                href="?nouvel_achat=1"
+            >
+                ＋ Nouvelle facture
+            </a>
+
+        </div>
+
+
+        <?php if ($flash): ?>
+
+            <div class="flash <?=h($flash['type'])?>">
+                <?=h($flash['msg'])?>
+            </div>
+
+        <?php endif; ?>
+
+
+        <!-- STATS -->
+
+        <div class="stats">
+
+            <div class="stat">
+                Factures
+                <b><?=count($factures)?></b>
+            </div>
+
+            <div class="stat">
+                Stock
+                <b>
+                    <?=number_format(
+                        $totalStock,
+                        0,
+                        ',',
+                        ' '
+                    )?>
+                </b>
+            </div>
+
+            <div class="stat">
+                Valeur stock
+                <b>
+                    <?=money($stockValue)?>
+                </b>
+            </div>
+
+        </div>
+
+
+        <!-- NOUVEL ACHAT / MODIFICATION -->
+
+        <?php if (
+            isset($_GET['nouvel_achat'])
+            || $editRows
+        ): ?>
+
+            <div class="card">
+
+                <h2>
+                    <?=$editRows
+                        ? '✏️ Modifier ' . h($editRef)
+                        : '＋ Nouvelle facture d’achat'
+                    ?>
+                </h2>
+
+                <form method="post">
+
+                    <input
+                        type="hidden"
+                        name="save_achat"
+                        value="1"
+                    >
+
+                    <input
+                        type="hidden"
+                        name="edit_ref"
+                        value="<?=h($editRef)?>"
+                    >
+
+
+                    <div class="formgrid">
+
+                        <div class="field">
+
+                            <label>
+                                Fournisseur
+                            </label>
+
+                            <input
+                                required
+                                name="fournisseur"
+                                value="<?=h(
+                                    $editRows
+                                    ? (
+                                        parseMeta(
+                                            $editRows[0]['description']
+                                        )['FOURNISSEUR']
+                                        ?? ''
+                                    )
+                                    : ''
+                                )?>"
+                                placeholder="Nom du fournisseur"
+                            >
+
+                        </div>
+
+
+                        <div class="field">
+
+                            <label>
+                                Référence
+                            </label>
+
+                            <input
+                                readonly
+                                value="<?=h(
+                                    $editRef
+                                    ?: 'Automatique'
+                                )?>"
+                            >
+
+                        </div>
+
+                    </div>
+
+
+                    <h3>
+                        Articles
+                    </h3>
+
+
+                    <div id="lines">
+
+                        <?php
+
+                        $base = $editRows ?: [
+                            [
+                                'produit_id' => '',
+                                'quantite'   => 1,
+                                'prix'       => ''
+                            ]
+                        ];
+
+                        foreach ($base as $r):
+
+                        ?>
+
+                            <div class="line">
+
+                                <div class="field wide">
+
+                                    <label>
+                                        Article
+                                    </label>
+
+                                    <select
+                                        name="produit_id[]"
+                                        required
+                                    >
+
+                                        <option value="">
+                                            Choisir
+                                        </option>
+
+                                        <?php foreach ($products as $p): ?>
+
+                                            <option
+                                                value="<?=$p['id']?>"
+                                                <?=(
+                                                    (int)$p['id']
+                                                    ===
+                                                    (int)(
+                                                        $r['produit_id']
+                                                        ?? 0
+                                                    )
+                                                )
+                                                    ? 'selected'
+                                                    : ''
+                                                ?>
+                                            >
+
+                                                <?=h($p['nom'])?>
+
+                                                —
+                                                stock
+                                                <?=$p['stock']?>
+
+                                            </option>
+
+                                        <?php endforeach; ?>
+
+                                    </select>
+
+                                </div>
+
+
+                                <div class="field">
+
+                                    <label>
+                                        Quantité
+                                    </label>
+
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        name="quantite[]"
+                                        value="<?=h(
+                                            $r['quantite']
+                                            ?? 1
+                                        )?>"
+                                        required
+                                    >
+
+                                </div>
+
+
+                                <div class="field">
+
+                                    <label>
+                                        Prix achat
+                                    </label>
+
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        name="prix[]"
+                                        value="<?=h(
+                                            $r['prix']
+                                            ?? ''
+                                        )?>"
+                                        required
+                                    >
+
+                                </div>
+
+
+                                <div class="field amount">
+
+                                    <label>
+                                        Montant
+                                    </label>
+
+                                    <input
+                                        readonly
+                                        class="lineTotal"
+                                        value="0 FG"
+                                    >
+
+                                </div>
+
+
+                                <button
+                                    type="button"
+                                    class="btn danger"
+                                    onclick="
+                                        this.parentElement.remove();
+                                        calc();
+                                    "
+                                >
+                                    ×
+                                </button>
+
+                            </div>
+
+                        <?php endforeach; ?>
+
+                    </div>
+
+
+                    <button
+                        type="button"
+                        class="btn secondary"
+                        onclick="addLine()"
+                    >
+                        ＋ Ajouter une ligne
+                    </button>
+
+
+                    <div class="totalbox">
+
+                        Total :
+                        <span id="grand">
+                            0 FG
+                        </span>
+
+                    </div>
+
+
+                    <br>
+
+
+                    <button
+                        class="btn green"
+                        type="submit"
+                    >
+                        💾 Enregistrer
+                    </button>
+
+
+                    <a
+                        class="btn secondary"
+                        href="produits.php"
+                    >
+                        Annuler
+                    </a>
+
+                </form>
+
+            </div>
+
+        <?php endif; ?>
+
+
+        <!-- DÉTAIL FACTURE -->
+
+        <?php if ($detailRows): ?>
+
+            <?php
+
+            $meta = parseMeta(
+                $detailRows[0]['description']
+            );
+
+            $total = 0;
+
+            foreach ($detailRows as $r) {
+                $total +=
+                    (float)$r['quantite']
+                    *
+                    (float)$r['prix'];
+            }
+
+            $paid = (float)(
+                $meta['PAYE'] ?? 0
+            );
+
+            $rest = max(
+                0,
+                $total - $paid
+            );
+
+            ?>
+
+            <div class="card">
+
+                <div class="detailhead">
+
+                    <div>
+
+                        <h2>
+                            📄 Facture
+                            <?=h($selectedRef)?>
+                        </h2>
+
+                        <p>
+                            <b>Fournisseur :</b>
+                            <?=h(
+                                $meta['FOURNISSEUR']
+                                ?? '—'
+                            )?>
+                        </p>
+
+                    </div>
+
+
+                    <div class="actions">
+
+                        <a
+                            class="btn secondary"
+                            href="?imprimer=<?=urlencode(
+                                $selectedRef
+                            )?>"
+                            target="_blank"
+                        >
+                            🖨️ Imprimer
+                        </a>
+
+
+                        <?php if ($rest > 0): ?>
+
+                            <a
+                                class="btn secondary"
+                                href="?modifier=<?=urlencode(
+                                    $selectedRef
+                                )?>"
+                            >
+                                ✏️ Modifier
+                            </a>
+
+                        <?php endif; ?>
+
+
+                        <?php if ($paid <= 0): ?>
+
+                            <form
+                                method="post"
+                                onsubmit="
+                                    return confirm(
+                                        'Supprimer toute cette facture ?'
+                                    );
+                                "
+                            >
+
+                                <input
+                                    type="hidden"
+                                    name="supprimer_facture"
+                                    value="1"
+                                >
+
+                                <input
+                                    type="hidden"
+                                    name="ref"
+                                    value="<?=h($selectedRef)?>"
+                                >
+
+                                <button
+                                    class="btn danger"
+                                    type="submit"
+                                >
+                                    🗑️ Supprimer
+                                </button>
+
+                            </form>
+
+                        <?php endif; ?>
+
+                    </div>
+
+                </div>
+
+
+                <div class="tablewrap">
+
+                    <table>
+
+                        <thead>
+
+                            <tr>
+
+                                <th>
+                                    Désignation
+                                </th>
+
+                                <th>
+                                    Qté
+                                </th>
+
+                                <th>
+                                    Prix achat
+                                </th>
+
+                                <th>
+                                    Montant
+                                </th>
+
+                            </tr>
+
+                        </thead>
+
+
+                        <tbody>
+
+                            <?php foreach ($detailRows as $r): ?>
+
+                                <tr>
+
+                                    <td>
+                                        <?=h(
+                                            $r['nom']
+                                            ?? 'Article'
+                                        )?>
+                                    </td>
+
+                                    <td>
+                                        <?=h(
+                                            $r['quantite']
+                                        )?>
+                                    </td>
+
+                                    <td>
+                                        <?=money(
+                                            $r['prix']
+                                        )?>
+                                    </td>
+
+                                    <td class="money">
+                                        <?=money(
+                                            (float)$r['quantite']
+                                            *
+                                            (float)$r['prix']
+                                        )?>
+                                    </td>
+
+                                </tr>
+
+                            <?php endforeach; ?>
+
+                        </tbody>
+
+                    </table>
+
+                </div>
+
+
+                <!-- PAIEMENT -->
+
+                <div class="paybox">
+
+                    <div class="paygrid">
+
+                        <div>
+
+                            <small>
+                                Total
+                            </small>
+
+                            <br>
+
+                            <b>
+                                <?=money($total)?>
+                            </b>
+
+                        </div>
+
+
+                        <div>
+
+                            <small>
+                                Payé
+                            </small>
+
+                            <br>
+
+                            <b>
+                                <?=money($paid)?>
+                            </b>
+
+                        </div>
+
+
+                        <div>
+
+                            <small>
+                                Reste
+                            </small>
+
+                            <br>
+
+                            <b>
+                                <?=money($rest)?>
+                            </b>
+
+                        </div>
+
+                    </div>
+
+
+                    <?php if ($rest > 0): ?>
+
+                        <form
+                            method="post"
+                            class="formgrid"
+                            style="margin-top:12px"
+                        >
+
+                            <input
+                                type="hidden"
+                                name="regler_facture"
+                                value="1"
+                            >
+
+                            <input
+                                type="hidden"
+                                name="ref"
+                                value="<?=h($selectedRef)?>"
+                            >
+
+
+                            <div class="field">
+
+                                <label>
+                                    Montant à régler
+                                </label>
+
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="<?=h($rest)?>"
+                                    step="1"
+                                    name="montant"
+                                    required
+                                >
+
+                            </div>
+
+
+                            <div>
+
+                                <button
+                                    class="btn green"
+                                    type="submit"
+                                >
+                                    💰 Régler la facture
+                                </button>
+
+                            </div>
+
+                        </form>
+
+                    <?php endif; ?>
+
+                </div>
+
+            </div>
+
+        <?php endif; ?>
+
+
+        <!-- LISTE FACTURES -->
+
+        <div class="card">
+
+            <h2>
+                📋 Fournisseurs & factures
+            </h2>
+
+            <p>
+                Ouvrez une facture pour voir ses lignes
+                et gérer son règlement.
+            </p>
+
+
+            <div class="tablewrap">
+
+                <table>
+
+                    <thead>
+
+                        <tr>
+
+                            <th>
+                                Fournisseur
+                            </th>
+
+                            <th>
+                                Facture
+                            </th>
+
+                            <th>
+                                Date
+                            </th>
+
+                            <th>
+                                Articles
+                            </th>
+
+                            <th>
+                                Total
+                            </th>
+
+                            <th>
+                                Payé
+                            </th>
+
+                            <th>
+                                Reste
+                            </th>
+
+                            <th>
+                            </th>
+
+                        </tr>
+
+                    </thead>
+
+
+                    <tbody>
+
+                        <?php foreach ($factures as $f): ?>
+
+                            <?php
+                            $rest =
+                                max(
+                                    0,
+                                    $f['total']
+                                    -
+                                    $f['paye']
+                                );
+                            ?>
+
+                            <tr>
+
+                                <td>
+                                    <b>
+                                        <?=h(
+                                            $f['fournisseur']
+                                        )?>
+                                    </b>
+                                </td>
+
+                                <td>
+                                    <?=h(
+                                        $f['ref']
+                                    )?>
+                                </td>
+
+                                <td>
+                                    <?=h(
+                                        $f['date']
+                                        ? date(
+                                            'd/m/Y',
+                                            strtotime(
+                                                $f['date']
+                                            )
+                                        )
+                                        : '—'
+                                    )?>
+                                </td>
+
+                                <td>
+                                    <?=h(
+                                        $f['articles']
+                                    )?>
+                                </td>
+
+                                <td class="money">
+                                    <?=money(
+                                        $f['total']
+                                    )?>
+                                </td>
+
+                                <td>
+                                    <?=money(
+                                        $f['paye']
+                                    )?>
+                                </td>
+
+                                <td>
+                                    <?=money(
+                                        $rest
+                                    )?>
+                                </td>
+
+                                <td>
+
+                                    <a
+                                        class="btn"
+                                        href="?facture=<?=urlencode(
+                                            $f['ref']
+                                        )?>"
+                                    >
+                                        Ouvrir
+                                    </a>
+
+                                </td>
+
+                            </tr>
+
+                        <?php endforeach; ?>
+
+
+                        <?php if (!$factures): ?>
+
+                            <tr>
+
+                                <td colspan="8">
+                                    Aucune facture
+                                    d'achat pour le moment.
+                                </td>
+
+                            </tr>
+
+                        <?php endif; ?>
+
+                    </tbody>
+
+                </table>
+
+            </div>
+
+        </div>
+
+
+        <!-- STOCK -->
+
+        <div class="card">
+
+            <h2>
+                📦 Stock actuel
+            </h2>
+
+
+            <div class="tablewrap">
+
+                <table>
+
+                    <thead>
+
+                        <tr>
+
+                            <th>
+                                Article
+                            </th>
+
+                            <th>
+                                Catégorie
+                            </th>
+
+                            <th>
+                                Prix achat
+                            </th>
+
+                            <th>
+                                Stock
+                            </th>
+
+                        </tr>
+
+                    </thead>
+
+
+                    <tbody>
+
+                        <?php foreach ($products as $p): ?>
+
+                            <tr>
+
+                                <td>
+                                    <?=h(
+                                        $p['nom']
+                                    )?>
+                                </td>
+
+                                <td>
+                                    <?=h(
+                                        $p['categorie']
+                                    )?>
+                                </td>
+
+                                <td>
+                                    <?=money(
+                                        $p['prix_achat']
+                                    )?>
+                                </td>
+
+                                <td>
+                                    <b>
+                                        <?=h(
+                                            $p['stock']
+                                        )?>
+                                    </b>
+                                </td>
+
+                            </tr>
+
+                        <?php endforeach; ?>
+
+                    </tbody>
+
+                </table>
+
+            </div>
+
+        </div>
+
+    </main>
+
+</div>
+
+
+<script>
+
+function fmt(n) {
+
+    return new Intl.NumberFormat(
+        'fr-FR'
+    ).format(
+        Math.round(n)
+    ) + ' FG';
+}
+
+
+function calc() {
+
+    let total = 0;
+
+    document
+        .querySelectorAll(
+            '#lines .line'
+        )
+        .forEach(line => {
+
+            const q =
+                parseFloat(
+                    line.querySelector(
+                        '[name="quantite[]"]'
+                    )?.value || 0
+                );
+
+            const p =
+                parseFloat(
+                    line.querySelector(
+                        '[name="prix[]"]'
+                    )?.value || 0
+                );
+
+            const montant =
+                q * p;
+
+            total += montant;
+
+            const result =
+                line.querySelector(
+                    '.lineTotal'
+                );
+
+            if (result) {
+                result.value =
+                    fmt(montant);
+            }
+        });
+
+
+    const grand =
+        document.getElementById(
+            'grand'
+        );
+
+    if (grand) {
+        grand.textContent =
+            fmt(total);
+    }
+}
+
+
+function addLine() {
+
+    const box =
+        document.getElementById(
+            'lines'
+        );
+
+    const first =
+        box.querySelector(
+            '.line'
+        );
+
+    if (!first) {
+        return;
+    }
+
+    const clone =
+        first.cloneNode(true);
+
+
+    clone
+        .querySelectorAll('input')
+        .forEach(input => {
+
+            if (
+                input.name ===
+                'quantite[]'
+            ) {
+                input.value = 1;
+
+            } else if (
+                input.name ===
+                'prix[]'
+            ) {
+                input.value = '';
+
+            } else if (
+                input.classList.contains(
+                    'lineTotal'
+                )
+            ) {
+                input.value = '0 FG';
+            }
+        });
+
+
+    const select =
+        clone.querySelector(
+            'select'
+        );
+
+    if (select) {
+        select.selectedIndex = 0;
+    }
+
+
+    box.appendChild(clone);
+
+    calc();
+}
+
+
+document.addEventListener(
+    'input',
+    calc
+);
+
+calc();
+
+</script>
+
+</body>
+</html>
